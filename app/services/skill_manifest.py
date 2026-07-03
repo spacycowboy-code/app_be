@@ -11,11 +11,20 @@ from app.models.skill import RpAiSkill
 
 _FM_NAME = re.compile(r"(?im)^\s*name\s*:")
 _FM_DESC = re.compile(r"(?im)^\s*description\s*:")
+_FM_NAME_VAL = re.compile(r"(?im)^\s*name\s*:\s*(.+?)\s*$")
+_FM_DESC_VAL = re.compile(r"(?im)^\s*description\s*:\s*(.+?)\s*$")
 
 
 def has_name_and_description(text: str) -> bool:
     """True if the markdown contains both ``name:`` and ``description:``."""
     return bool(text) and bool(_FM_NAME.search(text)) and bool(_FM_DESC.search(text))
+
+
+def parse_frontmatter(text: str) -> tuple[str | None, str | None]:
+    """Extract the name and description values from the markdown."""
+    n = _FM_NAME_VAL.search(text or "")
+    d = _FM_DESC_VAL.search(text or "")
+    return (n.group(1).strip() if n else None, d.group(1).strip() if d else None)
 
 
 def with_frontmatter(body: str, name: str, description: str | None) -> str:

@@ -22,7 +22,12 @@ from app.schemas.skill import (
     SkillSummary,
     SkillUpdate,
 )
-from app.services.skill_manifest import build_manifest, render_skill_md
+from app.services.skill_manifest import (
+    build_manifest,
+    has_name_and_description,
+    parse_frontmatter,
+    render_skill_md,
+)
 from app.services.skill_storage import sanitize_segment, skill_storage
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
@@ -137,11 +142,31 @@ def update_skill(
     skill = _get_skill_or_404(db, skill_id)
     scalar_data = payload.model_dump(
         exclude_unset=True,
-        exclude={"cases", "sub_skills", "input_params", "editor_eid"},
+        exclude={"cases", "sub_skills", "input_params", "editor_eid", "skill_md"},
     )
     for key, val in scalar_data.items():
         setattr(skill, key, val)
     _apply_children(skill, payload)
+
+    # If the raw SKILL.md was edited directly, it is the source of truth:
+    # write it verbatim and sync name/description from its frontmatter.
+    if payload.skill_md is not None:
+        content = payload.skill_md
+        if not has_name_and_description(content):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "SKILL.md 必须包含 name: 和 description: 两个字段",
+            )
+        fm_name, fm_desc = parse_frontmatter(content)
+        if fm_name:
+            skill.name = fm_name
+        if fm_desc is not None:
+            skill.description = fm_desc
+        skill.instructions = content
+        md_content = content
+    else:
+        md_content = render_skill_md(skill)
+
     db.flush()  # make edited fields/children visible for manifest building
 
     # Persist the edit into the git-managed skill repo: refresh the folder
@@ -154,7 +179,7 @@ def update_skill(
         name=skill.name,
         category_slug=skill.category_id or "uncategorized",
         manifest=build_manifest(skill, owner_eid, slug),
-        instructions=render_skill_md(skill),
+        instructions=md_content,
         artifact_bytes=None,
         artifact_filename=None,
         current_version=skill.version,

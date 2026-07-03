@@ -93,6 +93,9 @@ class SkillUpdate(CamelModel):
     input_params: list[InputParamSchema] | None = None
     # EID of the user performing the edit (recorded in the version history).
     editor_eid: str | None = None
+    # Full SKILL.md content — when provided, it is written verbatim as the
+    # skill's definition file (name/description are synced from its frontmatter).
+    skill_md: str | None = None
 
 
 class SkillRead(SkillBase):
