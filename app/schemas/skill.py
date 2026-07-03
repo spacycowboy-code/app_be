@@ -91,6 +91,8 @@ class SkillUpdate(CamelModel):
     cases: list[SkillCaseSchema] | None = None
     sub_skills: list[SubSkillSchema] | None = None
     input_params: list[InputParamSchema] | None = None
+    # EID of the user performing the edit (recorded in the version history).
+    editor_eid: str | None = None
 
 
 class SkillRead(SkillBase):

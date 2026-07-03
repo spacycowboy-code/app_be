@@ -129,6 +129,7 @@ class SkillStorage:
         artifact_filename: str | None,
         current_version: str | None,
         existing_storage_path: str | None,
+        action: str = "upload",
     ) -> StoreResult:
         """Write/refresh a skill folder, bump version, commit, tag and push."""
         category_slug = sanitize_segment(category_slug, "uncategorized")
@@ -168,7 +169,7 @@ class SkillStorage:
 
         # Commit.
         self._git("add", "--", str(rel))
-        commit_msg = f"upload({category_slug}): {name} v{version}"
+        commit_msg = f"{action}({category_slug}): {name} v{version}"
         try:
             self._git("commit", "-m", commit_msg)
         except subprocess.CalledProcessError as exc:

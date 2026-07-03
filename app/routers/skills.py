@@ -13,12 +13,15 @@ from app.models.skill import (
     RpAiSkillCase,
     RpAiSubSkill,
 )
+from app.models.version import RpAiSkillVersion
 from app.schemas.skill import (
     SkillCreate,
     SkillRead,
     SkillSummary,
     SkillUpdate,
 )
+from app.services.skill_manifest import build_manifest, render_skill_md
+from app.services.skill_storage import sanitize_segment, skill_storage
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -114,11 +117,46 @@ def update_skill(
 ) -> RpAiSkill:
     skill = _get_skill_or_404(db, skill_id)
     scalar_data = payload.model_dump(
-        exclude_unset=True, exclude={"cases", "sub_skills", "input_params"}
+        exclude_unset=True,
+        exclude={"cases", "sub_skills", "input_params", "editor_eid"},
     )
     for key, val in scalar_data.items():
         setattr(skill, key, val)
     _apply_children(skill, payload)
+    db.flush()  # make edited fields/children visible for manifest building
+
+    # Persist the edit into the git-managed skill repo: refresh the folder
+    # files, bump the version, commit, tag and push (same flow as upload).
+    owner_eid = skill.uploader_eid or "ericsson"
+    slug = sanitize_segment(skill.category_id or "uncategorized", "uncategorized")
+    result = skill_storage.store(
+        skill_id=skill.id,
+        eid=owner_eid,
+        name=skill.name,
+        category_slug=skill.category_id or "uncategorized",
+        manifest=build_manifest(skill, owner_eid, slug),
+        instructions=render_skill_md(skill),
+        artifact_bytes=None,
+        artifact_filename=None,
+        current_version=skill.version,
+        existing_storage_path=skill.storage_path,
+        action="edit",
+    )
+    skill.version = result.version
+    skill.storage_path = result.storage_path
+    skill.repo_commit = result.commit_sha
+
+    db.add(
+        RpAiSkillVersion(
+            skill_id=skill.id,
+            version=result.version,
+            commit_sha=result.commit_sha,
+            tag=result.tag,
+            uploader_eid=payload.editor_eid or owner_eid,
+            notes="Edited via portal",
+        )
+    )
+
     db.commit()
     db.refresh(skill)
     return skill
