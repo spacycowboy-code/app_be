@@ -34,6 +34,15 @@ router = APIRouter(prefix="/api/skills", tags=["upload"])
 settings = get_settings()
 
 
+def _category_image(category_id: str) -> str:
+    """Frontend image asset for a category group."""
+    # 'public' has no dedicated image; reuse the tavily artwork.
+    slug = category_id or "product-system"
+    if slug == "public":
+        return "skill-images/tavily.jpg"
+    return f"skill-images/{slug}.jpg"
+
+
 def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return slug or f"skill-{uuid.uuid4().hex[:8]}"
@@ -153,6 +162,8 @@ async def upload_skill(
         skill.description = description
     skill.category = category_label
     skill.category_id = category_id
+    # Auto-assign the image for this skill's group.
+    skill.image = _category_image(category_id)
     if parsed_tags:
         skill.tags = parsed_tags
     if definition is not None:

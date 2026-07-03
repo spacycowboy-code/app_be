@@ -105,6 +105,7 @@ class SkillRead(SkillBase):
     input_params: list[InputParamSchema] = Field(default_factory=list)
     storage_path: str | None = None
     repo_commit: str | None = None
+    favorite_count: int = 0
     created_at: datetime
     updated_at: datetime
 

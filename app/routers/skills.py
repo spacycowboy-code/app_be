@@ -4,11 +4,12 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.models.favorite import RpAiUserFavorite
 from app.models.skill import (
     RpAiInputParam,
     RpAiSkill,
@@ -109,7 +110,13 @@ def list_skills(
 
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
-    return _get_skill_or_404(db, skill_id)
+    skill = _get_skill_or_404(db, skill_id)
+    skill.favorite_count = db.scalar(
+        select(func.count())
+        .select_from(RpAiUserFavorite)
+        .where(RpAiUserFavorite.skill_id == skill_id)
+    ) or 0
+    return skill
 
 
 @router.get("/{skill_id}/markdown")
