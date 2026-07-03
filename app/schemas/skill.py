@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.schemas.common import CamelModel
 
@@ -54,6 +54,11 @@ class SkillBase(CamelModel):
     instructions: str | None = None
     status: SkillStatus = "pending"
 
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_tags(cls, v: object) -> object:
+        return v if v is not None else []
+
 
 class SkillCreate(SkillBase):
     # Client may supply a slug id; if omitted the server generates one.
@@ -93,6 +98,8 @@ class SkillRead(SkillBase):
     cases: list[SkillCaseSchema] = Field(default_factory=list)
     sub_skills: list[SubSkillSchema] = Field(default_factory=list)
     input_params: list[InputParamSchema] = Field(default_factory=list)
+    storage_path: str | None = None
+    repo_commit: str | None = None
     created_at: datetime
     updated_at: datetime
 

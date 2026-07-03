@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from app.models.favorite import RpAiUserFavorite
     from app.models.review import RpAiSkillReview
     from app.models.user import RpAiPortal
+    from app.models.version import RpAiSkillVersion
 
 # Skill review workflow states.
 SKILL_STATUSES = ("pending", "approved", "rejected")
@@ -71,6 +72,12 @@ class RpAiSkill(TimestampMixin, Base):
 
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)
 
+    # --- storage (git repo) -------------------------------------------------
+    # Relative path within the skill repo, e.g. "public/tavily_ezhgmio_Tavily".
+    storage_path: Mapped[str | None] = mapped_column(String(512))
+    # Latest git commit sha that stored this skill.
+    repo_commit: Mapped[str | None] = mapped_column(String(64))
+
     # Relationships.
     uploader: Mapped["RpAiPortal | None"] = relationship(
         back_populates="uploaded_skills",
@@ -91,6 +98,11 @@ class RpAiSkill(TimestampMixin, Base):
     )
     favorited_by: Mapped[list["RpAiUserFavorite"]] = relationship(
         back_populates="skill", cascade="all, delete-orphan"
+    )
+    versions: Mapped[list["RpAiSkillVersion"]] = relationship(
+        back_populates="skill",
+        cascade="all, delete-orphan",
+        order_by="RpAiSkillVersion.id",
     )
 
 

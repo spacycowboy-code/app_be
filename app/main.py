@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
-from app.routers import categories, favorites, reviews, skills, users
+from app.routers import categories, favorites, reviews, skills, upload, users
 
 settings = get_settings()
 
@@ -32,6 +32,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 app.include_router(users.router)
 app.include_router(favorites.router)
 app.include_router(skills.router)
+app.include_router(upload.router)
 app.include_router(reviews.router)
 app.include_router(categories.router)
 

@@ -13,6 +13,7 @@ from app.models.skill import (
     RpAiSubSkill,
 )
 from app.models.user import RpAiPortal
+from app.models.version import RpAiSkillVersion
 
 __all__ = [
     "RpAiPortal",
@@ -23,4 +24,5 @@ __all__ = [
     "RpAiCategory",
     "RpAiUserFavorite",
     "RpAiSkillReview",
+    "RpAiSkillVersion",
 ]
