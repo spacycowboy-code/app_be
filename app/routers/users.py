@@ -4,11 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.activity import RpAiActivity
 from app.models.favorite import RpAiUserFavorite
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.schemas.favorite import FavoriteRead
 from app.schemas.skill import SkillSummary
+from app.schemas.social import ActivityRead
 from app.schemas.user import UserCreate, UserRead, UserUpdate
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -72,5 +74,20 @@ def list_favorites(eid: str, db: Session = Depends(get_db)) -> list[RpAiUserFavo
     return list(
         db.scalars(
             select(RpAiUserFavorite).where(RpAiUserFavorite.eid == eid)
+        ).all()
+    )
+
+
+@router.get("/{eid}/activities", response_model=list[ActivityRead])
+def list_activities(
+    eid: str, limit: int = 30, db: Session = Depends(get_db)
+) -> list[RpAiActivity]:
+    """Workspace activity feed for this user (most recent first)."""
+    return list(
+        db.scalars(
+            select(RpAiActivity)
+            .where(RpAiActivity.recipient_eid == eid)
+            .order_by(RpAiActivity.id.desc())
+            .limit(limit)
         ).all()
     )

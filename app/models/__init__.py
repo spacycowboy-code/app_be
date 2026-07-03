@@ -14,6 +14,8 @@ from app.models.skill import (
 )
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
+from app.models.comment import RpAiSkillComment
+from app.models.activity import RpAiActivity
 
 __all__ = [
     "RpAiPortal",
@@ -25,4 +27,6 @@ __all__ = [
     "RpAiUserFavorite",
     "RpAiSkillReview",
     "RpAiSkillVersion",
+    "RpAiSkillComment",
+    "RpAiActivity",
 ]

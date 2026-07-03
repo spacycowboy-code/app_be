@@ -30,6 +30,7 @@ from app.services.skill_manifest import (
     render_skill_md,
 )
 from app.services.skill_storage import sanitize_segment, skill_storage
+from app.services.notify import notify_version_update
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
@@ -207,6 +208,9 @@ def update_skill(
             notes="Edited via portal",
         )
     )
+
+    # Notify users who favorited this skill about the new version.
+    notify_version_update(db, skill, result.version, actor_eid=payload.editor_eid)
 
     db.commit()
     db.refresh(skill)

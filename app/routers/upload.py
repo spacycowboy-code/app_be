@@ -29,6 +29,7 @@ from app.models.version import RpAiSkillVersion
 from app.schemas.version import SkillUploadResult, SkillVersionRead
 from app.services.skill_manifest import has_name_and_description
 from app.services.skill_storage import skill_storage
+from app.services.notify import notify_version_update
 
 router = APIRouter(prefix="/api/skills", tags=["upload"])
 settings = get_settings()
@@ -185,6 +186,10 @@ async def upload_skill(
             artifact_name=result.artifact_name,
         )
     )
+
+    # Notify users who favorited this skill about the new version.
+    if existing is not None:
+        notify_version_update(db, skill, result.version, actor_eid=eid)
 
     db.commit()
     db.refresh(skill)
