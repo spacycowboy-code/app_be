@@ -27,6 +27,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
 from app.schemas.version import SkillUploadResult, SkillVersionRead
+from app.services.skill_manifest import has_name_and_description
 from app.services.skill_storage import skill_storage
 
 router = APIRouter(prefix="/api/skills", tags=["upload"])
@@ -78,6 +79,7 @@ async def upload_skill(
     # Read + size-check the artifact.
     artifact_bytes: bytes | None = None
     artifact_filename: str | None = None
+    file_text: str | None = None
     if file is not None:
         artifact_bytes = await file.read()
         if len(artifact_bytes) > settings.max_upload_bytes:
@@ -86,6 +88,19 @@ async def upload_skill(
                 f"File exceeds {settings.max_upload_bytes} bytes",
             )
         artifact_filename = file.filename
+        try:
+            file_text = artifact_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            file_text = None
+
+    # The skill definition (SKILL.md) comes from the uploaded file, or the
+    # instructions field as a fallback. It MUST declare name: and description:.
+    definition = file_text if file_text is not None else instructions
+    if not definition or not has_name_and_description(definition):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Skill 定义必须包含 name: 和 description: 两个字段",
+        )
 
     # Resolve identity: existing skill (by id) -> re-upload/version bump.
     existing: RpAiSkill | None = None
@@ -121,7 +136,7 @@ async def upload_skill(
         name=name,
         category_slug=category_id,
         manifest=manifest,
-        instructions=instructions,
+        instructions=definition,
         artifact_bytes=artifact_bytes,
         artifact_filename=artifact_filename,
         current_version=existing.version if existing else None,
@@ -140,8 +155,8 @@ async def upload_skill(
     skill.category_id = category_id
     if parsed_tags:
         skill.tags = parsed_tags
-    if instructions is not None:
-        skill.instructions = instructions
+    if definition is not None:
+        skill.instructions = definition
     skill.version = result.version
     skill.storage_path = result.storage_path
     skill.repo_commit = result.commit_sha

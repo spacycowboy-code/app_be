@@ -1,11 +1,13 @@
 """Skill endpoints: browse, detail, create, update, delete."""
 import re
 import uuid
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.skill import (
     RpAiInputParam,
@@ -24,6 +26,16 @@ from app.services.skill_manifest import build_manifest, render_skill_md
 from app.services.skill_storage import sanitize_segment, skill_storage
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
+settings = get_settings()
+
+
+def _read_skill_md(skill: RpAiSkill) -> str:
+    """Read the skill's SKILL.md from the repo; fall back to instructions."""
+    if skill.storage_path:
+        md_path = Path(settings.skill_repo_path) / skill.storage_path / "SKILL.md"
+        if md_path.is_file():
+            return md_path.read_text(encoding="utf-8")
+    return skill.instructions or ""
 
 
 def _slugify(text: str) -> str:
@@ -93,6 +105,13 @@ def list_skills(
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
     return _get_skill_or_404(db, skill_id)
+
+
+@router.get("/{skill_id}/markdown")
+def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
+    """Return the skill's full SKILL.md content (the source of truth)."""
+    skill = _get_skill_or_404(db, skill_id)
+    return {"skillId": skill.id, "content": _read_skill_md(skill)}
 
 
 @router.post("", response_model=SkillRead, status_code=status.HTTP_201_CREATED)

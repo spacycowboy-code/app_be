@@ -5,14 +5,38 @@ files stay consistent regardless of how a skill was written.
 """
 from __future__ import annotations
 
+import re
+
 from app.models.skill import RpAiSkill
+
+_FM_NAME = re.compile(r"(?im)^\s*name\s*:")
+_FM_DESC = re.compile(r"(?im)^\s*description\s*:")
+
+
+def has_name_and_description(text: str) -> bool:
+    """True if the markdown contains both ``name:`` and ``description:``."""
+    return bool(text) and bool(_FM_NAME.search(text)) and bool(_FM_DESC.search(text))
+
+
+def with_frontmatter(body: str, name: str, description: str | None) -> str:
+    """Prepend a YAML frontmatter block unless name:/description: already exist."""
+    if has_name_and_description(body):
+        return body
+    desc = (description or "").replace("\n", " ").strip()
+    fm = f"---\nname: {name}\ndescription: {desc}\n---\n\n"
+    return fm + (body or "")
 
 
 def render_skill_md(skill: RpAiSkill) -> str:
-    """Return the skill's own instructions, or a generated definition."""
+    """Return the skill definition markdown, guaranteed to carry frontmatter."""
     if skill.instructions and skill.instructions.strip():
-        return skill.instructions
+        body = skill.instructions
+    else:
+        body = _generate_body(skill)
+    return with_frontmatter(body, skill.name, skill.description)
 
+
+def _generate_body(skill: RpAiSkill) -> str:
     lines = [f"# {skill.name}", ""]
     if skill.description:
         lines += [skill.description, ""]
