@@ -22,8 +22,20 @@ from app.models.skill import (
     RpAiSkillCase,
     RpAiSubSkill,
 )
+from app.models.user import RpAiPortal
 
 SEED_FILE = Path(__file__).parent / "seed_data.json"
+
+# All catalog skills are currently developed/owned by Ericsson.
+DEVELOPER_EID = "ericsson"
+DEVELOPER_NAME = "Ericsson"
+
+
+def _ensure_developer(db: Session) -> None:
+    """Ensure the Ericsson developer account exists (skills reference it)."""
+    dev = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == DEVELOPER_EID))
+    if dev is None:
+        db.add(RpAiPortal(eid=DEVELOPER_EID, display_name=DEVELOPER_NAME))
 
 
 def _load() -> dict:
@@ -54,7 +66,8 @@ def _skill_scalars(data: dict) -> dict:
         is_free=data.get("isFree", True),
         tags=data.get("tags", []),
         version=data.get("version"),
-        author=data.get("author"),
+        author=DEVELOPER_NAME,
+        uploader_eid=DEVELOPER_EID,
         capability_full=data.get("capabilityFull"),
         rating_dist=data.get("ratingDist"),
         review_count=data.get("reviewCount", 0),
@@ -105,9 +118,10 @@ def _upsert_skill(db: Session, data: dict) -> None:
 def main() -> None:
     payload = _load()
     with SessionLocal() as db:
+        _ensure_developer(db)
         for cat in payload.get("categories", []):
             _upsert_category(db, cat)
-        db.flush()  # categories must exist before skills reference them
+        db.flush()  # categories + developer must exist before skills reference them
         for skill in payload.get("skills", []):
             _upsert_skill(db, skill)
         db.commit()
