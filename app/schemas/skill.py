@@ -1,0 +1,115 @@
+"""Pydantic schemas for skills (rp_ai_skill) and their child records."""
+from datetime import datetime
+from typing import Literal
+
+from pydantic import Field
+
+from app.schemas.common import CamelModel
+
+SkillStatus = Literal["pending", "approved", "rejected"]
+
+
+# --- child schemas ---------------------------------------------------------
+class SkillCaseSchema(CamelModel):
+    title: str
+    image: str | None = None
+
+
+class SubSkillSchema(CamelModel):
+    name: str
+    # ORM attribute is ``description``; frontend JSON key is ``desc``.
+    description: str | None = Field(default=None, alias="desc")
+    badge: str | None = None
+    icon_color: str | None = None
+    icon_bg: str | None = None
+
+
+class InputParamSchema(CamelModel):
+    name: str
+    type: str | None = None
+    required: bool = False
+    description: str | None = Field(default=None, alias="desc")
+
+
+# --- skill schemas ---------------------------------------------------------
+class SkillBase(CamelModel):
+    name: str
+    description: str | None = None
+    category: str | None = None
+    category_id: str | None = None
+    image: str | None = None
+    rating: float = 0.0
+    downloads: str = "0"
+    is_trending: bool = False
+    is_free: bool = True
+    tags: list[str] = Field(default_factory=list)
+    version: str | None = None
+    author: str | None = None
+    uploader_eid: str | None = None
+    capability_full: str | None = None
+    rating_dist: list[int] | None = None
+    review_count: int = 0
+    example_prompt: str | None = None
+    example_output: str | None = None
+    instructions: str | None = None
+    status: SkillStatus = "pending"
+
+
+class SkillCreate(SkillBase):
+    # Client may supply a slug id; if omitted the server generates one.
+    id: str | None = None
+    cases: list[SkillCaseSchema] = Field(default_factory=list)
+    sub_skills: list[SubSkillSchema] = Field(default_factory=list)
+    input_params: list[InputParamSchema] = Field(default_factory=list)
+
+
+class SkillUpdate(CamelModel):
+    name: str | None = None
+    description: str | None = None
+    category: str | None = None
+    category_id: str | None = None
+    image: str | None = None
+    rating: float | None = None
+    downloads: str | None = None
+    is_trending: bool | None = None
+    is_free: bool | None = None
+    tags: list[str] | None = None
+    version: str | None = None
+    author: str | None = None
+    capability_full: str | None = None
+    rating_dist: list[int] | None = None
+    review_count: int | None = None
+    example_prompt: str | None = None
+    example_output: str | None = None
+    instructions: str | None = None
+    status: SkillStatus | None = None
+    cases: list[SkillCaseSchema] | None = None
+    sub_skills: list[SubSkillSchema] | None = None
+    input_params: list[InputParamSchema] | None = None
+
+
+class SkillRead(SkillBase):
+    id: str
+    cases: list[SkillCaseSchema] = Field(default_factory=list)
+    sub_skills: list[SubSkillSchema] = Field(default_factory=list)
+    input_params: list[InputParamSchema] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class SkillSummary(CamelModel):
+    """Lightweight shape for list/market views."""
+
+    id: str
+    name: str
+    description: str | None = None
+    category: str | None = None
+    category_id: str | None = None
+    image: str | None = None
+    rating: float = 0.0
+    downloads: str = "0"
+    is_trending: bool = False
+    is_free: bool = True
+    tags: list[str] = Field(default_factory=list)
+    author: str | None = None
+    status: SkillStatus = "pending"
