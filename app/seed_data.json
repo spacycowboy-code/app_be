@@ -1,0 +1,1144 @@
+{
+  "categories": [
+    {
+      "id": "all",
+      "label": "全部",
+      "count": 48
+    },
+    {
+      "id": "public",
+      "label": "公共",
+      "count": 1
+    },
+    {
+      "id": "product-system",
+      "label": "Product System",
+      "count": 8
+    },
+    {
+      "id": "radio-design-1",
+      "label": "Radio Design 1",
+      "count": 7
+    },
+    {
+      "id": "radio-design-2",
+      "label": "Radio Design 2",
+      "count": 6
+    },
+    {
+      "id": "radio-design-3",
+      "label": "Radio Design 3",
+      "count": 5
+    },
+    {
+      "id": "radio-sw",
+      "label": "Radio SW",
+      "count": 9
+    },
+    {
+      "id": "ivc",
+      "label": "IVC",
+      "count": 6
+    },
+    {
+      "id": "qa",
+      "label": "Q&A",
+      "count": 4
+    },
+    {
+      "id": "pmo",
+      "label": "PMO",
+      "count": 3
+    }
+  ],
+  "skills": [
+    {
+      "id": "tavily-web-search",
+      "name": "Tavily 联网搜索",
+      "description": "通过 Tavily API 联网搜索，获取实时、最新的网络信息，适用于产品调研、技术选型与时效性问题。",
+      "category": "公共",
+      "categoryId": "public",
+      "image": "skill-images/tavily.jpg",
+      "rating": 4.9,
+      "downloads": "5.6K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "联网搜索",
+        "Tavily",
+        "实时信息"
+      ],
+      "version": "1.0",
+      "author": "Public",
+      "updatedAt": "2026-07-03",
+      "capabilityFull": "当需要搜索互联网、查询实时信息，或需要超出知识截止日期的数据时，通过 Tavily API 搜索网络并返回结构化结果。支持高级搜索深度、可配置返回数量，并可直接返回摘要答案与来源 URL。适用于产品/技术调研、版本与价格查询、对比推荐等时效性场景。",
+      "ratingDist": [
+        82,
+        12,
+        4,
+        1,
+        1
+      ],
+      "reviewCount": 210,
+      "inputParams": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "desc": "搜索关键词或问题"
+        },
+        {
+          "name": "search_depth",
+          "type": "enum",
+          "required": false,
+          "desc": "basic | advanced，默认 advanced"
+        },
+        {
+          "name": "max_results",
+          "type": "number",
+          "required": false,
+          "desc": "返回结果数量，默认 5"
+        },
+        {
+          "name": "include_answer",
+          "type": "boolean",
+          "required": false,
+          "desc": "是否返回摘要答案，默认 true"
+        }
+      ],
+      "examplePrompt": "帮我搜一下 OpenClaw AI agent platform",
+      "exampleOutput": "✅ 已联网搜索\n📝 摘要：...\n🔗 来源：https://...",
+      "instructions": "# Tavily Web Search Skill\n\n## Description\nWhen the user asks to search the internet, look up current information, or when you need real-time data that's beyond your knowledge cutoff, use this skill to search the web via the Tavily API.\n\n## Instructions\nExecute a POST request to https://api.tavily.com/search with your api_key, query, search_depth, max_results and include_answer.\n\n## Usage Rules\n核心原则：积极主动搜索，宁可多搜也不要凭过时知识回答。\n1. 主动搜索：涉及具体产品、技术、平台、工具、公司时，不确定就先搜再答。\n2. 用户要求搜索时：立即执行。\n3. 时效性信息（\"最新\"、\"2025/2026\"、\"当前\"）必须搜索。\n4. 对比和推荐类问题：搜索获取最新信息再回答。\n5. 搜索结果中的 URL 必须附上供用户参考。\n\n## Setup\nReplace tvly-YOUR_API_KEY_HERE with your actual Tavily API key. Get a free key at https://tavily.com"
+    },
+    {
+      "id": "1",
+      "name": "产品需求管理",
+      "description": "负责 Radio 产品的整体需求规格定义、产品路线图规划与跨团队协调管理",
+      "category": "Product System",
+      "categoryId": "product-system",
+      "image": "skill-images/product-system.jpg",
+      "rating": 4.8,
+      "downloads": "3.2K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "产品规划",
+        "需求",
+        "路线图"
+      ],
+      "version": "2.1",
+      "author": "PS Team",
+      "updatedAt": "2025-01-08",
+      "capabilityFull": "本技能专为 Radio 产品研发团队打造，能够自动解析产品规格书文档，提取需求条目并生成结构化需求矩阵。支持识别需求间的依赖关系与潜在冲突，输出冲突分析报告。跟踪需求变更历史，生成变更影响分析，帮助 PM 快速评估变更代价。支持与 Jira、Confluence 深度集成，自动同步需求状态，确保研发团队始终基于最新需求开展工作。",
+      "ratingDist": [
+        65,
+        25,
+        7,
+        2,
+        1
+      ],
+      "reviewCount": 128,
+      "cases": [
+        {
+          "title": "AIR6449 需求矩阵生成",
+          "image": "skill-images/cases/photo-1557804506-669a67965ba0.jpg"
+        },
+        {
+          "title": "R19 需求变更分析",
+          "image": "skill-images/cases/photo-1454165804606-c3d57bc86b40.jpg"
+        },
+        {
+          "title": "跨部门接口冲突识别",
+          "image": "skill-images/cases/photo-1542744173-8e7e53415bb0.jpg"
+        }
+      ],
+      "subSkills": [
+        {
+          "name": "需求提取",
+          "desc": "自动从规格书提取需求条目并分类",
+          "iconBg": "#e9f0f9",
+          "iconColor": "#1174e6"
+        },
+        {
+          "name": "冲突分析",
+          "desc": "识别跨部门需求冲突并生成报告",
+          "iconBg": "#f9e2e1",
+          "iconColor": "#ed0e00"
+        },
+        {
+          "name": "变更追踪",
+          "desc": "追踪需求变更历史与影响范围",
+          "iconBg": "#e6f1eb",
+          "iconColor": "#329864"
+        },
+        {
+          "name": "Jira 同步",
+          "desc": "自动同步需求状态至 Jira 工单",
+          "iconBg": "#f2ecf5",
+          "iconColor": "#8e45b0"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "spec_doc",
+          "type": "File",
+          "required": true,
+          "desc": "产品规格书文件（PDF、DOCX）"
+        },
+        {
+          "name": "project_id",
+          "type": "string",
+          "required": true,
+          "desc": "关联项目 ID"
+        },
+        {
+          "name": "dept_filter",
+          "type": "string[]",
+          "required": false,
+          "desc": "按部门过滤，默认全部"
+        }
+      ],
+      "examplePrompt": "请解析 AIR6449_Spec_v3.2.pdf 并生成需求矩阵",
+      "exampleOutput": "✅ 已解析 128 页规格书\n📋 提取需求条目：247 条\n⚠️ 跨部门冲突：3 处\n📊 需求矩阵已生成"
+    },
+    {
+      "id": "2",
+      "name": "系统架构设计",
+      "description": "Radio 产品系统级架构设计，定义各模块接口规范与整体技术方案",
+      "category": "Product System",
+      "categoryId": "product-system",
+      "image": "skill-images/product-system.jpg",
+      "rating": 4.9,
+      "downloads": "2.8K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "架构",
+        "系统设计",
+        "接口规范"
+      ],
+      "version": "1.8",
+      "author": "PS Team",
+      "updatedAt": "2024-12-20",
+      "capabilityFull": "本技能支持根据需求输入自动生成系统架构图（UML/Block Diagram），帮助系统工程师快速完成架构设计初稿。能够定义模块间接口规范，输出标准化 ICD（接口控制文件），并检测设计中的单点故障与性能瓶颈。支持与历史版本对比，生成架构变更影响分析，适用于 R19/R20 等大版本迭代场景。",
+      "ratingDist": [
+        72,
+        20,
+        5,
+        2,
+        1
+      ],
+      "reviewCount": 96,
+      "cases": [
+        {
+          "title": "R19 系统架构图生成",
+          "image": "skill-images/cases/photo-1558494949-ef010cbdcc31.jpg"
+        },
+        {
+          "title": "模块接口 ICD 输出",
+          "image": "skill-images/cases/photo-1581092160607-ee22621dd758.jpg"
+        },
+        {
+          "title": "架构变更影响分析",
+          "image": "skill-images/cases/photo-1551288049-bebda4e38f71.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "requirements",
+          "type": "string",
+          "required": true,
+          "desc": "需求描述或矩阵文件路径"
+        },
+        {
+          "name": "diagram_type",
+          "type": "enum",
+          "required": false,
+          "desc": "block_diagram | uml | both"
+        }
+      ],
+      "examplePrompt": "基于 R19 需求矩阵生成 Radio 系统架构图",
+      "exampleOutput": "✅ 架构图已生成\n📄 ICD 文档输出\n🔍 发现 2 个潜在接口冲突"
+    },
+    {
+      "id": "3",
+      "name": "PA 功放设计助手",
+      "description": "Radio 产品功率放大器模块的电路设计、仿真与性能优化工具",
+      "category": "Radio Design 1",
+      "categoryId": "radio-design-1",
+      "image": "skill-images/radio-design-1.jpg",
+      "rating": 4.7,
+      "downloads": "1.9K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "PA",
+        "功放",
+        "RF设计"
+      ],
+      "version": "3.0",
+      "author": "RD1 Team",
+      "updatedAt": "2025-01-03",
+      "capabilityFull": "本技能专为功放模块设计工程师打造，能够自动读取 ADS 仿真输出文件，解析 S 参数、增益压缩点（P1dB）、PAE 等关键 RF 指标。支持多频段（Sub-6G / mmWave）PA 参数对比分析，识别在极端温度、高功率场景下的性能退化风险，并给出具体的电路参数调优建议。自动生成标准化 PA 性能报告，包含曲线图与规格合规性判断。",
+      "ratingDist": [
+        60,
+        28,
+        8,
+        3,
+        1
+      ],
+      "reviewCount": 74,
+      "cases": [
+        {
+          "title": "3.5GHz PA 增益压缩分析",
+          "image": "skill-images/cases/photo-1518770660439-4636190af475.jpg"
+        },
+        {
+          "title": "28GHz mmWave PA 效率优化",
+          "image": "skill-images/cases/photo-1635070041078-e363dbe005cb.jpg"
+        },
+        {
+          "title": "PA 高温老化性能评估",
+          "image": "skill-images/cases/photo-1516110833967-0b5716ca1387.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "ads_file",
+          "type": "File",
+          "required": true,
+          "desc": "ADS 仿真输出文件（.s2p 或 .csv）"
+        },
+        {
+          "name": "freq_band",
+          "type": "string",
+          "required": true,
+          "desc": "工作频段，如 3.5GHz、28GHz"
+        },
+        {
+          "name": "target_pout",
+          "type": "number",
+          "required": false,
+          "desc": "目标输出功率（dBm）"
+        }
+      ],
+      "examplePrompt": "分析 PA 在 3.5GHz 的增益压缩，目标 Pout=43dBm",
+      "exampleOutput": "📊 P1dB @ 3.5GHz: 44.2 dBm ✅\n📉 PAE: 38.6%\n⚠️ 高温场景增益下降 1.8dB"
+    },
+    {
+      "id": "4",
+      "name": "算法验证平台",
+      "description": "Radio 信号处理算法的仿真验证平台，支持硬件与软件集成测试",
+      "category": "Radio Design 1",
+      "categoryId": "radio-design-1",
+      "image": "skill-images/radio-design-1.jpg",
+      "rating": 4.6,
+      "downloads": "2.1K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "算法",
+        "仿真",
+        "集成"
+      ],
+      "version": "2.4",
+      "author": "RD1 Team",
+      "updatedAt": "2024-12-15",
+      "capabilityFull": "本技能支持 MATLAB/Python 算法脚本的自动化仿真执行，生成误码率（BER）、吞吐量、时延等核心指标。能够对比 SW 仿真与硬件实测数据，定位差异根因，适用于 Massive MIMO、Beamforming 等复杂算法的集成验证场景，并输出 3GPP 合规性检查结论。",
+      "ratingDist": [
+        55,
+        30,
+        10,
+        4,
+        1
+      ],
+      "reviewCount": 62,
+      "cases": [
+        {
+          "title": "Beamforming 算法仿真",
+          "image": "skill-images/cases/photo-1518770660439-4636190af475.jpg"
+        },
+        {
+          "title": "BER 性能 SW/HW 对比",
+          "image": "skill-images/cases/photo-1551288049-bebda4e38f71.jpg"
+        },
+        {
+          "title": "3GPP 合规性验证",
+          "image": "skill-images/cases/photo-1558494949-ef010cbdcc31.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "algorithm_file",
+          "type": "File",
+          "required": true,
+          "desc": "算法脚本（.m 或 .py）"
+        },
+        {
+          "name": "test_vector",
+          "type": "File",
+          "required": true,
+          "desc": "测试向量数据文件"
+        },
+        {
+          "name": "hw_result",
+          "type": "File",
+          "required": false,
+          "desc": "硬件实测结果，用于 SW/HW 对比"
+        }
+      ],
+      "examplePrompt": "验证 beamforming 算法在 64T64R 场景下的波束增益",
+      "exampleOutput": "✅ 主波束增益: 24.3 dBi\n📉 最大旁瓣电平: -18.2 dB\n🔍 与硬件差异 0.8dB（在容差内）"
+    },
+    {
+      "id": "5",
+      "name": "PCB 布局设计",
+      "description": "Radio 产品 PCB 布局与走线设计工具，支持高速信号完整性分析",
+      "category": "Radio Design 2",
+      "categoryId": "radio-design-2",
+      "image": "skill-images/radio-design-2.jpg",
+      "rating": 4.8,
+      "downloads": "3.5K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "PCB",
+        "布局",
+        "信号完整性"
+      ],
+      "version": "2.2",
+      "author": "RD2 Team",
+      "updatedAt": "2025-01-05",
+      "capabilityFull": "本技能检查 PCB Gerber 文件的 DFM 规则符合性，分析高速差分对走线的阻抗匹配与等长要求，识别电源平面分割与地回流路径问题，输出 DFM 审查报告和改善建议列表，支持 HDI 多层板场景。",
+      "ratingDist": [
+        68,
+        22,
+        7,
+        2,
+        1
+      ],
+      "reviewCount": 112,
+      "cases": [
+        {
+          "title": "TRX Board DFM 审查",
+          "image": "skill-images/cases/photo-1562408590-e32931084e23.jpg"
+        },
+        {
+          "title": "RF 走线阻抗分析",
+          "image": "skill-images/cases/photo-1592659762303-90081d34b277.jpg"
+        },
+        {
+          "title": "电源完整性检查",
+          "image": "skill-images/cases/photo-1518770660439-4636190af475.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "gerber_zip",
+          "type": "File",
+          "required": true,
+          "desc": "PCB Gerber 压缩包（.zip）"
+        },
+        {
+          "name": "stackup",
+          "type": "string",
+          "required": false,
+          "desc": "PCB 叠层定义"
+        },
+        {
+          "name": "impedance_target",
+          "type": "number",
+          "required": false,
+          "desc": "目标阻抗（Ω），默认 50Ω"
+        }
+      ],
+      "examplePrompt": "检查 TRX_Board_Rev3 Gerber，重点关注 RF 走线与电源完整性",
+      "exampleOutput": "⚠️ DFM 问题 12 处\n🔴 RF 阻抗偏差 >10%: 3 处\n✅ 等长误差均在 5mil 内"
+    },
+    {
+      "id": "6",
+      "name": "TRX 收发模块设计",
+      "description": "Radio 收发机模块设计，包含电源管理与数字模块的协同设计",
+      "category": "Radio Design 2",
+      "categoryId": "radio-design-2",
+      "image": "skill-images/radio-design-2.jpg",
+      "rating": 4.7,
+      "downloads": "1.6K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "TRX",
+        "收发机",
+        "电源"
+      ],
+      "version": "1.5",
+      "author": "RD2 Team",
+      "updatedAt": "2024-11-28",
+      "capabilityFull": "分析 TRX 收发链路的噪声系数与动态范围，评估电源模块的纹波与效率，协同分析数字模块时序接口，生成完整链路预算报告，适用于 n78/n258 等主流频段。",
+      "ratingDist": [
+        60,
+        25,
+        10,
+        4,
+        1
+      ],
+      "reviewCount": 48,
+      "cases": [
+        {
+          "title": "n78 接收链 NF 分析",
+          "image": "skill-images/cases/photo-1635070041078-e363dbe005cb.jpg"
+        },
+        {
+          "title": "电源模块纹波评估",
+          "image": "skill-images/cases/photo-1516110833967-0b5716ca1387.jpg"
+        },
+        {
+          "title": "TRX 链路预算生成",
+          "image": "skill-images/cases/photo-1558494949-ef010cbdcc31.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "trx_spec",
+          "type": "File",
+          "required": true,
+          "desc": "TRX 模块规格文件（PDF/Word）"
+        },
+        {
+          "name": "freq_range",
+          "type": "string",
+          "required": true,
+          "desc": "工作频率范围，如 3300-3800MHz"
+        }
+      ],
+      "examplePrompt": "分析 TRX_v4 在 n78 频段接收链噪声系数，目标 NF < 3dB",
+      "exampleOutput": "📊 NF @ n78: 2.7 dB ✅\n📉 动态范围: 72 dB\n⚠️ 高温 85°C 时 NF 增加 0.4dB"
+    },
+    {
+      "id": "7",
+      "name": "天线阵列设计",
+      "description": "Radio 产品天线设计与仿真，优化辐射性能、增益与方向图",
+      "category": "Radio Design 3",
+      "categoryId": "radio-design-3",
+      "image": "skill-images/radio-design-3.jpg",
+      "rating": 4.6,
+      "downloads": "1.4K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "天线",
+        "阵列",
+        "仿真"
+      ],
+      "version": "2.0",
+      "author": "RD3 Team",
+      "updatedAt": "2024-12-10",
+      "capabilityFull": "调用 HFSS/CST 接口执行天线阵列仿真，提取三维方向图数据，优化阵列权重实现波束赋形，分析天线端口隔离度与互耦效应，生成可视化方向图报告。",
+      "ratingDist": [
+        58,
+        27,
+        10,
+        4,
+        1
+      ],
+      "reviewCount": 52,
+      "cases": [
+        {
+          "title": "64T64R Massive MIMO 方向图",
+          "image": "skill-images/cases/photo-1660620949746-c0f2a54538ef.jpg"
+        },
+        {
+          "title": "波束赋形权重优化",
+          "image": "skill-images/cases/photo-1612529784443-40a86b856d14.jpg"
+        },
+        {
+          "title": "端口隔离度分析",
+          "image": "skill-images/cases/photo-1557174360-3f4f7c724501.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "antenna_model",
+          "type": "File",
+          "required": true,
+          "desc": "天线模型文件（.hfss 或 .cst）"
+        },
+        {
+          "name": "freq_point",
+          "type": "number[]",
+          "required": true,
+          "desc": "仿真频点列表（GHz）"
+        },
+        {
+          "name": "beam_direction",
+          "type": "number",
+          "required": false,
+          "desc": "目标波束方向（度），默认 0°"
+        }
+      ],
+      "examplePrompt": "仿真 64T64R 天线在 3.5GHz 的方向图，目标波束 15°",
+      "exampleOutput": "✅ 主波束增益: 24.1 dBi @ 15°\n📉 3dB 波束宽度: 7.2°\n📐 端口隔离度: >25 dB ✅"
+    },
+    {
+      "id": "8",
+      "name": "滤波器与封装设计",
+      "description": "Radio 产品射频滤波器设计及机箱封装结构设计，满足 EMC 与散热要求",
+      "category": "Radio Design 3",
+      "categoryId": "radio-design-3",
+      "image": "skill-images/radio-design-3.jpg",
+      "rating": 4.5,
+      "downloads": "1.1K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "滤波器",
+        "封装",
+        "EMC"
+      ],
+      "version": "1.3",
+      "author": "RD3 Team",
+      "updatedAt": "2024-11-15",
+      "capabilityFull": "设计带通/带阻滤波器并输出 S 参数与群时延特性，评估封装结构的 EMC 屏蔽效能，分析机箱热设计并识别热点，提出散热改善方案，生成加工图纸与公差分析。",
+      "ratingDist": [
+        52,
+        30,
+        12,
+        5,
+        1
+      ],
+      "reviewCount": 38,
+      "cases": [
+        {
+          "title": "n78 带通滤波器设计",
+          "image": "skill-images/cases/photo-1612529784443-40a86b856d14.jpg"
+        },
+        {
+          "title": "机箱 EMC 屏蔽评估",
+          "image": "skill-images/cases/photo-1517420704952-d9f39e95b43e.jpg"
+        },
+        {
+          "title": "封装热点分析",
+          "image": "skill-images/cases/photo-1635070041078-e363dbe005cb.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "filter_spec",
+          "type": "string",
+          "required": true,
+          "desc": "滤波器指标描述"
+        },
+        {
+          "name": "enclosure_cad",
+          "type": "File",
+          "required": false,
+          "desc": "封装 CAD 文件（.step）"
+        }
+      ],
+      "examplePrompt": "设计 n78 带通滤波器：通带 3300-3800MHz，插损 <1.5dB",
+      "exampleOutput": "✅ 插损: 1.2 dB\n📉 带外抑制: 44 dBc\n📄 加工图纸已生成"
+    },
+    {
+      "id": "9",
+      "name": "嵌入式软件开发",
+      "description": "Radio 产品底层嵌入式固件开发，包含 BSP、驱动与 RTOS 移植",
+      "category": "Radio SW",
+      "categoryId": "radio-sw",
+      "image": "skill-images/radio-sw.jpg",
+      "rating": 4.9,
+      "downloads": "4.2K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "嵌入式",
+        "固件",
+        "RTOS"
+      ],
+      "version": "3.5",
+      "author": "SW Team",
+      "updatedAt": "2025-01-10",
+      "capabilityFull": "生成 BSP 驱动代码框架，支持主流 SoC 平台（NXP、TI、Xilinx）；静态分析代码缺陷，检测内存泄漏与竞态条件；自动生成单元测试用例（GTest/CppUTest）；提供 RTOS 任务调度优化建议，降低 CPU 占用率。",
+      "ratingDist": [
+        78,
+        15,
+        5,
+        1,
+        1
+      ],
+      "reviewCount": 186,
+      "cases": [
+        {
+          "title": "NXP LS1088A SPI/I2C 驱动",
+          "image": "skill-images/cases/photo-1605379399642-870262d3d051.jpg"
+        },
+        {
+          "title": "FreeRTOS 任务调度优化",
+          "image": "skill-images/cases/photo-1542831371-29b0f74f9713.jpg"
+        },
+        {
+          "title": "内存泄漏静态检测",
+          "image": "skill-images/cases/photo-1518770660439-4636190af475.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "soc_type",
+          "type": "string",
+          "required": true,
+          "desc": "目标 SoC 型号"
+        },
+        {
+          "name": "source_code",
+          "type": "File",
+          "required": false,
+          "desc": "待分析源码压缩包（.zip）"
+        },
+        {
+          "name": "rtos",
+          "type": "enum",
+          "required": false,
+          "desc": "FreeRTOS | QNX | Linux"
+        }
+      ],
+      "examplePrompt": "为 NXP LS1088A 生成 SPI/I2C 驱动并分析内存安全问题",
+      "exampleOutput": "✅ 驱动框架已生成\n🔍 内存泄漏 3 处\n📄 分析报告已输出"
+    },
+    {
+      "id": "10",
+      "name": "协议栈与应用层开发",
+      "description": "Radio 产品通信协议栈实现及上层应用逻辑开发与调试",
+      "category": "Radio SW",
+      "categoryId": "radio-sw",
+      "image": "skill-images/radio-sw.jpg",
+      "rating": 4.7,
+      "downloads": "3.8K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "协议栈",
+        "应用层",
+        "调试"
+      ],
+      "version": "2.8",
+      "author": "SW Team",
+      "updatedAt": "2024-12-22",
+      "capabilityFull": "解析 3GPP 协议规范，生成协议状态机代码框架；捕获并分析协议交互报文，定位异常交互；生成协议一致性测试用例；提供 O-RAN fronthaul 接口实现参考，支持 F1-AP、E1-AP 等接口分析。",
+      "ratingDist": [
+        62,
+        24,
+        10,
+        3,
+        1
+      ],
+      "reviewCount": 104,
+      "cases": [
+        {
+          "title": "F1-AP 接口报文分析",
+          "image": "skill-images/cases/photo-1542831371-29b0f74f9713.jpg"
+        },
+        {
+          "title": "5G-NR 协议状态机生成",
+          "image": "skill-images/cases/photo-1605379399642-870262d3d051.jpg"
+        },
+        {
+          "title": "O-RAN fronthaul 验证",
+          "image": "skill-images/cases/photo-1558494949-ef010cbdcc31.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "protocol",
+          "type": "enum",
+          "required": true,
+          "desc": "5G-NR | LTE | O-RAN | CPRI"
+        },
+        {
+          "name": "pcap_file",
+          "type": "File",
+          "required": false,
+          "desc": "报文抓包文件（.pcap）"
+        }
+      ],
+      "examplePrompt": "分析 F1-AP 接口 UE Context Setup 流程，识别异常消息",
+      "exampleOutput": "🔍 分析 2,847 条消息\n⚠️ Setup Failure 3 次\n📋 根因: AMF 响应超时"
+    },
+    {
+      "id": "11",
+      "name": "系统集成测试",
+      "description": "Radio 产品整机集成验证，覆盖硬件、软件与射频性能的全链路测试",
+      "category": "IVC",
+      "categoryId": "ivc",
+      "image": "skill-images/ivc.jpg",
+      "rating": 4.8,
+      "downloads": "2.3K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "集成测试",
+        "验证",
+        "全链路"
+      ],
+      "version": "4.1",
+      "author": "IVC Team",
+      "updatedAt": "2025-01-09",
+      "capabilityFull": "自动编排测试用例执行顺序，支持并行测试；实时采集 RF 性能指标并与规格基线对比；生成测试覆盖率报告和不合格项追踪单；支持 Jira 集成，自动创建缺陷工单，适用于 DVT/PVT 等关键验证阶段。",
+      "ratingDist": [
+        70,
+        20,
+        7,
+        2,
+        1
+      ],
+      "reviewCount": 89,
+      "cases": [
+        {
+          "title": "AIR6449 DVT 全量测试",
+          "image": "skill-images/cases/photo-1517420704952-d9f39e95b43e.jpg"
+        },
+        {
+          "title": "RF 性能基线对比",
+          "image": "skill-images/cases/photo-1535612731405-1348d22b842f.jpg"
+        },
+        {
+          "title": "缺陷自动追踪至 Jira",
+          "image": "skill-images/cases/photo-1454165804606-c3d57bc86b40.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "test_plan",
+          "type": "File",
+          "required": true,
+          "desc": "测试计划文件"
+        },
+        {
+          "name": "dut_version",
+          "type": "string",
+          "required": true,
+          "desc": "固件版本号"
+        },
+        {
+          "name": "baseline",
+          "type": "File",
+          "required": false,
+          "desc": "历史基线数据"
+        }
+      ],
+      "examplePrompt": "执行 AIR6449 DVT 全量 RF 测试，对比 FW_v8.4.2 与基线",
+      "exampleOutput": "✅ 847/847 测试用例\n🔴 失败 3 项（Jira 工单已创建）\n📊 覆盖率 98.6%"
+    },
+    {
+      "id": "12",
+      "name": "RF 性能测量平台",
+      "description": "Radio 射频指标自动化测量，包含功率、噪声系数、EVM 等核心参数",
+      "category": "IVC",
+      "categoryId": "ivc",
+      "image": "skill-images/ivc.jpg",
+      "rating": 4.6,
+      "downloads": "1.7K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "RF测量",
+        "自动化",
+        "EVM"
+      ],
+      "version": "3.2",
+      "author": "IVC Team",
+      "updatedAt": "2024-12-18",
+      "capabilityFull": "通过 VISA 接口控制 R&S/Keysight 测量仪器，自动测量 Tx 功率、EVM、ACLR、噪声系数；生成频段扫描报告，支持温度老化测试；结果自动上传知识库并与规格限值比对。",
+      "ratingDist": [
+        55,
+        30,
+        10,
+        4,
+        1
+      ],
+      "reviewCount": 67,
+      "cases": [
+        {
+          "title": "n78 EVM 自动测量",
+          "image": "skill-images/cases/photo-1535612731405-1348d22b842f.jpg"
+        },
+        {
+          "title": "ACLR 频段扫描报告",
+          "image": "skill-images/cases/photo-1517420704952-d9f39e95b43e.jpg"
+        },
+        {
+          "title": "温度老化 RF 趋势分析",
+          "image": "skill-images/cases/photo-1551288049-bebda4e38f71.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "instrument_ip",
+          "type": "string",
+          "required": true,
+          "desc": "仪器 IP 地址（VISA）"
+        },
+        {
+          "name": "freq_list",
+          "type": "number[]",
+          "required": true,
+          "desc": "测量频点列表（MHz）"
+        },
+        {
+          "name": "metrics",
+          "type": "string[]",
+          "required": false,
+          "desc": "默认 [EVM, ACLR, Pout, NF]"
+        }
+      ],
+      "examplePrompt": "测量 AIR6449 n78 频段 EVM 和 ACLR，仪器 192.168.1.100",
+      "exampleOutput": "📡 已连接 R&S FSW43\n📊 EVM: 2.1%/2.3%/2.8% ✅\n📊 ACLR: -45.2 dBc ✅"
+    },
+    {
+      "id": "13",
+      "name": "质量问题追踪",
+      "description": "Radio 产品发布后质量问题的记录、分析与闭环管控系统",
+      "category": "Q&A",
+      "categoryId": "qa",
+      "image": "skill-images/qa.jpg",
+      "rating": 4.7,
+      "downloads": "1.5K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "质量管控",
+        "问题追踪",
+        "闭环"
+      ],
+      "version": "2.0",
+      "author": "QA Team",
+      "updatedAt": "2025-01-02",
+      "capabilityFull": "录入现场质量问题并自动分类归因，关联历史问题库识别重复性缺陷模式，跟踪改善措施执行进度，生成质量趋势月报/季报，支持与 Jira 和 SAP QM 集成。",
+      "ratingDist": [
+        62,
+        25,
+        8,
+        4,
+        1
+      ],
+      "reviewCount": 55,
+      "cases": [
+        {
+          "title": "CPRI LOS 问题根因分析",
+          "image": "skill-images/cases/photo-1700727448575-6f1680cd7d75.jpg"
+        },
+        {
+          "title": "批次质量趋势月报",
+          "image": "skill-images/cases/photo-1454165804606-c3d57bc86b40.jpg"
+        },
+        {
+          "title": "改善措施闭环追踪",
+          "image": "skill-images/cases/photo-1542744173-8e7e53415bb0.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "issue_desc",
+          "type": "string",
+          "required": true,
+          "desc": "问题描述（现象、频次、批次）"
+        },
+        {
+          "name": "product_line",
+          "type": "string",
+          "required": true,
+          "desc": "产品线，如 AIR6449"
+        },
+        {
+          "name": "priority",
+          "type": "enum",
+          "required": false,
+          "desc": "P1 | P2 | P3"
+        }
+      ],
+      "examplePrompt": "录入 AIR6449 CPRI LOS 问题，发生率 5%，批次 2024Q4",
+      "exampleOutput": "🔍 问题 ID: QA-2025-0042\n📋 历史相似问题 3 条\n⚠️ 初步归因: 光模块焊接质量"
+    },
+    {
+      "id": "14",
+      "name": "可靠性与合规检测",
+      "description": "Radio 产品可靠性验证与行业合规认证管理，确保产品达到交付标准",
+      "category": "Q&A",
+      "categoryId": "qa",
+      "image": "skill-images/qa.jpg",
+      "rating": 4.8,
+      "downloads": "1.2K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "可靠性",
+        "合规",
+        "认证"
+      ],
+      "version": "1.6",
+      "author": "QA Team",
+      "updatedAt": "2024-12-30",
+      "capabilityFull": "检查产品设计是否符合 ETSI EN 300 019 环境测试标准；管理 CE、FCC、PTCRB 认证流程与文件；分析 MTBF/MTTR 数据评估可靠性；生成合规性检查清单与认证差距分析报告。",
+      "ratingDist": [
+        70,
+        20,
+        6,
+        3,
+        1
+      ],
+      "reviewCount": 43,
+      "cases": [
+        {
+          "title": "EU CE 认证合规检查",
+          "image": "skill-images/cases/photo-1748255882537-cbe88b145305.jpg"
+        },
+        {
+          "title": "MTBF 可靠性评估",
+          "image": "skill-images/cases/photo-1551288049-bebda4e38f71.jpg"
+        },
+        {
+          "title": "认证差距分析报告",
+          "image": "skill-images/cases/photo-1454165804606-c3d57bc86b40.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "product_spec",
+          "type": "File",
+          "required": true,
+          "desc": "产品规格文件（PDF）"
+        },
+        {
+          "name": "target_markets",
+          "type": "string[]",
+          "required": true,
+          "desc": "目标市场，如 [EU, US, CN]"
+        },
+        {
+          "name": "mtbf_data",
+          "type": "File",
+          "required": false,
+          "desc": "可靠性测试数据（CSV）"
+        }
+      ],
+      "examplePrompt": "检查 AIR6449 针对欧盟 CE 认证合规状态并评估可靠性",
+      "exampleOutput": "✅ CE 合规 47/50\n⚠️ 差距 3 处\n📊 MTBF: 68,000 小时"
+    },
+    {
+      "id": "15",
+      "name": "研发项目计划管理",
+      "description": "Radio 产品研发全周期项目计划制定、进度跟踪与风险管理",
+      "category": "PMO",
+      "categoryId": "pmo",
+      "image": "skill-images/pmo.jpg",
+      "rating": 4.9,
+      "downloads": "2.7K",
+      "isTrending": true,
+      "isFree": true,
+      "tags": [
+        "项目管理",
+        "进度",
+        "风险"
+      ],
+      "version": "3.1",
+      "author": "PMO Team",
+      "updatedAt": "2025-01-07",
+      "capabilityFull": "自动生成 WBS 和甘特图，支持关键路径分析；实时汇总各部门里程碑状态，识别延期风险；生成周报/月报并自动发送邮件；管理风险登记册与概率影响矩阵。",
+      "ratingDist": [
+        76,
+        16,
+        5,
+        2,
+        1
+      ],
+      "reviewCount": 142,
+      "cases": [
+        {
+          "title": "R19 甘特图自动生成",
+          "image": "skill-images/cases/photo-1608303588026-884930af2559.jpg"
+        },
+        {
+          "title": "里程碑风险识别",
+          "image": "skill-images/cases/photo-1532619675605-1ede6c2ed2b0.jpg"
+        },
+        {
+          "title": "PMO 周报自动输出",
+          "image": "skill-images/cases/photo-1542744173-8e7e53415bb0.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "project_plan",
+          "type": "File",
+          "required": true,
+          "desc": "项目计划文件（Excel/MPP）"
+        },
+        {
+          "name": "report_type",
+          "type": "enum",
+          "required": false,
+          "desc": "weekly | monthly | risk"
+        }
+      ],
+      "examplePrompt": "生成 R19 本周各部门里程碑进度报告并识别风险",
+      "exampleOutput": "📊 12/15 里程碑按时\n⚠️ 风险 2 个\n📄 周报已生成"
+    },
+    {
+      "id": "16",
+      "name": "跨部门协作协调",
+      "description": "协调 Radio 研发各部门资源与里程碑交付，推动项目按时高质量完成",
+      "category": "PMO",
+      "categoryId": "pmo",
+      "image": "skill-images/pmo.jpg",
+      "rating": 4.7,
+      "downloads": "1.9K",
+      "isTrending": false,
+      "isFree": true,
+      "tags": [
+        "协调",
+        "里程碑",
+        "跨部门"
+      ],
+      "version": "2.3",
+      "author": "PMO Team",
+      "updatedAt": "2024-12-25",
+      "capabilityFull": "分析跨部门依赖关系，识别关键路径上的阻塞项；自动发起协调会议邀请（Teams/Outlook 集成）；追踪行动项完成状态；生成跨部门接口冻结状态报告，确保各部门交付节点对齐。",
+      "ratingDist": [
+        60,
+        27,
+        9,
+        3,
+        1
+      ],
+      "reviewCount": 78,
+      "cases": [
+        {
+          "title": "DVT-exit 接口冻结协调",
+          "image": "skill-images/cases/photo-1532619675605-1ede6c2ed2b0.jpg"
+        },
+        {
+          "title": "跨部门依赖关系图",
+          "image": "skill-images/cases/photo-1608303588026-884930af2559.jpg"
+        },
+        {
+          "title": "行动项追踪与提醒",
+          "image": "skill-images/cases/photo-1557804506-669a67965ba0.jpg"
+        }
+      ],
+      "inputParams": [
+        {
+          "name": "dept_list",
+          "type": "string[]",
+          "required": true,
+          "desc": "参与部门列表"
+        },
+        {
+          "name": "milestone",
+          "type": "string",
+          "required": true,
+          "desc": "目标里程碑，如 DVT-exit"
+        }
+      ],
+      "examplePrompt": "协调 RD1/RD2/IVC 在 DVT-exit 前完成接口冻结",
+      "exampleOutput": "🔗 依赖 8 条\n⚠️ 阻塞 2 个\n📅 协调会议已发起"
+    }
+  ]
+}
