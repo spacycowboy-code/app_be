@@ -87,7 +87,14 @@ deploy:
   stage: deploy
   # docker:26+ bundles the `docker compose` v2 plugin.
   image: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/docker:26.1.4
+  variables:
+    # The runner defaults DOCKER_HOST to a dind service (tcp://docker:2375).
+    # Force the host Docker socket so the container persists on the host.
+    # Requires the runner to mount /var/run/docker.sock into the job.
+    DOCKER_HOST: "unix:///var/run/docker.sock"
   script:
+    # Diagnostic: is the host Docker socket actually mounted into the job?
+    - 'ls -l /var/run/docker.sock 2>&1 || echo "NOTE - no /var/run/docker.sock mounted in this runner"'
     # PROD_ENV is a File-type variable -> its value is the path to a temp file
     # containing the full .env. Drop it in beside docker-compose.yml.
     - cp "$PROD_ENV" .env
