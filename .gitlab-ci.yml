@@ -57,5 +57,11 @@ test:
   script:
     # Smoke check: the FastAPI app imports without errors.
     - python -c "import app.main; print('app.main imported OK')"
-    # Run the test suite. Exit code 5 = "no tests collected" -> treat as success.
-    - 'pytest -q; ec=$?; if [ "$ec" -eq 5 ]; then echo "No tests collected yet"; exit 0; fi; exit "$ec"'
+    # Run the test suite. GitLab runs scripts with `set -e`, so guard pytest
+    # with `|| ec=$?` to capture its status without aborting the line.
+    # Exit code 5 = "no tests collected" -> treat as success until tests exist.
+    - |
+      ec=0
+      pytest -q || ec=$?
+      if [ "$ec" -eq 5 ]; then echo "No tests collected yet"; ec=0; fi
+      exit "$ec"
