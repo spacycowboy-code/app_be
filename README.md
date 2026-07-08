@@ -83,3 +83,84 @@ python -m app.init_db
 (name/description search), `trending`.
 
 The API speaks **camelCase** JSON to match the Angular frontend.
+
+## Deployment (Docker + GitLab CI)
+
+The service ships as a Docker image and is deployed by the GitLab pipeline.
+
+### Files
+
+| File                 | Purpose                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `Dockerfile`         | `python:3.11-slim` + `git`/`ssh`, installs deps, runs uvicorn  |
+| `.dockerignore`      | Keeps `.venv`, `.git`, `.env`, caches out of the build context |
+| `docker-compose.yml` | Runs the container: port, volumes, `.env`, health check        |
+| `log_conf.yaml`      | uvicorn log config: console + rotating files under `/app/logs` |
+| `.gitlab-ci.yml`     | Pipeline: `lint` → `test` → `deploy`                           |
+
+### Runtime layout
+
+- **Port**: host `9000` → container `8000` (uvicorn).
+- **Volumes** (host ↔ container):
+  - `/proj/rp_ait_prod/services/ai-portal-be/gitlab` ↔ `/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill` (skill repo, = `SKILL_REPO_PATH`)
+  - `/proj/rp_ait_prod/logs/ai-portal-be` ↔ `/app/logs` (`backend.log`, `access.log`; 10 MB × 5 rotation)
+- Logs also go to stdout, so `docker compose logs -f` still works.
+
+### Configuration: the `PROD_ENV` variable
+
+The repo has **no `.env`** (it is gitignored). Production configuration lives
+in a single **File-type** GitLab CI/CD variable so all settings — current and
+future — are managed in one place, outside the repo.
+
+Add it under **Settings → CI/CD → Variables**:
+
+- **Type**: `File`
+- **Key**: `PROD_ENV`
+- **Value**: the complete production `.env` content
+- **Protected**: yes (and mark `main` as a protected branch)
+
+The `deploy` job writes it out with `cp "$PROD_ENV" .env` before starting the
+container. Example content:
+
+```dotenv
+DATABASE_URL=mysql+pymysql://<user>:<password>@<host>:<port>/<db>?charset=utf8mb4
+APP_NAME=RP AI Portal Backend
+DEBUG=false
+CORS_ORIGINS=https://<frontend-domain>
+GITLAB_TOKEN=<token>
+GITLAB_AGENTS_GROUP=rp-ai/rp-ai-agent
+GITLAB_TOOLS_GROUP=rp-ai/rp-ai-tool
+SKILL_REPO_PUSH=false
+```
+
+Settings with sensible defaults in `app/config.py` (e.g. `SKILL_REPO_PATH`,
+`GIT_AUTHOR_*`, `MAX_UPLOAD_BYTES`, `GITLAB_URL`) can be omitted.
+`SKILL_REPO_PUSH=true` requires an SSH key mounted into the container
+(uncomment the `.ssh` volume in `docker-compose.yml`).
+
+### Pipeline stages
+
+- **lint** — `ruff check` (non-blocking for now).
+- **test** — install deps, smoke-import `app.main`, run `pytest` (tolerates
+  "no tests collected").
+- **deploy** — builds the image locally and runs `docker compose up -d --build`
+  (no registry push). Gated to **`main` + manual**: after a merge to `main`,
+  open the pipeline and click ▶ on the `deploy` job.
+
+### Deploy flow
+
+1. Work on a feature branch → push runs `lint` + `test`.
+2. Open a Merge Request into `main` (protect `main` so changes only land via MR).
+3. After merge, the `main` pipeline exposes a manual `deploy` job — click ▶.
+4. The job writes `.env` from `PROD_ENV`, then `docker compose up -d --build`.
+
+### Requirements / notes
+
+- The `deploy` job must run on a runner that can reach the **host Docker
+  daemon** (so the container persists). A pure dind runner will not work; if
+  `docker compose` reports *"Cannot connect to the Docker daemon"*, switch to a
+  build-and-push-to-registry model instead.
+- The API currently authenticates only via the `X-User-Eid` header (no real
+  auth) — do not expose port 9000 to the public internet; keep it internal or
+  behind a gateway.
+- Manual local run: `docker compose up -d --build` (needs a local `.env`).

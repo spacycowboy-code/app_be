@@ -16,6 +16,7 @@ default:
 stages:
   - lint
   - test
+  - deploy
 
 variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
@@ -65,3 +66,36 @@ test:
       pytest -q || ec=$?
       if [ "$ec" -eq 5 ]; then echo "No tests collected yet"; ec=0; fi
       exit "$ec"
+
+# ---------------------------------------------------------------------------
+# Deploy: build the image locally and (re)start the container via compose.
+# No registry push — build and run happen on the SAME host Docker daemon.
+#
+# Requirements:
+#   * This job must run on a runner that can reach the target host's Docker
+#     daemon (docker.sock), so the container persists after the job ends.
+#     A pure dind runner will NOT work (its container vanishes with the job).
+#   * The repo has no .env (gitignored). Store the FULL production .env as a
+#     File-type CI/CD variable named PROD_ENV (Settings > CI/CD > Variables:
+#     Type = File, paste the complete .env content). The job writes it out so
+#     ALL settings (DATABASE_URL, GITLAB_* groups, DEBUG, etc.) are covered in
+#     one place. Mark it Protected and protect the main branch.
+#
+# Gated to main + manual: after merging to main, click ▶ to deploy.
+# ---------------------------------------------------------------------------
+deploy:
+  stage: deploy
+  # docker:26+ bundles the `docker compose` v2 plugin.
+  image: armdocker.rnd.ericsson.se/dockerhub-ericsson-remote/docker:26.1.4
+  script:
+    # PROD_ENV is a File-type variable -> its value is the path to a temp file
+    # containing the full .env. Drop it in beside docker-compose.yml.
+    - cp "$PROD_ENV" .env
+    - docker compose version
+    - docker compose up -d --build
+    - docker compose ps
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  # No `tags:` -> uses the same runner as lint/test. If you have a dedicated
+  # deploy runner, add its tag here.
