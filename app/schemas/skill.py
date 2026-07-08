@@ -125,4 +125,7 @@ class SkillSummary(CamelModel):
     is_free: bool = True
     tags: list[str] = Field(default_factory=list)
     author: str | None = None
+    uploader_eid: str | None = None
     status: SkillStatus = "pending"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models.review import RpAiSkillReview
 from app.models.skill import RpAiSkill
 from app.schemas.review import ReviewCreate, ReviewRead
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/skills/{skill_id}/reviews", tags=["reviews"])
 
@@ -39,7 +40,7 @@ def create_review(
 
     review = RpAiSkillReview(
         skill_id=skill_id,
-        reviewer_eid=payload.reviewer_eid,
+        reviewer_eid=normalize_eid(payload.reviewer_eid),
         accuracy=payload.accuracy,
         value=payload.value,
         docs=payload.docs,

@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
-from app.routers import categories, comments, favorites, reviews, skills, upload, users
+from app.routers import categories, comments, favorites, market, reviews, skills, upload, users
 
 settings = get_settings()
 
@@ -36,6 +36,7 @@ app.include_router(upload.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
+app.include_router(market.router)
 
 
 @app.get("/health", tags=["health"])

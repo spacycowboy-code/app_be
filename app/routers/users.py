@@ -12,6 +12,7 @@ from app.schemas.favorite import FavoriteRead
 from app.schemas.skill import SkillSummary
 from app.schemas.social import ActivityRead
 from app.schemas.user import UserCreate, UserRead, UserUpdate
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -26,10 +27,12 @@ def _get_user_or_404(db: Session, eid: str) -> RpAiPortal:
 @router.post("", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> RpAiPortal:
     """Create a user, or return the existing one (idempotent by EID)."""
-    existing = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == payload.eid))
+    data = payload.model_dump()
+    data["eid"] = normalize_eid(data.get("eid"))
+    existing = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == data["eid"]))
     if existing:
         return existing
-    user = RpAiPortal(**payload.model_dump())
+    user = RpAiPortal(**data)
     db.add(user)
     db.commit()
     db.refresh(user)

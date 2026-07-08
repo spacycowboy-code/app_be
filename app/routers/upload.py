@@ -30,6 +30,7 @@ from app.schemas.version import SkillUploadResult, SkillVersionRead
 from app.services.skill_manifest import has_name_and_description
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/skills", tags=["upload"])
 settings = get_settings()
@@ -37,9 +38,9 @@ settings = get_settings()
 
 def _category_image(category_id: str) -> str:
     """Frontend image asset for a category group."""
-    # 'public' has no dedicated image; reuse the tavily artwork.
+    # Public groups ('public', 'bnew') have no dedicated image; reuse tavily art.
     slug = category_id or "product-system"
-    if slug == "public":
+    if slug in ("public", "bnew"):
         return "skill-images/tavily.jpg"
     return f"skill-images/{slug}.jpg"
 
@@ -82,7 +83,7 @@ async def upload_skill(
     skill_id: str | None = Form(None, alias="id"),
     file: UploadFile | None = File(None),
 ) -> SkillUploadResult:
-    eid = eid.strip()
+    eid = normalize_eid(eid)
     if not eid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "eid is required")
 
@@ -161,6 +162,9 @@ async def upload_skill(
     skill.name = name
     if description is not None:
         skill.description = description
+    # Auto-fill the author with the uploader/owner EID when not already set.
+    if not skill.author:
+        skill.author = owner_eid or eid
     skill.category = category_label
     skill.category_id = category_id
     # Auto-assign the image for this skill's group.

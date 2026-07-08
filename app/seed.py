@@ -27,8 +27,8 @@ from app.models.user import RpAiPortal
 SEED_FILE = Path(__file__).parent / "seed_data.json"
 
 # All catalog skills are currently developed/owned by Ericsson.
-DEVELOPER_EID = "ericsson"
-DEVELOPER_NAME = "Ericsson"
+DEVELOPER_EID = "ERICSSON"
+DEVELOPER_NAME = "ERICSSON"
 
 
 def _ensure_developer(db: Session) -> None:

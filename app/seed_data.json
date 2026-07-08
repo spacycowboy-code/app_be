@@ -6,6 +6,11 @@
       "count": 48
     },
     {
+      "id": "bnew",
+      "label": "BNEW",
+      "count": 0
+    },
+    {
       "id": "public",
       "label": "公共",
       "count": 1

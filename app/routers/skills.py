@@ -1,9 +1,12 @@
 """Skill endpoints: browse, detail, create, update, delete."""
+import io
 import re
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -125,6 +128,78 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
     """Return the skill's full SKILL.md content (the source of truth)."""
     skill = _get_skill_or_404(db, skill_id)
     return {"skillId": skill.id, "content": _read_skill_md(skill)}
+
+
+# Files that are always present but do not, on their own, make a skill
+# "multi-file" (SKILL.md is the payload; manifest.json is internal metadata).
+_BASE_FILES = {"SKILL.md", "manifest.json"}
+
+
+def _bump_downloads(db: Session, skill: RpAiSkill) -> None:
+    """Best-effort increment of the download counter (only for plain ints)."""
+    try:
+        skill.downloads = str(int(str(skill.downloads or "0")) + 1)
+        db.commit()
+    except (ValueError, TypeError):
+        db.rollback()
+
+
+@router.get("/{skill_id}/download")
+def download_skill(skill_id: str, db: Session = Depends(get_db)):
+    """Download a skill.
+
+    - Single-file skill (only SKILL.md, no extra artifacts) -> the .md file.
+    - Multi-file skill (has additional files) -> a .zip of the whole folder.
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    folder = (
+        Path(settings.skill_repo_path) / skill.storage_path
+        if skill.storage_path
+        else None
+    )
+
+    if folder and folder.is_dir():
+        files = [
+            p for p in folder.rglob("*") if p.is_file() and ".git" not in p.parts
+        ]
+        extra = [p for p in files if p.name not in _BASE_FILES]
+        md_path = folder / "SKILL.md"
+
+        if not extra and md_path.is_file():
+            # Single markdown skill: download the .md directly.
+            _bump_downloads(db, skill)
+            return FileResponse(
+                md_path, media_type="text/markdown", filename=f"{skill_id}.md"
+            )
+
+        if extra:
+            # Multi-file skill: zip the whole folder (SKILL.md + artifacts + manifest).
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in files:
+                    zf.write(p, arcname=str(Path(skill_id) / p.relative_to(folder)))
+            buf.seek(0)
+            _bump_downloads(db, skill)
+            return StreamingResponse(
+                buf,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{skill_id}.zip"'
+                },
+            )
+
+    # Fallback: no folder on disk — serve the stored instructions as SKILL.md.
+    content = skill.instructions or ""
+    if not content:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容"
+        )
+    _bump_downloads(db, skill)
+    return Response(
+        content=content,
+        media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="{skill_id}.md"'},
+    )
 
 
 @router.post("", response_model=SkillRead, status_code=status.HTTP_201_CREATED)

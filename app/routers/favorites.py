@@ -8,6 +8,7 @@ from app.models.favorite import RpAiUserFavorite
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.schemas.favorite import FavoriteCreate, FavoriteRead
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/users/{eid}/favorites", tags=["favorites"])
 
@@ -21,6 +22,7 @@ def _ensure_user(db: Session, eid: str) -> None:
 def add_favorite(
     eid: str, payload: FavoriteCreate, db: Session = Depends(get_db)
 ) -> RpAiUserFavorite:
+    eid = normalize_eid(eid)
     _ensure_user(db, eid)
     if db.get(RpAiSkill, payload.skill_id) is None:
         raise HTTPException(

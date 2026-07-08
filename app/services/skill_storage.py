@@ -140,7 +140,8 @@ class SkillStorage:
         else:
             rel = Path(category_slug) / self.folder_name(skill_id, eid, name)
         skill_dir = self.repo / rel
-        (skill_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        artifacts_dir = skill_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
 
         version = bump_minor(current_version)
 
@@ -150,8 +151,13 @@ class SkillStorage:
         # Save uploaded artifact (if any).
         artifact_name = None
         if artifact_bytes is not None and artifact_filename:
+            # Replace any previously stored artifacts so stale files from an
+            # earlier version don't leak into downloads.
+            for old in artifacts_dir.iterdir():
+                if old.is_file():
+                    old.unlink()
             artifact_name = sanitize_segment(Path(artifact_filename).name, "artifact")
-            (skill_dir / "artifacts" / artifact_name).write_bytes(artifact_bytes)
+            (artifacts_dir / artifact_name).write_bytes(artifact_bytes)
 
         # Write manifest.
         full_manifest = {
@@ -168,7 +174,7 @@ class SkillStorage:
         )
 
         # Commit.
-        self._git("add", "--", str(rel))
+        self._git("add", "-A", "--", str(rel))
         commit_msg = f"{action}({category_slug}): {name} v{version}"
         try:
             self._git("commit", "-m", commit_msg)
