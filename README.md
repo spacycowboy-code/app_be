@@ -138,28 +138,49 @@ Settings with sensible defaults in `app/config.py` (e.g. `SKILL_REPO_PATH`,
 `SKILL_REPO_PUSH=true` requires an SSH key mounted into the container
 (uncomment the `.ssh` volume in `docker-compose.yml`).
 
+### Deploy access (SSH)
+
+The GitLab runner is a docker executor with no host Docker daemon, so it cannot
+run a persistent container itself. Instead the `deploy` job **SSHes into the
+deploy server** and runs `docker compose` there (the server builds locally — no
+registry push). Add these File/Variable CI/CD variables (mark Protected):
+
+| Variable         | Type     | Purpose                                             |
+| ---------------- | -------- | --------------------------------------------------- |
+| `DEPLOY_HOST`    | Variable | deploy server hostname/IP                           |
+| `DEPLOY_USER`    | Variable | SSH login user (able to run docker on the server)   |
+| `DEPLOY_DIR`     | Variable | target dir, e.g. `/proj/rp_ait_prod/services/ai-portal-be` |
+| `DEPLOY_PORT`    | Variable | optional SSH port (defaults to 22)                  |
+| `DEPLOY_SSH_KEY` | File     | private key; its public key is in the server's `authorized_keys` |
+| `PROD_ENV`       | File     | full production `.env` (see above)                  |
+
+Server prerequisites: Docker + `docker compose` v2 + `rsync` installed,
+`DEPLOY_USER` can run docker, and the bind-mount paths in `docker-compose.yml`
+exist (Docker creates them on first run).
+
 ### Pipeline stages
 
 - **lint** — `ruff check` (non-blocking for now).
 - **test** — install deps, smoke-import `app.main`, run `pytest` (tolerates
   "no tests collected").
-- **deploy** — builds the image locally and runs `docker compose up -d --build`
-  (no registry push). Gated to **`main` + manual**: after a merge to `main`,
-  open the pipeline and click ▶ on the `deploy` job.
+- **deploy** — SSHes into the deploy server, `rsync`s the code + `.env`, then
+  runs `docker compose up -d --build` there. Gated to **`main` + manual**:
+  after a merge to `main`, open the pipeline and click ▶ on the `deploy` job.
 
 ### Deploy flow
 
 1. Work on a feature branch → push runs `lint` + `test`.
 2. Open a Merge Request into `main` (protect `main` so changes only land via MR).
 3. After merge, the `main` pipeline exposes a manual `deploy` job — click ▶.
-4. The job writes `.env` from `PROD_ENV`, then `docker compose up -d --build`.
+4. The job rsyncs the repo to `$DEPLOY_DIR`, writes `.env` from `PROD_ENV`, and
+   runs `docker compose up -d --build` on the server.
 
 ### Requirements / notes
 
-- The `deploy` job must run on a runner that can reach the **host Docker
-  daemon** (so the container persists). A pure dind runner will not work; if
-  `docker compose` reports *"Cannot connect to the Docker daemon"*, switch to a
-  build-and-push-to-registry model instead.
+- The `deploy` job needs network + SSH access from the runner to `DEPLOY_HOST`;
+  the deploy server needs Docker + compose. (If instead you get a runner that
+  runs on the deploy host with host-docker access, the job could run
+  `docker compose` directly and drop the SSH hop.)
 - The API currently authenticates only via the `X-User-Eid` header (no real
   auth) — do not expose port 9000 to the public internet; keep it internal or
   behind a gateway.
