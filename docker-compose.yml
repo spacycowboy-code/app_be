@@ -1,0 +1,42 @@
+# RP AI Portal backend — Docker Compose deployment.
+#
+# Prerequisites on the host:
+#   * A `.env` file must sit next to this file (it holds DATABASE_URL,
+#     GITLAB_TOKEN, etc.). It is gitignored and NOT part of the repo, so copy
+#     it onto the server manually.
+#   * The skill repo host dir below must exist and be a git repo (with its
+#     remote/SSH configured) if you want skill uploads to push to GitLab.
+#
+# Run:  docker compose up -d --build
+# Logs: docker compose logs -f
+# API:  http://<host>:9000/health
+
+services:
+  backend:
+    build: .
+    image: rp-ai-portal-be:latest
+    container_name: rp-ai-portal-be
+    restart: unless-stopped
+
+    # Loads DATABASE_URL, GITLAB_TOKEN, CORS_ORIGINS, etc. from the host .env.
+    env_file:
+      - .env
+
+    # Host 9000 -> container 8000 (uvicorn).
+    ports:
+      - "9000:8000"
+
+    volumes:
+      # Skill storage repo: host dir <-> container path (= SKILL_REPO_PATH default).
+      - /proj/rp_ait_prod/services/ai-portal-be/gitlab:/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill
+      # Logs: unified host path <-> container /app/logs (backend.log, access.log).
+      - /proj/rp_ait_prod/logs/ai-portal-be:/app/logs
+      # Optional: mount an SSH key if the skill repo pushes to GitLab over SSH.
+      # - /proj/rp_ait_prod/services/ai-portal-be/ssh:/root/.ssh:ro
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,15 @@
+# Keep build context small and secrets out of the image.
+.venv/
+.git/
+.gitlab-ci.yml
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.pip-cache/
+.env
+.env.example
+*.md
+Dockerfile
+docker-compose.yml

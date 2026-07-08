@@ -1,0 +1,52 @@
+# uvicorn --log-config: logs to console (stdout) AND rotating files under /app/logs.
+# The host maps /app/logs to a unified path, e.g. /proj/rp_ait_prod/logs/ai-portal-be.
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  default:
+    "()": uvicorn.logging.DefaultFormatter
+    fmt: "%(asctime)s %(levelprefix)s %(name)s %(message)s"
+    use_colors: false
+  access:
+    "()": uvicorn.logging.AccessFormatter
+    fmt: '%(asctime)s %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    use_colors: false
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: default
+    stream: ext://sys.stdout
+  app_file:
+    class: logging.handlers.RotatingFileHandler
+    formatter: default
+    filename: /app/logs/backend.log
+    maxBytes: 10485760      # 10 MB per file
+    backupCount: 5          # keep 5 rotated files
+    encoding: utf-8
+  access_file:
+    class: logging.handlers.RotatingFileHandler
+    formatter: access
+    filename: /app/logs/access.log
+    maxBytes: 10485760
+    backupCount: 5
+    encoding: utf-8
+
+loggers:
+  uvicorn:
+    level: INFO
+    handlers: [console, app_file]
+    propagate: false
+  uvicorn.error:
+    level: INFO
+    handlers: [console, app_file]
+    propagate: false
+  uvicorn.access:
+    level: INFO
+    handlers: [console, access_file]
+    propagate: false
+
+root:
+  level: INFO
+  handlers: [console, app_file]
