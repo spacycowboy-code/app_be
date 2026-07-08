@@ -1,0 +1,61 @@
+# GitLab CI pipeline for the RP AI Portal backend (FastAPI + SQLAlchemy, Python 3.11).
+#
+# Stages:
+#   lint  - static analysis with ruff (style + common bugs)
+#   test  - install deps, verify the app imports cleanly, run pytest if present
+#
+# Notes:
+#   * DATABASE_URL is a dummy value here: SQLAlchemy's create_engine is lazy, so
+#     the app imports without a live MySQL. Set a real one in the project's
+#     CI/CD variables (Settings > CI/CD > Variables) if a job needs the DB.
+#   * Never commit real secrets to this file; use masked CI/CD variables instead.
+
+default:
+  image: python:3.11-slim
+
+stages:
+  - lint
+  - test
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  # Dummy DB URL so `import app.main` (which builds a lazy engine) succeeds.
+  DATABASE_URL: "mysql+pymysql://ci:ci@localhost:3306/ci_db"
+  # Skip skill-repo git pushes in CI.
+  SKILL_REPO_PUSH: "false"
+
+# Cache pip downloads across jobs/pipelines to speed up installs.
+cache:
+  key:
+    files:
+      - requirements.txt
+  paths:
+    - .pip-cache/
+
+# Run for branch pushes and merge requests; avoid duplicate pipelines.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+lint:
+  stage: lint
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install ruff==0.8.4
+  script:
+    - ruff check .
+  # Flip to false once the codebase is ruff-clean to make lint blocking.
+  allow_failure: true
+
+test:
+  stage: test
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r requirements.txt
+    - pip install pytest
+  script:
+    # Smoke check: the FastAPI app imports without errors.
+    - python -c "import app.main; print('app.main imported OK')"
+    # Run the test suite. Exit code 5 = "no tests collected" -> treat as success.
+    - 'pytest -q; ec=$?; if [ "$ec" -eq 5 ]; then echo "No tests collected yet"; exit 0; fi; exit "$ec"'
