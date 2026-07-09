@@ -98,6 +98,13 @@ deploy:
   before_script:
     - apk add --no-cache openssh-client rsync
   script:
+    # Preflight: fail fast with a clear message if required variables are empty
+    # (e.g. Protected variables while main is not a protected branch).
+    - |
+      : "${DEPLOY_HOST:?not set — add DEPLOY_HOST in CI/CD Variables; if Protected, protect the main branch}"
+      : "${DEPLOY_USER:?not set — add DEPLOY_USER in CI/CD Variables}"
+      : "${DEPLOY_DIR:?not set — add DEPLOY_DIR in CI/CD Variables}"
+      echo "Deploying to ${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_DIR} (port ${DEPLOY_PORT:-22})"
     - mkdir -p ~/.ssh && chmod 700 ~/.ssh
     - cp "$DEPLOY_SSH_KEY" ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
     - 'SSHBASE="-i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${DEPLOY_PORT:-22}"'
