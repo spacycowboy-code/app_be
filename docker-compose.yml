@@ -28,7 +28,7 @@ services:
 
     volumes:
       # Skill storage repo: host dir <-> container path (= SKILL_REPO_PATH default).
-      - /proj/rp_ait_prod/services/ai-portal-be/gitlab:/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill
+      - /proj/rp_ait_prod/data/ai-portal-be/rp-ai-skill:/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill
       # Logs: unified host path <-> container /app/logs (backend.log, access.log).
       - /proj/rp_ait_prod/logs/ai-portal-be:/app/logs
       # Optional: mount an SSH key if the skill repo pushes to GitLab over SSH.
