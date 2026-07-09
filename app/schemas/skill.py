@@ -108,6 +108,12 @@ class SkillRead(SkillBase):
     favorite_count: int = 0
     created_at: datetime
     updated_at: datetime
+    # Git sync status of the last write. ``synced`` is None when remote push is
+    # disabled or not applicable; False means the change was saved locally but
+    # the push to the GitLab remote failed. ``sync_warning`` carries a
+    # human-readable message the frontend can surface when synced is False.
+    synced: bool | None = None
+    sync_warning: str | None = None
 
 
 class SkillSummary(CamelModel):

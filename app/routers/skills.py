@@ -289,6 +289,17 @@ def update_skill(
 
     db.commit()
     db.refresh(skill)
+
+    # Surface the git sync status without failing the request: the edit is
+    # already saved to the DB and committed to the local repo; only the push
+    # to the GitLab remote may have failed. The frontend can warn the user.
+    if settings.skill_repo_push:
+        skill.synced = result.pushed
+        if not result.pushed:
+            skill.sync_warning = (
+                "改动已保存，但同步到 GitLab 远端失败，远端暂未更新；"
+                "请稍后重试或联系管理员。"
+            )
     return skill
 
 
