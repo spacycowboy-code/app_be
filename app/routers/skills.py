@@ -4,6 +4,7 @@ import re
 import uuid
 import zipfile
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -144,14 +145,27 @@ def _bump_downloads(db: Session, skill: RpAiSkill) -> None:
         db.rollback()
 
 
+def _content_disposition(filename: str) -> str:
+    """Build an attachment Content-Disposition with an ASCII fallback plus an
+    RFC 5987 UTF-8 name, so non-ASCII (e.g. Chinese) skill names download with
+    the correct filename across browsers."""
+    ascii_name = filename.encode("ascii", "ignore").decode().strip() or "download"
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
 @router.get("/{skill_id}/download")
 def download_skill(skill_id: str, db: Session = Depends(get_db)):
     """Download a skill.
 
     - Single-file skill (only SKILL.md, no extra artifacts) -> the .md file.
     - Multi-file skill (has additional files) -> a .zip of the whole folder.
+
+    The downloaded file is named after the skill's real name (not its id).
     """
     skill = _get_skill_or_404(db, skill_id)
+    # Human-friendly base name from the skill's title (keeps unicode, safe for
+    # a filename); falls back to the id if the name sanitises to nothing.
+    safe_name = sanitize_segment(skill.name, skill_id)
     folder = (
         Path(settings.skill_repo_path) / skill.storage_path
         if skill.storage_path
@@ -169,7 +183,7 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
             # Single markdown skill: download the .md directly.
             _bump_downloads(db, skill)
             return FileResponse(
-                md_path, media_type="text/markdown", filename=f"{skill_id}.md"
+                md_path, media_type="text/markdown", filename=f"{safe_name}.md"
             )
 
         if extra:
@@ -177,15 +191,13 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in files:
-                    zf.write(p, arcname=str(Path(skill_id) / p.relative_to(folder)))
+                    zf.write(p, arcname=str(Path(safe_name) / p.relative_to(folder)))
             buf.seek(0)
             _bump_downloads(db, skill)
             return StreamingResponse(
                 buf,
                 media_type="application/zip",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{skill_id}.zip"'
-                },
+                headers={"Content-Disposition": _content_disposition(f"{safe_name}.zip")},
             )
 
     # Fallback: no folder on disk — serve the stored instructions as SKILL.md.
@@ -198,7 +210,7 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
     return Response(
         content=content,
         media_type="text/markdown",
-        headers={"Content-Disposition": f'attachment; filename="{skill_id}.md"'},
+        headers={"Content-Disposition": _content_disposition(f"{safe_name}.md")},
     )
 
 
