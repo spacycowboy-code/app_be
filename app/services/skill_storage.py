@@ -72,6 +72,11 @@ class SkillStorage:
             "git",
             "-C",
             str(self.repo),
+            # The skill repo is a bind mount owned by the host user, while the
+            # container process runs as root. Without this, git refuses with
+            # "detected dubious ownership" (exit 128). Scope it to this repo.
+            "-c",
+            f"safe.directory={self.repo}",
             "-c",
             f"user.name={settings.git_author_name}",
             "-c",
