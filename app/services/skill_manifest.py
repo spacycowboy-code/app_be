@@ -5,7 +5,9 @@ files stay consistent regardless of how a skill was written.
 """
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 
 from app.models.skill import RpAiSkill
 
@@ -18,6 +20,34 @@ _FM_DESC_VAL = re.compile(r"(?im)^\s*description\s*:\s*(.+?)\s*$")
 def has_name_and_description(text: str) -> bool:
     """True if the markdown contains both ``name:`` and ``description:``."""
     return bool(text) and bool(_FM_NAME.search(text)) and bool(_FM_DESC.search(text))
+
+
+def extract_skill_md_from_zip(data: bytes) -> str | None:
+    """Return the text of ``SKILL.md`` from a zip archive, or ``None``.
+
+    Handles archives where the skill folder is nested one level deep (e.g.
+    ``test-skill/SKILL.md``) by picking the shallowest match. The filename
+    match is case-insensitive. Returns ``None`` if the bytes are not a valid
+    zip, no ``SKILL.md`` is present, or it cannot be decoded as UTF-8.
+    """
+    if not data or not zipfile.is_zipfile(io.BytesIO(data)):
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            candidates = [
+                info
+                for info in zf.infolist()
+                if not info.is_dir()
+                and info.filename.rsplit("/", 1)[-1].lower() == "skill.md"
+            ]
+            if not candidates:
+                return None
+            # Prefer the shallowest SKILL.md (fewest path segments).
+            candidates.sort(key=lambda i: i.filename.count("/"))
+            raw = zf.read(candidates[0])
+        return raw.decode("utf-8")
+    except (zipfile.BadZipFile, UnicodeDecodeError, KeyError):
+        return None
 
 
 def parse_frontmatter(text: str) -> tuple[str | None, str | None]:

@@ -27,7 +27,10 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
 from app.schemas.version import SkillUploadResult, SkillVersionRead
-from app.services.skill_manifest import has_name_and_description
+from app.services.skill_manifest import (
+    extract_skill_md_from_zip,
+    has_name_and_description,
+)
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
@@ -103,6 +106,11 @@ async def upload_skill(
             file_text = artifact_bytes.decode("utf-8")
         except UnicodeDecodeError:
             file_text = None
+        # Binary uploads (e.g. a .zip package) can't be decoded as text.
+        # Try to pull SKILL.md out of the archive so the definition can be
+        # validated and stored, while the zip itself is kept as the artifact.
+        if file_text is None:
+            file_text = extract_skill_md_from_zip(artifact_bytes)
 
     # The skill definition (SKILL.md) comes from the uploaded file, or the
     # instructions field as a fallback. It MUST declare name: and description:.
