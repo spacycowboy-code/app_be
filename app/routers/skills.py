@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -131,11 +131,6 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
     return {"skillId": skill.id, "content": _read_skill_md(skill)}
 
 
-# Files that are always present but do not, on their own, make a skill
-# "multi-file" (SKILL.md is the payload; manifest.json is internal metadata).
-_BASE_FILES = {"SKILL.md", "manifest.json"}
-
-
 def _bump_downloads(db: Session, skill: RpAiSkill) -> None:
     """Best-effort increment of the download counter (only for plain ints)."""
     try:
@@ -155,12 +150,12 @@ def _content_disposition(filename: str) -> str:
 
 @router.get("/{skill_id}/download")
 def download_skill(skill_id: str, db: Session = Depends(get_db)):
-    """Download a skill.
+    """Download a skill as a .zip archive named after the skill's real name.
 
-    - Single-file skill (only SKILL.md, no extra artifacts) -> the .md file.
-    - Multi-file skill (has additional files) -> a .zip of the whole folder.
-
-    The downloaded file is named after the skill's real name (not its id).
+    The archive contains the whole skill folder (SKILL.md + any artifacts +
+    manifest) under a top-level directory named after the skill. Skills with
+    no folder on disk fall back to a zip containing a single SKILL.md built
+    from the stored instructions.
     """
     skill = _get_skill_or_404(db, skill_id)
     # Human-friendly base name from the skill's title (keeps unicode, safe for
@@ -172,45 +167,32 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
         else None
     )
 
+    files: list[Path] = []
     if folder and folder.is_dir():
         files = [
             p for p in folder.rglob("*") if p.is_file() and ".git" not in p.parts
         ]
-        extra = [p for p in files if p.name not in _BASE_FILES]
-        md_path = folder / "SKILL.md"
 
-        if not extra and md_path.is_file():
-            # Single markdown skill: download the .md directly.
-            _bump_downloads(db, skill)
-            return FileResponse(
-                md_path, media_type="text/markdown", filename=f"{safe_name}.md"
-            )
+    content: str | None = None
+    if not files:
+        # No folder on disk — fall back to the stored instructions as SKILL.md.
+        content = skill.instructions or ""
+        if not content:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容")
 
-        if extra:
-            # Multi-file skill: zip the whole folder (SKILL.md + artifacts + manifest).
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for p in files:
-                    zf.write(p, arcname=str(Path(safe_name) / p.relative_to(folder)))
-            buf.seek(0)
-            _bump_downloads(db, skill)
-            return StreamingResponse(
-                buf,
-                media_type="application/zip",
-                headers={"Content-Disposition": _content_disposition(f"{safe_name}.zip")},
-            )
-
-    # Fallback: no folder on disk — serve the stored instructions as SKILL.md.
-    content = skill.instructions or ""
-    if not content:
-        raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容"
-        )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        if files:
+            for p in files:
+                zf.write(p, arcname=str(Path(safe_name) / p.relative_to(folder)))
+        else:
+            zf.writestr(str(Path(safe_name) / "SKILL.md"), content or "")
+    buf.seek(0)
     _bump_downloads(db, skill)
-    return Response(
-        content=content,
-        media_type="text/markdown",
-        headers={"Content-Disposition": _content_disposition(f"{safe_name}.md")},
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": _content_disposition(f"{safe_name}.zip")},
     )
 
 

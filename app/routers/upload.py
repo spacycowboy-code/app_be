@@ -81,6 +81,7 @@ async def upload_skill(
     name: str = Form(...),
     category_id: str = Form(..., alias="categoryId"),
     description: str | None = Form(None),
+    author: str | None = Form(None, description="Display name; defaults to owner EID"),
     tags: str | None = Form(None, description="JSON array or comma-separated"),
     instructions: str | None = Form(None),
     skill_id: str | None = Form(None, alias="id"),
@@ -141,6 +142,7 @@ async def upload_skill(
     manifest = {
         "name": name,
         "description": description,
+        "author": (author or "").strip() or (existing.uploader_eid if existing else eid),
         "category": category_label,
         "categoryId": category_id,
         "tags": parsed_tags,
@@ -170,8 +172,12 @@ async def upload_skill(
     skill.name = name
     if description is not None:
         skill.description = description
-    # Auto-fill the author with the uploader/owner EID when not already set.
-    if not skill.author:
+    # Display name (author): use the provided value, otherwise fall back to the
+    # uploader/owner EID (only when not already set on an existing skill).
+    display_name = (author or "").strip()
+    if display_name:
+        skill.author = display_name
+    elif not skill.author:
         skill.author = owner_eid or eid
     skill.category = category_label
     skill.category_id = category_id

@@ -17,6 +17,7 @@ from app.models.version import RpAiSkillVersion
 from app.models.comment import RpAiSkillComment
 from app.models.activity import RpAiActivity
 from app.models.market import RpAiMarketItem
+from app.models.market_favorite import RpAiMarketFavorite
 
 __all__ = [
     "RpAiPortal",
@@ -31,4 +32,5 @@ __all__ = [
     "RpAiSkillComment",
     "RpAiActivity",
     "RpAiMarketItem",
+    "RpAiMarketFavorite",
 ]

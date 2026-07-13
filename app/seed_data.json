@@ -2,8 +2,13 @@
   "categories": [
     {
       "id": "all",
-      "label": "全部",
+      "label": "All",
       "count": 48
+    },
+    {
+      "id": "ai-team",
+      "label": "AI team",
+      "count": 0
     },
     {
       "id": "bnew",
@@ -12,7 +17,7 @@
     },
     {
       "id": "public",
-      "label": "公共",
+      "label": "Public",
       "count": 1
     },
     {
