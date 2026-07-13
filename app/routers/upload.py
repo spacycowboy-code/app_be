@@ -30,6 +30,7 @@ from app.schemas.version import SkillUploadResult, SkillVersionRead
 from app.services.skill_manifest import (
     extract_skill_md_from_zip,
     has_name_and_description,
+    parse_frontmatter,
 )
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
@@ -122,6 +123,11 @@ async def upload_skill(
             "Skill 定义必须包含 name: 和 description: 两个字段",
         )
 
+    # The card/description shown in the market comes from the SKILL.md
+    # `description:` frontmatter; the (optional) form field only overrides it.
+    _, fm_description = parse_frontmatter(definition)
+    effective_description = description if description is not None else fm_description
+
     # Resolve identity: existing skill (by id) -> re-upload/version bump.
     existing: RpAiSkill | None = None
     if skill_id:
@@ -141,7 +147,7 @@ async def upload_skill(
     parsed_tags = _parse_tags(tags)
     manifest = {
         "name": name,
-        "description": description,
+        "description": effective_description,
         "author": (author or "").strip() or (existing.uploader_eid if existing else eid),
         "category": category_label,
         "categoryId": category_id,
@@ -170,8 +176,8 @@ async def upload_skill(
         skill = RpAiSkill(id=resolved_id, uploader_eid=eid, tags=[])
         db.add(skill)
     skill.name = name
-    if description is not None:
-        skill.description = description
+    if effective_description is not None:
+        skill.description = effective_description
     # Display name (author): use the provided value, otherwise fall back to the
     # uploader/owner EID (only when not already set on an existing skill).
     display_name = (author or "").strip()

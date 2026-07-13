@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.favorite import RpAiUserFavorite
+from app.models.category import RpAiCategory
 from app.models.skill import (
     RpAiInputParam,
     RpAiSkill,
@@ -223,6 +224,11 @@ def update_skill(
     )
     for key, val in scalar_data.items():
         setattr(skill, key, val)
+    # When the group (category) is changed, refresh the denormalized label.
+    if "category_id" in scalar_data and skill.category_id:
+        cat = db.get(RpAiCategory, skill.category_id)
+        if cat:
+            skill.category = cat.label
     _apply_children(skill, payload)
 
     # If the raw SKILL.md was edited directly, it is the source of truth:
