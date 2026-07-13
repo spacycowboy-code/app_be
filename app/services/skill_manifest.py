@@ -9,12 +9,16 @@ import io
 import re
 import zipfile
 
+import yaml
+
 from app.models.skill import RpAiSkill
 
 _FM_NAME = re.compile(r"(?im)^\s*name\s*:")
 _FM_DESC = re.compile(r"(?im)^\s*description\s*:")
 _FM_NAME_VAL = re.compile(r"(?im)^\s*name\s*:\s*(.+?)\s*$")
 _FM_DESC_VAL = re.compile(r"(?im)^\s*description\s*:\s*(.+?)\s*$")
+# Leading YAML frontmatter block delimited by --- ... --- (CRLF/LF tolerant).
+_FM_BLOCK = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", re.DOTALL)
 
 
 def has_name_and_description(text: str) -> bool:
@@ -51,10 +55,46 @@ def extract_skill_md_from_zip(data: bytes) -> str | None:
 
 
 def parse_frontmatter(text: str) -> tuple[str | None, str | None]:
-    """Extract the name and description values from the markdown."""
-    n = _FM_NAME_VAL.search(text or "")
-    d = _FM_DESC_VAL.search(text or "")
-    return (n.group(1).strip() if n else None, d.group(1).strip() if d else None)
+    """Extract the name and description values from the markdown frontmatter.
+
+    Parses the leading ``---`` YAML block with a real YAML parser so every
+    scalar style is handled correctly — plain, quoted, and multi-line folded
+    (``>`` / ``>-``) or literal (``|``) block scalars. Falls back to a simple
+    per-line regex when there is no ``---`` block or YAML parsing fails.
+    """
+    if not text:
+        return (None, None)
+
+    block_match = _FM_BLOCK.match(text.lstrip("\ufeff"))
+    if block_match:
+        try:
+            data = yaml.safe_load(block_match.group(1))
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            name = data.get("name")
+            desc = data.get("description")
+            return (
+                str(name).strip() if name is not None else None,
+                str(desc).strip() if desc is not None else None,
+            )
+
+    # Fallback: no/invalid ``---`` block — grab the inline values by regex and
+    # strip surrounding quotes (block scalars can't be recovered this way).
+    n = _FM_NAME_VAL.search(text)
+    d = _FM_DESC_VAL.search(text)
+
+    def _clean(v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip().strip('"').strip("'").strip()
+        # A lone block-scalar indicator carries no inline text.
+        return None if v in (">", ">-", "|", "|-", ">+", "|+") else (v or None)
+
+    return (
+        _clean(n.group(1)) if n else None,
+        _clean(d.group(1)) if d else None,
+    )
 
 
 def with_frontmatter(body: str, name: str, description: str | None) -> str:
