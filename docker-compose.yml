@@ -31,8 +31,9 @@ services:
       - /proj/rp_ait_prod/data/ai-portal-be/rp-ai-skill:/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill
       # Logs: unified host path <-> container /app/logs (backend.log, access.log).
       - /proj/rp_ait_prod/logs/ai-portal-be:/app/logs
-      # Optional: mount an SSH key if the skill repo pushes to GitLab over SSH.
-      # - /proj/rp_ait_prod/services/ai-portal-be/ssh:/root/.ssh:ro
+      # SSH key for pushing the skill repo to GitLab over SSH (SKILL_REPO_PUSH=true).
+      # The host dir holds id_ed25519 (600) + known_hosts (gitlab host key).
+      - /proj/rp_ait_prod/services/ai-portal-be/ssh:/root/.ssh:ro
 
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status == 200 else 1)"]
@@ -40,3 +41,4 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+https://internal.ericsson.com/sites/default/files/ich_Ericsson_150_image/Eric_150_0.png
