@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
+from app.version import __version__
 from app.routers import (
     categories,
     comments,
@@ -19,7 +20,7 @@ from app.routers import (
 
 settings = get_settings()
 
-app = FastAPI(title=settings.app_name)
+app = FastAPI(title=settings.app_name, version=__version__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,3 +54,13 @@ app.include_router(market.router)
 @app.get("/health", tags=["health"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/version", tags=["health"])
+def version() -> dict[str, str]:
+    """Backend version (semantic) + the deployed build's git commit."""
+    return {
+        "name": settings.app_name,
+        "version": __version__,
+        "commit": settings.app_git_commit,
+    }

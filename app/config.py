@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     app_name: str = "RP AI Portal Backend"
     debug: bool = True
 
+    # Short git commit SHA of the deployed build, injected at Docker build time
+    # (ARG GIT_COMMIT -> ENV APP_GIT_COMMIT). "dev" when running locally.
+    app_git_commit: str = "dev"
+
     # SQLAlchemy database URL, e.g. mysql+pymysql://user:pass@host:port/db
     database_url: str
 
