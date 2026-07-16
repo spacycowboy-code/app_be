@@ -41,4 +41,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-https://internal.ericsson.com/sites/default/files/ich_Ericsson_150_image/Eric_150_0.png
