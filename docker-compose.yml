@@ -13,7 +13,12 @@
 
 services:
   backend:
-    build: .
+    build:
+      context: .
+      args:
+        # Injected by the CI deploy job as the pushed commit SHA (defaults to
+        # "dev" for local builds). Surfaced at GET /api/version.
+        GIT_COMMIT: "${GIT_COMMIT:-dev}"
     image: rp-ai-portal-be:latest
     container_name: rp-ai-portal-be
     restart: unless-stopped

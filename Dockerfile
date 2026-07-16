@@ -21,6 +21,11 @@ COPY log_conf.yaml .
 # Logs are written here; the host mounts this to a unified path.
 RUN mkdir -p /app/logs
 
+# Build-time commit SHA -> runtime env, surfaced by /api/version. Placed late so
+# a new commit doesn't invalidate the dependency install layers above.
+ARG GIT_COMMIT=dev
+ENV APP_GIT_COMMIT=$GIT_COMMIT
+
 # uvicorn listens on 8000 inside the container (mapped to 9000 on the host).
 EXPOSE 8000
 
