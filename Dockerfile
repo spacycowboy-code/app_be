@@ -14,14 +14,29 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
+# Cisco AI Defense skill-scanner (static analyzers, no key) is a CLI tool we
+# shell out to — install it ISOLATED via pipx so its heavy/pinned deps don't
+# conflict with the web stack (e.g. python-multipart). The `skill-scanner`
+# binary lands on PATH for the audit pipeline's subprocess call.
+ENV PATH="/root/.local/bin:${PATH}"
+RUN pip install --no-cache-dir pipx \
+    && pipx install cisco-ai-skill-scanner==2.0.12 \
+    && skill-scanner --version
+
 # Application source.
 COPY app ./app
+# Red-line rules consumed by the audit pipeline at runtime.
+COPY skill_audit/rules.md ./skill_audit/rules.md
 COPY log_conf.yaml .
 
 # Logs are written here; the host mounts this to a unified path.
 RUN mkdir -p /app/logs
 
-# uvicorn listens on 8000 inside the container (mapped to 9000 on the host).
+# Migrate-then-serve entrypoint (idempotent schema migration on start).
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+# uvicorn listens on 8000 inside the container (mapped to the host in compose).
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-config", "log_conf.yaml"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

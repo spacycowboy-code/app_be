@@ -1,0 +1,29 @@
+# Skill-audit judge service: kiro-cli semantic judge behind a tiny HTTP API.
+#
+# This image holds the model-access capability (kiro-cli). The SSO login is NOT
+# baked in — it lives in a mounted volume (/root/.aws) and is created once with:
+#   docker compose exec judge kiro-cli login --use-device-flow \
+#     --license pro --identity-provider <startUrl> --region <region>
+# The (credential-less) backend container calls this service over the network.
+FROM python:3.11-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates bash unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install kiro-cli (official installer) into /root/.local.
+RUN curl -fsSL https://cli.kiro.dev/install -o /tmp/install.sh \
+    && bash /tmp/install.sh --force \
+    && rm -f /tmp/install.sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY app ./app
+COPY skill_audit/rules.md ./skill_audit/rules.md
+
+EXPOSE 8790
+CMD ["uvicorn", "app.skill_audit_judge_service:app", "--host", "0.0.0.0", "--port", "8790"]
