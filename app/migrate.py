@@ -22,6 +22,7 @@ for _t in Base.metadata.tables.values():
 COLUMNS = [
     ("rp_ai_skill", "storage_path", "VARCHAR(512) NULL"),
     ("rp_ai_skill", "repo_commit", "VARCHAR(64) NULL"),
+    ("rp_ai_skill", "audit_state", "VARCHAR(16) NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),
     ("rp_ai_market_item", "creator", "VARCHAR(64) NULL"),
 ]
@@ -39,10 +40,17 @@ def _column_exists(conn, table: str, column: str) -> bool:
 
 
 def main() -> None:
-    # 1) Create any missing tables (rp_ai_skill_version).
+    # 1) Create any missing tables.
     Base.metadata.create_all(bind=engine)
 
-    # 2) Add missing columns to existing tables.
+    # 2) Add missing columns to existing tables (MySQL-specific introspection).
+    #    On other dialects (e.g. sqlite in staging/tests) create_all above already
+    #    produced fresh tables with all columns, so skip the ALTER pass.
+    if engine.dialect.name != "mysql":
+        print(f"  (dialect={engine.dialect.name}) tables ensured; skipping column ALTERs")
+        print("Migration complete.")
+        return
+
     with engine.begin() as conn:
         for table, column, ddl in COLUMNS:
             if _column_exists(conn, table, column):

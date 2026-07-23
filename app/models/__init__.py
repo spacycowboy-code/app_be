@@ -18,6 +18,7 @@ from app.models.comment import RpAiSkillComment
 from app.models.activity import RpAiActivity
 from app.models.market import RpAiMarketItem
 from app.models.market_favorite import RpAiMarketFavorite
+from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 
 __all__ = [
     "RpAiPortal",
@@ -33,4 +34,6 @@ __all__ = [
     "RpAiActivity",
     "RpAiMarketItem",
     "RpAiMarketFavorite",
+    "RpAiSkillAuditRecord",
+    "RpAiSkillFinding",
 ]
