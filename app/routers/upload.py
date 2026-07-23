@@ -27,6 +27,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
 from app.schemas.version import SkillUploadResult, SkillVersionRead
+from app.schemas.audit import SkillEvaluateResult, AuditFinding
 from app.services.skill_manifest import (
     extract_skill_md_from_zip,
     has_name_and_description,
@@ -35,6 +36,10 @@ from app.services.skill_manifest import (
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
+from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
+from app.services.skill_audit import audit_skill, AuditResult
+from app.services import gitlab_mr
+from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/api/skills", tags=["upload"])
 settings = get_settings()
@@ -73,6 +78,129 @@ def _ensure_user(db: Session, eid: str) -> None:
         db.flush()
 
 
+def _record_audit(
+    db: Session,
+    ref: str,
+    audit: AuditResult,
+    *,
+    skill_id: str | None,
+    skill_name: str,
+    uploader_eid: str | None,
+    mr_url: str | None = None,
+) -> None:
+    """Persist the audit record + its findings (append-only facts)."""
+    record = RpAiSkillAuditRecord(
+        id=ref,
+        skill_id=skill_id,
+        skill_name=skill_name,
+        uploader_eid=uploader_eid,
+        state=audit.state,
+        judge_verdict=audit.verdict,
+        judge_raw=audit.raw,
+        mr_url=mr_url,
+    )
+    for f in audit.findings:
+        record.findings.append(
+            RpAiSkillFinding(
+                source=f.source,
+                category=f.category,
+                severity=f.severity,
+                evidence=f.evidence,
+                detail=f.detail,
+            )
+        )
+    db.add(record)
+
+
+async def _read_upload(
+    file: UploadFile | None, instructions: str | None
+) -> tuple[str, bytes | None, str | None]:
+    """Read + validate the uploaded skill definition (shared by evaluate/publish).
+
+    Returns (definition_text, artifact_bytes, artifact_filename). The definition
+    is the SKILL.md text (from the file, a SKILL.md inside a zip, or the
+    instructions fallback) and MUST declare name: and description:.
+    """
+    artifact_bytes: bytes | None = None
+    artifact_filename: str | None = None
+    file_text: str | None = None
+    if file is not None:
+        artifact_bytes = await file.read()
+        if len(artifact_bytes) > settings.max_upload_bytes:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"File exceeds {settings.max_upload_bytes} bytes",
+            )
+        artifact_filename = file.filename
+        try:
+            file_text = artifact_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            file_text = None
+        # Binary uploads (e.g. a .zip package) can't be decoded as text.
+        if file_text is None:
+            file_text = extract_skill_md_from_zip(artifact_bytes)
+
+    definition = file_text if file_text is not None else instructions
+    if not definition or not has_name_and_description(definition):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Skill 定义必须包含 name: 和 description: 两个字段",
+        )
+    return definition, artifact_bytes, artifact_filename
+
+
+def _findings_out(audit: AuditResult) -> list[AuditFinding]:
+    """Serialize findings for the API (secret values already redacted upstream)."""
+    return [
+        AuditFinding(
+            source=f.source,
+            category=f.category,
+            severity=f.severity,
+            evidence=f.evidence,
+            detail=f.detail,
+        )
+        for f in audit.findings
+    ]
+
+
+@router.post("/evaluate", response_model=SkillEvaluateResult)
+async def evaluate_skill(
+    db: Session = Depends(get_db),
+    eid: str = Form("", description="Uploader EID (optional for preview)"),
+    name: str = Form(...),
+    instructions: str | None = Form(None),
+    file: UploadFile | None = File(None),
+) -> SkillEvaluateResult:
+    """Audit-only preview: run the audit, store NOTHING, return the verdict.
+
+    The upload wizard calls this at its 'evaluating' step so the result screen
+    shows the real state + findings (no score) before the user commits. publish
+    re-runs the same audit as the authoritative, non-bypassable gate.
+    """
+    eid = normalize_eid(eid)
+    definition, artifact_bytes, artifact_filename = await _read_upload(file, instructions)
+    audit: AuditResult = await run_in_threadpool(
+        lambda: audit_skill(
+            name=name,
+            skill_md=definition,
+            artifact_bytes=artifact_bytes,
+            artifact_filename=artifact_filename,
+            uploader_eid=eid or None,
+        )
+    )
+    reference = uuid.uuid4().hex
+    # Danger is blocked in the UI (no publish button) so it never reaches
+    # publish; persist the blocked-attempt record here for traceability.
+    if audit.is_danger:
+        _record_audit(
+            db, reference, audit, skill_id=None, skill_name=name, uploader_eid=eid or None
+        )
+        db.commit()
+    return SkillEvaluateResult(
+        state=audit.state, reference=reference, findings=_findings_out(audit)
+    )
+
+
 @router.post(
     "/upload", response_model=SkillUploadResult, status_code=status.HTTP_201_CREATED
 )
@@ -92,41 +220,36 @@ async def upload_skill(
     if not eid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "eid is required")
 
-    # Read + size-check the artifact.
-    artifact_bytes: bytes | None = None
-    artifact_filename: str | None = None
-    file_text: str | None = None
-    if file is not None:
-        artifact_bytes = await file.read()
-        if len(artifact_bytes) > settings.max_upload_bytes:
-            raise HTTPException(
-                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                f"File exceeds {settings.max_upload_bytes} bytes",
-            )
-        artifact_filename = file.filename
-        try:
-            file_text = artifact_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            file_text = None
-        # Binary uploads (e.g. a .zip package) can't be decoded as text.
-        # Try to pull SKILL.md out of the archive so the definition can be
-        # validated and stored, while the zip itself is kept as the artifact.
-        if file_text is None:
-            file_text = extract_skill_md_from_zip(artifact_bytes)
-
-    # The skill definition (SKILL.md) comes from the uploaded file, or the
-    # instructions field as a fallback. It MUST declare name: and description:.
-    definition = file_text if file_text is not None else instructions
-    if not definition or not has_name_and_description(definition):
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            "Skill 定义必须包含 name: 和 description: 两个字段",
-        )
+    definition, artifact_bytes, artifact_filename = await _read_upload(file, instructions)
 
     # The card/description shown in the market comes from the SKILL.md
     # `description:` frontmatter; the (optional) form field only overrides it.
     _, fm_description = parse_frontmatter(definition)
     effective_description = description if description is not None else fm_description
+
+    # --- Security audit: runs BEFORE anything is stored -------------------
+    # danger  -> reject, never stored (only the audit record is kept).
+    # suspect -> stored on a review branch + Draft MR (hidden from browse).
+    # pass    -> stored live as usual.
+    audit: AuditResult = await run_in_threadpool(
+        lambda: audit_skill(
+            name=name,
+            skill_md=definition,
+            artifact_bytes=artifact_bytes,
+            artifact_filename=artifact_filename,
+            uploader_eid=eid,
+        )
+    )
+    audit_ref = uuid.uuid4().hex
+    if audit.is_danger:
+        _record_audit(
+            db, audit_ref, audit, skill_id=None, skill_name=name, uploader_eid=eid
+        )
+        db.commit()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"上传被安全审计拒绝：命中安全红线。参考编号 {audit_ref}",
+        )
 
     # Resolve identity: existing skill (by id) -> re-upload/version bump.
     existing: RpAiSkill | None = None
@@ -157,6 +280,12 @@ async def upload_skill(
     # The uploader on record is the original creator; keep it stable.
     owner_eid = existing.uploader_eid if existing else eid
 
+    # Suspect skills are committed to a dedicated review branch, not live.
+    suspect = audit.state == "suspect"
+    review_branch = (
+        f"skill-audit/{resolved_id}-{audit_ref[:8]}" if suspect else None
+    )
+
     result = skill_storage.store(
         skill_id=resolved_id,
         eid=owner_eid or eid,
@@ -168,6 +297,7 @@ async def upload_skill(
         artifact_filename=artifact_filename,
         current_version=existing.version if existing else None,
         existing_storage_path=existing.storage_path if existing else None,
+        target_branch=review_branch,
     )
 
     # Upsert the skill row.
@@ -198,6 +328,7 @@ async def upload_skill(
     skill.repo_commit = result.commit_sha
     # Freshly uploaded skills must pass review before they are approved.
     skill.status = "pending"
+    skill.audit_state = audit.state
 
     # Record the version.
     db.add(
@@ -215,6 +346,23 @@ async def upload_skill(
     if existing is not None:
         notify_version_update(db, skill, result.version, actor_eid=eid)
 
+    # Suspect -> open a Draft MR for review (best-effort); then record the audit.
+    mr_url = None
+    if suspect:
+        mr_url = await run_in_threadpool(
+            lambda: gitlab_mr.review_suspect(
+                source_branch=review_branch,
+                target_branch=settings.skill_repo_branch,
+                skill_name=name,
+                findings=audit.findings,
+                audit_ref=audit_ref,
+            )
+        )
+    _record_audit(
+        db, audit_ref, audit,
+        skill_id=resolved_id, skill_name=name, uploader_eid=eid, mr_url=mr_url,
+    )
+
     db.commit()
     db.refresh(skill)
 
@@ -225,6 +373,10 @@ async def upload_skill(
         tag=result.tag,
         storage_path=result.storage_path,
         pushed=result.pushed,
+        audit_state=audit.state,
+        mr_url=mr_url,
+        reference=audit_ref,
+        findings=_findings_out(audit),
     )
 
 

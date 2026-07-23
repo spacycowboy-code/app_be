@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -36,6 +36,7 @@ from app.services.skill_manifest import (
 )
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services.notify import notify_version_update
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
@@ -98,6 +99,7 @@ def list_skills(
     status_filter: str | None = Query(None, alias="status"),
     q: str | None = Query(None, description="search in name/description"),
     trending: bool | None = Query(None),
+    x_user_eid: str | None = Header(None),
 ) -> list[RpAiSkill]:
     stmt = select(RpAiSkill)
     if category_id and category_id != "all":
@@ -110,6 +112,15 @@ def list_skills(
         like = f"%{q}%"
         stmt = stmt.where(
             RpAiSkill.name.like(like) | RpAiSkill.description.like(like)
+        )
+    # 可疑(suspect) skills are hidden from public browse; admin sees all, and an
+    # uploader still sees their own. (danger skills are never stored at all.)
+    requester = normalize_eid(x_user_eid)
+    if requester != settings.audit_admin_eid:
+        stmt = stmt.where(
+            (RpAiSkill.audit_state.is_(None))
+            | (RpAiSkill.audit_state != "suspect")
+            | (RpAiSkill.uploader_eid == requester)
         )
     return list(db.scalars(stmt).all())
 
