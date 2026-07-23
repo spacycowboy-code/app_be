@@ -1,0 +1,227 @@
+"""Deterministic layer: secret detection/redaction + static skill scanning.
+
+Two deterministic checks, complementing the semantic judge:
+- ``detect-secrets`` (in-process): broad secret formats; masks before the judge.
+- Cisco AI Defense ``skill-scanner`` (external CLI, no key): the judge's blind
+  spots — bundled executable scripts, .pyc bytecode, unicode-hidden instructions.
+
+A pure-regex redactor always runs so no raw live-format secret is ever sent to
+the judge, regardless of the other tools.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+
+from app.services.skill_audit.types import Finding
+
+# Common live-key formats. Placeholder guard: skip tvly-YOUR..., sk-YOUR...
+_SECRET_PATS: list[tuple[str, re.Pattern]] = [
+    ("tavily_key", re.compile(r"tvly-(?!YOUR)[A-Za-z0-9]{16,}")),
+    ("openai_key", re.compile(r"sk-(?:proj-)?(?!YOUR)[A-Za-z0-9_-]{20,}")),
+    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("private_key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+]
+
+
+def redact_secrets(text: str) -> tuple[str, list[Finding]]:
+    """Mask any live-format secrets. Returns (redacted_text, findings)."""
+    findings: list[Finding] = []
+    redacted = text
+    for name, pat in _SECRET_PATS:
+        if pat.search(text):
+            findings.append(
+                Finding(
+                    source="pipeline",
+                    category="secret",
+                    severity="critical",
+                    evidence=f"<redacted:{name}>",
+                    detail=f"live-format secret matched ({name})",
+                )
+            )
+        redacted = pat.sub("<REDACTED_SECRET>", redacted)
+    return redacted, findings
+
+
+def detect_secrets_scan(text: str) -> tuple[list[Finding], str]:
+    """Broad secret detection via detect-secrets (in-process).
+
+    Returns (findings, redacted_text): findings for the audit, and the text with
+    any detected secret values masked — so secrets in formats the regex layer
+    doesn't cover (GitHub/GitLab/Slack/...) are NOT leaked to the semantic judge.
+
+    Uses only the specific-FORMAT detectors (low false-positive). The
+    high-entropy and keyword detectors are excluded: in per-line (ad-hoc) mode
+    they fire on trivial text and would route almost every skill to review.
+    Findings are MEDIUM (→ review); the high-confidence live-format keys are
+    already red-line via ``redact_secrets``. Evidence is the detector name only.
+    """
+    try:
+        from detect_secrets.core.scan import scan_line
+        from detect_secrets.settings import transient_settings
+    except ImportError:
+        return [], text
+
+    plugins = [
+        {"name": n} for n in (
+            "ArtifactoryDetector", "AWSKeyDetector", "AzureStorageKeyDetector",
+            "BasicAuthDetector", "CloudantDetector", "DiscordBotTokenDetector",
+            "GitHubTokenDetector", "GitLabTokenDetector", "IbmCloudIamDetector",
+            "IbmCosHmacDetector", "JwtTokenDetector", "MailchimpDetector",
+            "NpmDetector", "OpenAIDetector", "PrivateKeyDetector",
+            "PypiTokenDetector", "SendGridDetector", "SlackDetector",
+            "SoftlayerDetector", "SquareOAuthDetector", "StripeDetector",
+            "TelegramBotTokenDetector", "TwilioKeyDetector",
+        )
+    ]
+
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    masked = text
+    try:
+        with transient_settings({"plugins_used": plugins}):
+            for line in text.splitlines():
+                for secret in scan_line(line):
+                    val = getattr(secret, "secret_value", None)
+                    if val:
+                        masked = masked.replace(val, "<REDACTED_SECRET>")
+                    kind = secret.type
+                    if kind in seen:
+                        continue
+                    seen.add(kind)
+                    findings.append(
+                        Finding(
+                            source="detect-secrets",
+                            category="secret",
+                            severity="medium",
+                            evidence=f"<redacted:{kind}>",
+                            detail=f"detect-secrets flagged {kind} (broad scan → review)",
+                        )
+                    )
+    except Exception:  # noqa: BLE001 — never let the scanner crash the audit
+        return findings, masked
+    return findings, masked
+
+
+# --- Cisco AI Defense skill-scanner (static analyzers, no key) --------------
+# Only CRITICAL/HIGH/MEDIUM are considered; LOW/INFO dropped.
+_CISCO_SEV = {"CRITICAL": "critical", "HIGH": "high", "MEDIUM": "medium"}
+
+# Hygiene / policy rules that are NOT security threats. Mapping these would
+# route every benign skill to review, so they are dropped.
+_CISCO_IGNORE_RULE_PREFIX = ("MANIFEST_", "SOCIAL_ENG_")
+_CISCO_IGNORE_RULES = {"FILE_MAGIC_MISMATCH", "LOW_ANALYZABILITY"}
+_CISCO_IGNORE_CATS = {"policy_violation", "social_engineering"}
+
+
+def _map_cisco(rule_id: str | None, category: str | None) -> str | None:
+    """Map a Cisco finding to one of our categories, or None to drop it.
+
+    Threat whitelist: only security-relevant findings map through; hygiene/
+    policy noise (manifest, license, vague description, file-magic) is dropped.
+    """
+    rid = (rule_id or "").upper()
+    cat = (category or "").lower()
+    if cat in _CISCO_IGNORE_CATS or rid in _CISCO_IGNORE_RULES \
+            or any(rid.startswith(p) for p in _CISCO_IGNORE_RULE_PREFIX):
+        return None
+    if "STEGANOGRAPH" in rid or "UNICODE" in rid:
+        return "hidden_instruction"
+    if "PROMPT_INJECTION" in rid or cat == "prompt_injection":
+        return "prompt_injection"
+    if ("COMMAND_INJECTION" in rid or "COMPOUND_FETCH" in rid or "FETCH_EXECUTE" in rid
+            or cat in ("supply_chain", "tool_chaining_abuse", "privilege_escalation",
+                       "tool_misuse")):
+        return "dangerous_instruction"
+    if "OBFUSCATION" in rid or cat == "obfuscation":
+        return "hidden_instruction"
+    if "BYTECODE" in rid or "BINARY" in rid or cat in ("bytecode", "malware"):
+        return "malicious_artifact"
+    # Unmapped but security-relevant (hygiene already dropped, LOW/INFO already
+    # filtered): route to review conservatively, never a red-line auto-reject.
+    return "malicious_artifact"
+
+
+def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
+    """Run the Cisco skill-scanner static analyzers (no key) over target_dir.
+
+    Uses ``--policy strict`` (correct posture for untrusted uploads; the default
+    ``balanced`` preset demotes dangerous patterns in SKILL.md as "instructional").
+    Only security-relevant findings are mapped; hygiene/policy noise is dropped so
+    benign skills are not falsely routed to review. Returns (findings, ran).
+    """
+    if not bin_path:
+        return [], False
+    try:
+        proc = subprocess.run(
+            [bin_path, "scan", target_dir, "--policy", "strict",
+             "--use-behavioral", "--format", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return [], False
+    if not (proc.stdout or "").strip():
+        return [], False
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return [], False
+
+    findings: list[Finding] = []
+    for it in data.get("findings", []) or []:
+        sev = _CISCO_SEV.get(str(it.get("severity", "")).upper())
+        if sev is None:  # LOW / INFO -> drop
+            continue
+        cat = _map_cisco(it.get("rule_id"), it.get("category"))
+        if cat is None:  # hygiene / policy noise -> drop
+            continue
+        title = (it.get("title") or it.get("rule_id") or "")[:200]
+        loc = it.get("file_path") or ""
+        findings.append(
+            Finding(
+                source="cisco",
+                category=cat,
+                severity=sev,
+                evidence=(f"{loc}: {title}".strip(": ") or None),
+                detail=(it.get("description") or "")[:500] or None,
+            )
+        )
+    return findings, True
+
+
+# Extensions that indicate shipped code/executables (non-red-line -> review).
+_CODE_EXT = {
+    ".sh", ".bash", ".zsh", ".py", ".rb", ".pl", ".ps1", ".bat", ".cmd",
+    ".exe", ".dll", ".so", ".dylib", ".bin", ".jar", ".class",
+}
+
+
+def artifact_scan(target_dir: str) -> list[Finding]:
+    """Flag shipped executables/scripts as malicious_artifact (medium, non-red-line).
+
+    Fallback used only when the Cisco scanner is unavailable; a cheap extension/
+    shebang heuristic so bundled executables still route to review.
+    """
+    from pathlib import Path
+
+    findings: list[Finding] = []
+    for p in Path(target_dir).rglob("*"):
+        if not p.is_file() or p.name in ("SKILL.md", "manifest.json"):
+            continue
+        ext = p.suffix.lower()
+        reason = None
+        if ext in _CODE_EXT:
+            reason = f"executable/script artifact ({ext})"
+        else:
+            try:
+                if p.read_bytes()[:2] == b"#!":
+                    reason = "shebang script artifact"
+            except OSError:
+                pass
+        if reason:
+            findings.append(
+                Finding("pipeline", "malicious_artifact", "medium",
+                        evidence=p.name, detail=reason)
+            )
+    return findings
