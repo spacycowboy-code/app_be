@@ -13,6 +13,7 @@ from app.routers import (
     market,
     market_favorites,
     reviews,
+    skill_import,
     skills,
     upload,
     users,
@@ -45,6 +46,7 @@ app.include_router(favorites.router)
 app.include_router(market_favorites.router)
 app.include_router(skills.router)
 app.include_router(upload.router)
+app.include_router(skill_import.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)

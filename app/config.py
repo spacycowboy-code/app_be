@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     # SQLAlchemy database URL, e.g. mysql+pymysql://user:pass@host:port/db
     database_url: str
 
+    # Bearer token guarding POST /api/skills/import-official (official-skill
+    # ingest, called by the rp-ai-skill sync CI). Empty = endpoint disabled.
+    skill_import_token: str = ""
+
     # Comma-separated list of allowed CORS origins.
     cors_origins: str = "http://localhost:4200"
 
