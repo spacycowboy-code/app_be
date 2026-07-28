@@ -176,6 +176,14 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         cat = _map_cisco(it.get("rule_id"), it.get("category"))
         if cat is None:  # hygiene / policy noise -> drop
             continue
+        # The static layer detects prompt injection by matching coercive phrases
+        # ("do not tell the user", "tell the user what to approve"), which also
+        # occur in legitimate skills that brief the user or manage credentials.
+        # Structural evidence (hidden unicode, shipped executables) stays a red
+        # line; a phrase match alone only routes to human review, and the
+        # semantic judge remains the arbiter of instruction-layer intent.
+        if cat == "prompt_injection" and sev in ("critical", "high"):
+            sev = "medium"
         title = (it.get("title") or it.get("rule_id") or "")[:200]
         loc = it.get("file_path") or ""
         findings.append(
