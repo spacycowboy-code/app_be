@@ -30,6 +30,9 @@ class AuditResult:
     verdict: str | None = None         # judge verdict
     raw: str | None = None             # raw judge output (audit trail)
     findings: list[Finding] = field(default_factory=list)
+    # Checks whose layer could not run, so "no finding" must not be read as
+    # "clean" (the verdict itself already fails closed to review).
+    degraded: list[str] = field(default_factory=list)
 
     @property
     def is_danger(self) -> bool:

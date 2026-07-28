@@ -1,7 +1,7 @@
 """Unit tests: secret redaction + audit-state derivation."""
 from app.services.skill_audit.scanners import redact_secrets
 from app.services.skill_audit.pipeline import _derive_state
-from app.services.skill_audit.types import Finding
+from app.services.skill_audit.types import AuditResult, Finding
 
 
 def test_redact_real_key_masked_and_flagged():
@@ -100,3 +100,36 @@ def test_audit_caches_by_content(monkeypatch):
 
     pipeline.audit_skill(name="T", skill_md=md + " changed")  # different content
     assert calls["n"] == 2                                  # re-audited
+
+
+# --- report roll-up (the shape the upload wizard renders) --------------------
+
+def test_report_lists_every_check_even_when_clear():
+    from app.services.skill_audit.report import CHECKS, build_checks
+    checks = build_checks(AuditResult(state="pass", verdict="pass"))
+    assert [c.id for c in checks] == [cid for cid, _ in CHECKS]
+    assert {c.status for c in checks} == {"clear"}
+
+
+def test_report_groups_findings_under_their_check_and_takes_worst_severity():
+    from app.services.skill_audit.report import build_checks
+    audit = AuditResult(state="danger", verdict="block", findings=[
+        Finding("judge", "dangerous_instruction", "medium", "a", "d1"),
+        Finding("judge", "dangerous_instruction", "critical", "b", "d2"),
+        Finding("cisco", "malicious_artifact", "medium", "c", "d3"),
+    ])
+    by_id = {c.id: c for c in build_checks(audit)}
+    assert by_id["dangerous_instruction"].status == "hit"
+    assert by_id["dangerous_instruction"].severity == "critical"   # worst, not averaged
+    assert len(by_id["dangerous_instruction"].findings) == 2
+    assert by_id["malicious_artifact"].status == "hit"
+    assert by_id["secret"].status == "clear"
+
+
+def test_report_marks_unrunnable_check_degraded_not_clear():
+    from app.services.skill_audit.report import build_checks
+    audit = AuditResult(state="suspect", verdict="error",
+                        degraded=["prompt_injection"])
+    by_id = {c.id: c for c in build_checks(audit)}
+    assert by_id["prompt_injection"].status == "degraded"
+    assert by_id["secret"].status == "clear"

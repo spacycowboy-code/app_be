@@ -27,7 +27,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
 from app.schemas.version import SkillUploadResult, SkillVersionRead
-from app.schemas.audit import SkillEvaluateResult, AuditFinding
+from app.schemas.audit import SkillEvaluateResult, AuditFinding, AuditCheck
 from app.services.skill_manifest import (
     extract_skill_md_from_zip,
     has_name_and_description,
@@ -38,6 +38,7 @@ from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
 from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.services.skill_audit import audit_skill, AuditResult
+from app.services.skill_audit.report import build_checks
 from app.services import gitlab_mr
 from fastapi.concurrency import run_in_threadpool
 
@@ -149,6 +150,21 @@ async def _read_upload(
     return definition, artifact_bytes, artifact_filename
 
 
+def _checks_out(audit: AuditResult) -> list[AuditCheck]:
+    """The report the wizard renders: fixed checks, evidence grouped under them."""
+    return [
+        AuditCheck(
+            id=c.id, label=c.label, status=c.status, severity=c.severity,
+            findings=[
+                AuditFinding(source=f.source, category=f.category,
+                             severity=f.severity, evidence=f.evidence, detail=f.detail)
+                for f in c.findings
+            ],
+        )
+        for c in build_checks(audit)
+    ]
+
+
 def _findings_out(audit: AuditResult) -> list[AuditFinding]:
     """Serialize findings for the API (secret values already redacted upstream)."""
     return [
@@ -197,7 +213,8 @@ async def evaluate_skill(
         )
         db.commit()
     return SkillEvaluateResult(
-        state=audit.state, reference=reference, findings=_findings_out(audit)
+        state=audit.state, reference=reference,
+        checks=_checks_out(audit), findings=_findings_out(audit),
     )
 
 
@@ -376,6 +393,7 @@ async def upload_skill(
         audit_state=audit.state,
         mr_url=mr_url,
         reference=audit_ref,
+        checks=_checks_out(audit),
         findings=_findings_out(audit),
     )
 

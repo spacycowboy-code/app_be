@@ -20,9 +20,26 @@ class AuditFinding(CamelModel):
     detail: str | None = None
 
 
+class AuditCheck(CamelModel):
+    """One fixed check in the report, with its own findings as evidence.
+
+    The check list is closed and comes from the policy, so a clear check is
+    reported too: the uploader sees what was examined, not only what failed.
+    ``degraded`` means the layer behind that check could not run, so it is never
+    rendered as clean.
+    """
+
+    id: str                # secret | dangerous_instruction | ...
+    label: str             # user-facing label
+    status: str            # clear | hit | degraded
+    severity: str | None = None      # highest severity among findings, when hit
+    findings: list[AuditFinding] = []
+
+
 class SkillEvaluateResult(CamelModel):
     """Response of the evaluate (audit-only, no store) endpoint."""
 
     state: str             # pass | suspect | danger
     reference: str
-    findings: list[AuditFinding] = []
+    checks: list[AuditCheck] = []
+    findings: list[AuditFinding] = []   # flat list, kept for the audit trail

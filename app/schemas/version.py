@@ -3,7 +3,7 @@ from datetime import datetime
 
 from app.schemas.common import CamelModel
 from app.schemas.skill import SkillRead
-from app.schemas.audit import AuditFinding
+from app.schemas.audit import AuditCheck, AuditFinding
 
 
 class SkillVersionRead(CamelModel):
@@ -31,4 +31,5 @@ class SkillUploadResult(CamelModel):
     audit_state: str | None = None      # pass | suspect
     mr_url: str | None = None           # set when suspect -> review MR
     reference: str | None = None
+    checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []

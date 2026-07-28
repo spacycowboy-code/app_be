@@ -129,6 +129,7 @@ def audit_skill(
         )
 
     findings: list[Finding] = []
+    degraded: list[str] = []
     redacted, secret_findings = scanners.redact_secrets(skill_md)
     findings += secret_findings
 
@@ -165,13 +166,16 @@ def audit_skill(
         if judge.verdict == "error":
             findings.append(Finding("pipeline", "audit_error", "medium",
                                     detail="semantic judge unavailable/unparsable"))
+            degraded += ["dangerous_instruction", "hidden_instruction",
+                         "prompt_injection"]
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
     state = _derive_state(findings, judge.verdict)
     log.info("audit '%s' by %s -> %s (judge=%s, %d findings)",
              name, uploader_eid, state, judge.verdict, len(findings))
-    result = AuditResult(state=state, verdict=judge.verdict, raw=judge.raw, findings=findings)
+    result = AuditResult(state=state, verdict=judge.verdict, raw=judge.raw,
+                         findings=findings, degraded=sorted(set(degraded)))
     if use_cache:
         _cache_put(key, result)
     return result
