@@ -7,7 +7,7 @@
     },
     {
       "id": "ai-team",
-      "label": "AI team",
+      "label": "AI Team",
       "count": 0
     },
     {
@@ -52,7 +52,7 @@
     },
     {
       "id": "qa",
-      "label": "Q&A",
+      "label": "QA",
       "count": 4
     },
     {
@@ -906,7 +906,7 @@
       "id": "13",
       "name": "质量问题追踪",
       "description": "Radio 产品发布后质量问题的记录、分析与闭环管控系统",
-      "category": "Q&A",
+      "category": "QA",
       "categoryId": "qa",
       "image": "skill-images/qa.jpg",
       "rating": 4.7,
@@ -971,7 +971,7 @@
       "id": "14",
       "name": "可靠性与合规检测",
       "description": "Radio 产品可靠性验证与行业合规认证管理，确保产品达到交付标准",
-      "category": "Q&A",
+      "category": "QA",
       "categoryId": "qa",
       "image": "skill-images/qa.jpg",
       "rating": 4.8,
