@@ -127,6 +127,22 @@ deploy:
     - 'rsync -az --delete --exclude ".git" --exclude ".env" --exclude "ssh" -e "ssh $SSHBASE" ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/"'
     # 2) push the production .env from the PROD_ENV file variable.
     - 'rsync -az -e "ssh $SSHBASE" "$PROD_ENV" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.env"'
+    # 2b) provision the skill-repo push key + known_hosts (self-healing). These
+    #     live under DEPLOY_DIR/ssh (mounted into the container at /root/.ssh,
+    #     and excluded from the code rsync). Only runs when SKILL_SSH_KEY (a File
+    #     CI variable holding the private key) is set; otherwise leaves whatever
+    #     is already on the server untouched.
+    - |
+      if [ -n "$SKILL_SSH_KEY" ]; then
+        echo "Provisioning skill-repo SSH key + known_hosts on the server"
+        tr -d '\r' < "$SKILL_SSH_KEY" > /tmp/skill_key && printf '\n' >> /tmp/skill_key
+        ssh $SSHBASE "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_DIR/ssh' && chmod 700 '$DEPLOY_DIR/ssh'"
+        rsync -az -e "ssh $SSHBASE" /tmp/skill_key "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/ssh/id_ed25519"
+        ssh $SSHBASE "$DEPLOY_USER@$DEPLOY_HOST" "chmod 600 '$DEPLOY_DIR/ssh/id_ed25519' && ssh-keyscan -t rsa,ecdsa,ed25519 gitlab.internal.ericsson.com > '$DEPLOY_DIR/ssh/known_hosts' 2>/dev/null || true"
+        rm -f /tmp/skill_key
+      else
+        echo "SKILL_SSH_KEY not set -> skipping key provisioning (using whatever key already exists on the server)"
+      fi
     # 3) build + (re)start on the server, then show status. Pass the pushed
     #    commit SHA so the running build reports it at GET /api/version.
     - 'ssh $SSHBASE "$DEPLOY_USER@$DEPLOY_HOST" "cd \"$DEPLOY_DIR\" && GIT_COMMIT=\"$CI_COMMIT_SHORT_SHA\" docker compose up -d --build && docker compose ps"'
