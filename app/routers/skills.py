@@ -159,20 +159,33 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
     from the stored instructions.
     """
     skill = _get_skill_or_404(db, skill_id)
-    # Human-friendly base name from the skill's title (keeps unicode, safe for
-    # a filename); falls back to the id if the name sanitises to nothing.
-    safe_name = sanitize_segment(skill.name, skill_id)
+    # Official (anthropic) skills: name the archive after the namespaced id
+    # (e.g. "anthropics-xlsx") and ship only the clean skill content — drop the
+    # marketplace-only manifest.json and the redundant nested artifacts/ zip.
+    is_official = skill.category_id == "official"
+    safe_name = (
+        sanitize_segment(skill.id, skill_id)
+        if is_official
+        else sanitize_segment(skill.name, skill_id)
+    )
     folder = (
         Path(settings.skill_repo_path) / skill.storage_path
         if skill.storage_path
         else None
     )
 
+    def _include(p: Path) -> bool:
+        if not p.is_file() or ".git" in p.parts:
+            return False
+        if is_official:
+            rel = p.relative_to(folder).parts
+            if p.name == "manifest.json" or (rel and rel[0] == "artifacts"):
+                return False
+        return True
+
     files: list[Path] = []
     if folder and folder.is_dir():
-        files = [
-            p for p in folder.rglob("*") if p.is_file() and ".git" not in p.parts
-        ]
+        files = [p for p in folder.rglob("*") if _include(p)]
 
     content: str | None = None
     if not files:

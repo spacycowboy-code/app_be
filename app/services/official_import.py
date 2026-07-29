@@ -159,13 +159,10 @@ def import_official_skills(db: Session, *, refresh: bool = True) -> dict:
     seen: list[str] = []
 
     if official_dir.is_dir():
-        for folder in sorted(official_dir.iterdir()):
-            if not folder.is_dir():
-                continue
-            manifest_path = folder / "manifest.json"
-            if not manifest_path.is_file():
-                skipped += 1
-                continue
+        # Recursively find every skill folder (identified by its manifest.json).
+        # Skills are namespaced by source, e.g. official/anthropics/<skill>.
+        for manifest_path in sorted(official_dir.rglob("manifest.json")):
+            folder = manifest_path.parent
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -180,8 +177,9 @@ def import_official_skills(db: Session, *, refresh: bool = True) -> dict:
             instructions = (
                 skill_md.read_text(encoding="utf-8") if skill_md.is_file() else None
             )
-            # Relative storage path within the repo (for downloads/artifacts).
-            manifest["_storagePath"] = f"{OFFICIAL_DIRNAME}/{folder.name}"
+            # Relative storage path within the repo (for downloads/artifacts),
+            # e.g. "official/anthropics/xlsx".
+            manifest["_storagePath"] = str(folder.relative_to(repo))
 
             existing = db.get(RpAiSkill, skill_id)
             is_new = existing is None
