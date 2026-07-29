@@ -67,6 +67,12 @@
 - 评审在 MR 里定:同意 → 合并(skill 进主库、上线);不同意 → 关闭 MR(不上线)。评论、线程、审批、合并、通知都用 GitLab 现成的,不自建审核界面,也不需要额外审计表。
 - MR 开在 skill 仓(存 skill 的那个仓库;示例里的 portal-be 只是形态参考)。
 
+### 仓库和数据库各自拥有什么
+一个字段属于 git 仓库,当且仅当它是人写的、并且仓库是它被编辑和评审的地方。
+
+- **仓库拥有(人写)**:SKILL.md 正文,以及 manifest 里的 name / description / category / tags / version / author / isFree / capabilityFull / 示例 / inputParams / subSkills / cases。
+- **数据库拥有(测量或派生)**:rating、ratingDist、reviewCount(评价的聚合)、downloads(下载计数)、isTrending,以及生命周期 status。这些**不再写入 manifest**:快照写入即过期,要保持准确就得每次下载都提交一个 commit,而这些数字的变动会把评审者要看的指令 diff 淹掉;任何"仓库 → 数据库"的导入路径也可能用过期值覆盖真值。导入侧仍兼容读取旧 manifest 里的这些键。
+
 ### 状态与分类怎么建模
 判据:**投影必须能从事实重建;重建不出来的投影就是第二份事实。**
 

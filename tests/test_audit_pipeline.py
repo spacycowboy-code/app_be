@@ -133,3 +133,26 @@ def test_report_marks_unrunnable_check_degraded_not_clear():
     by_id = {c.id: c for c in build_checks(audit)}
     assert by_id["prompt_injection"].status == "degraded"
     assert by_id["secret"].status == "clear"
+
+
+# --- what the repository is allowed to own ----------------------------------
+
+def test_manifest_carries_authored_fields_only():
+    """Measured and derived fields belong to the database, not to git."""
+    from app.models.skill import RpAiSkill
+    from app.services.skill_manifest import build_manifest
+
+    skill = RpAiSkill(
+        id="s1", name="S", description="d", category="Public", category_id="public",
+        tags=["t"], version="1.0.0", author="A", is_free=True,
+        rating=4.6, rating_dist=[1, 2, 3, 4, 5], review_count=52,
+        downloads="1.4K", is_trending=True, status="approved",
+    )
+    skill.input_params, skill.sub_skills, skill.cases = [], [], []
+    manifest = build_manifest(skill, "EID", "public")
+
+    for measured in ("rating", "ratingDist", "reviewCount", "downloads", "isTrending"):
+        assert measured not in manifest, measured
+    assert "status" not in manifest          # derived: see skill_audit.reconcile
+    for authored in ("name", "description", "tags", "version", "author", "isFree"):
+        assert authored in manifest, authored
