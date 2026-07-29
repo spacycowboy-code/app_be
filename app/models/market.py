@@ -14,7 +14,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 from app.models.mixins import TimestampMixin
 
-ITEM_TYPES = ("tool", "agent")
+ITEM_TYPES = ("tool", "agent", "ai-platform")
 SERVICE_TYPES = ("code", "cloud")
 SOURCES = ("manual", "gitlab-tools", "gitlab-agents")
 
@@ -26,7 +26,7 @@ class RpAiMarketItem(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
 
-    # tool | agent
+    # tool | agent | ai-platform
     item_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     # code | cloud
     service_type: Mapped[str] = mapped_column(String(16), nullable=False)

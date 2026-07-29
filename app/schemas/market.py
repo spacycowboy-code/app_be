@@ -6,7 +6,7 @@ from pydantic import Field, field_validator
 
 from app.schemas.common import CamelModel
 
-ItemType = Literal["tool", "agent"]
+ItemType = Literal["tool", "agent", "ai-platform"]
 ServiceType = Literal["code", "cloud"]
 
 

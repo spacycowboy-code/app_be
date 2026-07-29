@@ -123,8 +123,9 @@ deploy:
     - 'rsync -az --delete --exclude ".git" --exclude ".env" -e "ssh $SSHBASE" ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/"'
     # 2) push the production .env from the PROD_ENV file variable.
     - 'rsync -az -e "ssh $SSHBASE" "$PROD_ENV" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.env"'
-    # 3) build + (re)start on the server, then show status.
-    - 'ssh $SSHBASE "$DEPLOY_USER@$DEPLOY_HOST" "cd \"$DEPLOY_DIR\" && docker compose up -d --build && docker compose ps"'
+    # 3) build + (re)start on the server, then show status. Pass the pushed
+    #    commit SHA so the running build reports it at GET /api/version.
+    - 'ssh $SSHBASE "$DEPLOY_USER@$DEPLOY_HOST" "cd \"$DEPLOY_DIR\" && GIT_COMMIT=\"$CI_COMMIT_SHORT_SHA\" docker compose up -d --build && docker compose ps"'
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
       when: manual

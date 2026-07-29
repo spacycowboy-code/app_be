@@ -52,6 +52,9 @@ def _category_image(category_id: str) -> str:
     slug = category_id or "product-system"
     if slug in ("public", "bnew"):
         return "skill-images/tavily.jpg"
+    # AI team group has no dedicated art; use the shared default image.
+    if slug == "ai-team":
+        return "skill-images/default.png"
     return f"skill-images/{slug}.jpg"
 
 

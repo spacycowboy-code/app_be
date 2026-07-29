@@ -72,6 +72,10 @@ def create_item(
 ) -> RpAiMarketItem:
     """Manual upload: Code (repo url) or Cloud (service url), Tool or Agent."""
     creator = normalize_eid(x_user_eid)
+    if payload.item_type == "ai-platform" and creator != "ADMINMM":
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "只有管理员可以创建 AI Platform 类型"
+        )
     if payload.service_type == "code" and not payload.repo_url:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Code 服务需要填写仓库地址")
     if payload.service_type == "cloud" and not payload.service_url:
@@ -140,6 +144,11 @@ def update_item(
     is_admin = requester == "ADMINMM"
     if not is_admin and item.creator and requester != item.creator:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "只有创建者本人可以编辑")
+
+    if payload.item_type == "ai-platform" and not is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "只有管理员可以设置 AI Platform 类型"
+        )
 
     # Update mutable fields.
     item.name = payload.name

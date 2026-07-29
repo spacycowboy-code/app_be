@@ -36,6 +36,11 @@ RUN mkdir -p /app/logs
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
+# Build-time commit SHA -> runtime env, surfaced by /api/version. Placed late so
+# a new commit doesn't invalidate the dependency install layers above.
+ARG GIT_COMMIT=dev
+ENV APP_GIT_COMMIT=$GIT_COMMIT
+
 # uvicorn listens on 8000 inside the container (mapped to the host in compose).
 EXPOSE 8000
 
