@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -111,3 +112,22 @@ def review_suspect(
     except Exception as exc:
         log.warning("Draft MR creation failed for '%s': %s", skill_name, exc)
         return None
+
+
+def mr_state(mr_url: str) -> str | None:
+    """Current state of a review MR: 'opened' | 'merged' | 'closed'.
+
+    Returns None when it cannot be determined (no token, network error, unknown
+    url), so callers leave the projection untouched rather than guessing.
+    """
+    if not mr_url:
+        return None
+    m = re.search(r"/-/merge_requests/(\d+)", mr_url)
+    if not m:
+        return None
+    try:
+        data = _request("GET", f"/projects/{_project()}/merge_requests/{m.group(1)}")
+    except Exception:  # network, auth, deleted MR - treat as unknown
+        return None
+    state = (data or {}).get("state")
+    return state if state in ("opened", "merged", "closed", "locked") else None

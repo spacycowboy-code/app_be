@@ -68,6 +68,14 @@
 - MR 开在 skill 仓(存 skill 的那个仓库;示例里的 portal-be 只是形态参考)。
 
 ### 状态与分类怎么建模
+判据:**投影必须能从事实重建;重建不出来的投影就是第二份事实。**
+
+- **事实**(不可变、只追加):审计事件与命中证据(`rp_ai_skill_audit_record` + `rp_ai_skill_finding`);复核决定由 GitLab 的 MR 状态承载;哪个版本在线由 git 仓库决定。
+- **唯一的生命周期闸门**:沿用既有的 `rp_ai_skill.status`(pending / approved / rejected),它本来就在 API 契约里。通过 → approved(直接上架);可疑 → pending(等复核 MR);危险 → 不入库。MR 合并 → approved;MR 关闭 → rejected。**不再另立一条审批轴。**
+- **展示缓存**:`audit_state` 只保存当前版本最近一次判定结果,用于说明"为什么还在 pending",**不作闸门**。
+- **唯一写入者**:`skill_audit/reconcile.py`(`python -m app.reconcile`),从事实重算上面两个字段;MR 状态取不到时保持 pending(fail-closed)。幂等,可随时重跑。
+
+
 不用一个 status 字段同时表达审批/安全/查重:
 - 事实:findings(check、severity、confidence、证据、依据)由扫描产出,贴进 MR 评论(即人可读的记录)。
 - 策略:红线清单与阈值,把 findings 映射成"直接拒 / 走 MR / 通过"。改红线只动策略。

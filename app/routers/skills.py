@@ -113,13 +113,14 @@ def list_skills(
         stmt = stmt.where(
             RpAiSkill.name.like(like) | RpAiSkill.description.like(like)
         )
-    # 可疑(suspect) skills are hidden from public browse; admin sees all, and an
-    # uploader still sees their own. (danger skills are never stored at all.)
+    # Visibility is gated by the lifecycle field only: a skill awaiting review
+    # (or rejected by it) is not public. The audit verdict is evidence for why,
+    # not the gate. Admin sees everything and an uploader still sees their own.
+    # (A danger verdict is never stored at all.)
     requester = normalize_eid(x_user_eid)
     if requester != settings.audit_admin_eid:
         stmt = stmt.where(
-            (RpAiSkill.audit_state.is_(None))
-            | (RpAiSkill.audit_state != "suspect")
+            (RpAiSkill.status == "approved")
             | (RpAiSkill.uploader_eid == requester)
         )
     return list(db.scalars(stmt).all())

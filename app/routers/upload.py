@@ -346,9 +346,21 @@ async def upload_skill(
     skill.version = result.version
     skill.storage_path = result.storage_path
     skill.repo_commit = result.commit_sha
-    # Freshly uploaded skills must pass review before they are approved.
-    skill.status = "pending"
+    # One lifecycle field gates visibility; the audit verdict decides its value.
+    # A pass goes live immediately, a suspect waits for the review MR to be
+    # merged, and a danger verdict never reaches this point (nothing is stored).
+    # Recomputable from the audit record + MR state - see skill_audit.reconcile,
+    # which is the only other writer.
+    skill.status = "approved" if audit.state == "pass" else "pending"
+    # Latest verdict for the current version: display only, never a gate.
     skill.audit_state = audit.state
+
+    # The version row and the audit record both reference this skill by foreign
+    # key, and neither is linked to it by an ORM relationship, so the ordering of
+    # the flush is not guaranteed. Insert the skill first: MySQL enforces the
+    # constraint (sqlite does not, which is why this only shows up on a
+    # production-like engine).
+    db.flush()
 
     # Record the version.
     db.add(
