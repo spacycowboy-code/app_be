@@ -120,8 +120,11 @@ deploy:
         exit 1
       fi
     - 'SSHBASE="-i $HOME/.ssh/id_deploy -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p ${DEPLOY_PORT:-22}"'
-    # 1) sync the checked-out code to the server (keep server-side .env intact).
-    - 'rsync -az --delete --exclude ".git" --exclude ".env" -e "ssh $SSHBASE" ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/"'
+    # 1) sync the checked-out code to the server. Keep server-side state that
+    #    lives under DEPLOY_DIR but is NOT part of the repo: .env (secrets) and
+    #    ssh/ (the skill-repo push key + known_hosts). Without excluding ssh/,
+    #    --delete would wipe the deploy key on every deploy and break git push.
+    - 'rsync -az --delete --exclude ".git" --exclude ".env" --exclude "ssh" -e "ssh $SSHBASE" ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/"'
     # 2) push the production .env from the PROD_ENV file variable.
     - 'rsync -az -e "ssh $SSHBASE" "$PROD_ENV" "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/.env"'
     # 3) build + (re)start on the server, then show status. Pass the pushed
