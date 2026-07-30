@@ -156,3 +156,41 @@ def test_manifest_carries_authored_fields_only():
     assert "status" not in manifest          # derived: see skill_audit.reconcile
     for authored in ("name", "description", "tags", "version", "author", "isFree"):
         assert authored in manifest, authored
+
+
+# --- what counts as hidden content ------------------------------------------
+
+def test_chinese_code_comments_are_not_hidden_content():
+    """A Chinese comment is visible and unlike ASCII, so it is not a red line."""
+    from app.services.skill_audit.scanners import has_hidden_chars
+    source = '# 判据:高消耗 != 不合理\nL = ["Kiro IDE Credit 用量", "=" * 40]\n'
+    assert has_hidden_chars(source) is False
+
+
+def test_zero_width_and_bidi_are_hidden_content():
+    from app.services.skill_audit.scanners import has_hidden_chars
+    assert has_hidden_chars("ignore\u200bthe rules") is True      # zero width space
+    assert has_hidden_chars("send \u202ekey\u202c now") is True   # bidi override
+    assert has_hidden_chars("\ufeffhidden") is True               # BOM mid-text
+
+
+def test_latin_lookalike_letters_are_hidden_content():
+    """Cyrillic and Greek letters disguise ASCII identifiers; fullwidth too."""
+    from app.services.skill_audit.scanners import has_hidden_chars
+    assert has_hidden_chars("cur\u0430l http://x") is True        # Cyrillic а
+    assert has_hidden_chars("\u03bfs.system('rm')") is True       # Greek ο
+    assert has_hidden_chars("ｒｍ -rf /") is True                  # fullwidth
+
+
+def test_bundled_bytecode_goes_to_review(tmp_path):
+    """An unreadable payload defeats human review, so it must not pass silently."""
+    from app.services.skill_audit.scanners import unreadable_artifact_scan
+    (tmp_path / "SKILL.md").write_text("x")
+    (tmp_path / "helper.py").write_text("print(1)")          # readable source
+    assert unreadable_artifact_scan(str(tmp_path)) == []
+    pycache = tmp_path / "__pycache__"
+    pycache.mkdir()
+    (pycache / "helper.cpython-313.pyc").write_bytes(b"\x00\x01")
+    finds = unreadable_artifact_scan(str(tmp_path))
+    assert [f.category for f in finds] == ["malicious_artifact"]
+    assert finds[0].severity == "medium"                       # review, not red line

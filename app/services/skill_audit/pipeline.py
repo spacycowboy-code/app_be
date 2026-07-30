@@ -158,6 +158,10 @@ def audit_skill(
         else:
             findings += scanners.artifact_scan(str(work))
 
+        # Independent of the static analyser: unreadable payloads always go to
+        # review, because the review is someone reading the change.
+        findings += scanners.unreadable_artifact_scan(str(work))
+
         det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
         judge = invoke_judge(
             settings=settings, rules=rules, skill_text=redacted, det_summary=det_summary,

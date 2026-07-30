@@ -11,10 +11,14 @@ the judge, regardless of the other tools.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
+from pathlib import Path
 
 from app.services.skill_audit.types import Finding
+
+log = logging.getLogger("skill_audit.scanners")
 
 # Common live-key formats. Placeholder guard: skip tvly-YOUR..., sk-YOUR...
 _SECRET_PATS: list[tuple[str, re.Pattern]] = [
@@ -115,6 +119,38 @@ _CISCO_IGNORE_RULES = {"FILE_MAGIC_MISMATCH", "LOW_ANALYZABILITY"}
 _CISCO_IGNORE_CATS = {"policy_violation", "social_engineering"}
 
 
+# Characters that genuinely hide or disguise content, which is what the
+# hidden_instruction red line is about:
+#   - zero width and word joiners: invisible, can hide text outright
+#   - bidirectional controls: reorder what a reviewer sees
+#   - Cyrillic / Greek letters and fullwidth Latin letters and digits: shaped
+#     like ASCII, so they disguise identifiers and commands
+# Ideographic scripts (Chinese, Japanese, Korean) are none of these: they are
+# plainly visible and not confusable with ASCII letters, so Chinese comments and
+# strings in bundled code are not hidden instructions. Fullwidth *punctuation*
+# (，（）：；) is ordinary Chinese typography and is excluded for the same reason -
+# only the fullwidth letters and digits can stand in for ASCII ones.
+_HIDDEN_CHARS = re.compile(
+    "["
+    "\u200b-\u200f"      # zero width space / joiners / marks
+    "\u2060-\u2064"      # word joiner, invisible operators
+    "\ufeff"             # BOM used mid-text
+    "\u202a-\u202e"      # bidi embedding / override
+    "\u2066-\u2069"      # bidi isolates
+    "\u0400-\u04ff"      # Cyrillic, confusable with Latin
+    "\u0370-\u03ff"      # Greek, confusable with Latin
+    "\uff10-\uff19"      # fullwidth digits
+    "\uff21-\uff3a"      # fullwidth uppercase letters
+    "\uff41-\uff5a"      # fullwidth lowercase letters
+    "]"
+)
+
+
+def has_hidden_chars(text: str) -> bool:
+    """True when the text contains characters that hide or disguise content."""
+    return bool(_HIDDEN_CHARS.search(text or ""))
+
+
 def _map_cisco(rule_id: str | None, category: str | None) -> str | None:
     """Map a Cisco finding to one of our categories, or None to drop it.
 
@@ -176,6 +212,26 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         cat = _map_cisco(it.get("rule_id"), it.get("category"))
         if cat is None:  # hygiene / policy noise -> drop
             continue
+        # hidden_instruction is a red line, so a claim of hidden content has to
+        # meet our definition of it before we hard-reject on it. Cisco reports
+        # HOMOGLYPH_ATTACK for any non-ASCII script sitting next to ASCII, which
+        # makes ordinary Chinese comments and strings in bundled code look like a
+        # homoglyph attack. Read the file and drop the finding when nothing is
+        # actually hidden or disguised.
+        rid_up = str(it.get("rule_id") or "").upper()
+        if cat == "hidden_instruction":
+            rel = str(it.get("file_path") or "")
+            target = (Path(target_dir) / rel).resolve() if rel else None
+            if target and str(target).startswith(str(Path(target_dir).resolve())) \
+                    and target.is_file():
+                try:
+                    content = target.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    content = ""
+                if not has_hidden_chars(content):
+                    log.info("cisco %s on %s: visible, non-confusable characters "
+                             "only - not hidden content, dropped", rid_up, rel)
+                    continue
         # The static layer detects prompt injection by matching coercive phrases
         # ("do not tell the user", "tell the user what to approve"), which also
         # occur in legitimate skills that brief the user or manage credentials.
@@ -205,13 +261,47 @@ _CODE_EXT = {
 }
 
 
+# Compiled or binary payloads: a reviewer cannot read these, so shipping one
+# defeats the human review the suspect state exists for. Source scripts are not
+# listed here - the static analyser judges those on content, and routing every
+# skill that ships a helper script to review would bury the reviewers.
+_UNREADABLE_EXT = {
+    ".pyc", ".pyo", ".exe", ".dll", ".so", ".dylib", ".bin", ".jar", ".class",
+    ".o", ".a", ".wasm", ".node",
+}
+
+
+def unreadable_artifact_scan(target_dir: str) -> list[Finding]:
+    """Flag bundled compiled/binary files so they go to human review.
+
+    Runs independently of the static analyser: that tool classifies shipped
+    bytecode as a hygiene issue, but for an audit whose fallback is a person
+    reading the diff, an unreadable file is a review-worthy fact.
+    """
+    findings: list[Finding] = []
+    root = Path(target_dir)
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _UNREADABLE_EXT:
+            continue
+        findings.append(
+            Finding(
+                source="pipeline",
+                category="malicious_artifact",
+                severity="medium",
+                evidence=str(path.relative_to(root)),
+                detail="Bundles a compiled or binary file, which cannot be reviewed "
+                       "by reading it.",
+            )
+        )
+    return findings
+
+
 def artifact_scan(target_dir: str) -> list[Finding]:
     """Flag shipped executables/scripts as malicious_artifact (medium, non-red-line).
 
     Fallback used only when the Cisco scanner is unavailable; a cheap extension/
     shebang heuristic so bundled executables still route to review.
     """
-    from pathlib import Path
 
     findings: list[Finding] = []
     for p in Path(target_dir).rglob("*"):
