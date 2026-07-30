@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import subprocess
+import zipfile
 from pathlib import Path
 
 from app.services.skill_audit.types import Finding
@@ -151,6 +152,33 @@ def has_hidden_chars(text: str) -> bool:
     return bool(_HIDDEN_CHARS.search(text or ""))
 
 
+def _read_scanned_file(target_dir: str, rel: str) -> str | None:
+    """Read the text a scanner findings points at, or None when it cannot be read.
+
+    The scanner addresses files inside archives with ``outer.zip!/inner/path``, so
+    a plain filesystem lookup misses exactly the case where a skill ships its code
+    in a bundle. Returns None for binary or unreachable content, which callers must
+    treat as "not verified" rather than "nothing found".
+    """
+    if not rel:
+        return None
+    root = Path(target_dir).resolve()
+    outer, sep, inner = rel.partition("!/")
+    path = (root / outer).resolve()
+    if not str(path).startswith(str(root)) or not path.is_file():
+        return None
+    try:
+        if not sep:
+            return path.read_text(encoding="utf-8")
+        with zipfile.ZipFile(path) as zf:
+            member, sep2, deeper = inner.partition("!/")
+            if sep2:                      # archive nested in an archive: give up
+                return None
+            return zf.read(member).decode("utf-8")
+    except (OSError, UnicodeDecodeError, zipfile.BadZipFile, KeyError):
+        return None
+
+
 def _map_cisco(rule_id: str | None, category: str | None) -> str | None:
     """Map a Cisco finding to one of our categories, or None to drop it.
 
@@ -221,17 +249,18 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         rid_up = str(it.get("rule_id") or "").upper()
         if cat == "hidden_instruction":
             rel = str(it.get("file_path") or "")
-            target = (Path(target_dir) / rel).resolve() if rel else None
-            if target and str(target).startswith(str(Path(target_dir).resolve())) \
-                    and target.is_file():
-                try:
-                    content = target.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    content = ""
-                if not has_hidden_chars(content):
-                    log.info("cisco %s on %s: visible, non-confusable characters "
-                             "only - not hidden content, dropped", rid_up, rel)
-                    continue
+            content = _read_scanned_file(target_dir, rel)
+            if content is None:
+                # Could not read it (binary, or nested deeper than one archive),
+                # so the claim is unverified. Keep it as a review signal instead
+                # of hard-rejecting on something we cannot substantiate.
+                log.info("cisco %s on %s: unverifiable, demoted to review",
+                         rid_up, rel)
+                sev = "medium"
+            elif not has_hidden_chars(content):
+                log.info("cisco %s on %s: visible, non-confusable characters "
+                         "only - not hidden content, dropped", rid_up, rel)
+                continue
         # The static layer detects prompt injection by matching coercive phrases
         # ("do not tell the user", "tell the user what to approve"), which also
         # occur in legitimate skills that brief the user or manage credentials.

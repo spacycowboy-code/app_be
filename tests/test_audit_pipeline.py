@@ -194,3 +194,16 @@ def test_bundled_bytecode_goes_to_review(tmp_path):
     finds = unreadable_artifact_scan(str(tmp_path))
     assert [f.category for f in finds] == ["malicious_artifact"]
     assert finds[0].severity == "medium"                       # review, not red line
+
+
+def test_scanner_paths_inside_archives_are_readable(tmp_path):
+    """The scanner addresses bundled code as outer.zip!/inner.py; verification
+    has to follow that, otherwise a claim about bundled code can never be checked."""
+    import zipfile
+    from app.services.skill_audit.scanners import _read_scanned_file
+    inner = "# 判据:高消耗 != 不合理\nprint('用量')\n"
+    with zipfile.ZipFile(tmp_path / "bundle.zip", "w") as z:
+        z.writestr("pkg/script.py", inner)
+    assert _read_scanned_file(str(tmp_path), "bundle.zip!/pkg/script.py") == inner
+    assert _read_scanned_file(str(tmp_path), "missing.zip!/x.py") is None
+    assert _read_scanned_file(str(tmp_path), "../escape.py") is None
