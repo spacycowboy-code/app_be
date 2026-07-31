@@ -85,6 +85,51 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
         (work / name).write_bytes(artifact_bytes)
 
 
+# Text that an agent can be told to read. The semantic layer used to see only
+# SKILL.md, so the same instructions moved into a bundled note or config file went
+# unreviewed - the static layer keys off code patterns and does not read prose.
+_TEXT_EXT = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+             ".rst", ".csv", ".properties"}
+# Total budget for the extra text handed to the judge. Anything left out is
+# reported, so an oversized bundle goes to review instead of passing unexamined.
+_EXTRA_TEXT_BUDGET = 64 * 1024
+
+
+def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Bundled text files worth reviewing, plus the ones left out."""
+    collected: list[tuple[str, str]] = []
+    left_out: list[str] = []
+    total = 0
+    for path in sorted(work.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _TEXT_EXT:
+            continue
+        rel = str(path.relative_to(work))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            left_out.append(rel)
+            continue
+        if rel == "SKILL.md" or text == main_text:
+            continue                        # already the main input
+        if not text.strip():
+            continue
+        if total + len(text) > _EXTRA_TEXT_BUDGET:
+            left_out.append(rel)
+            continue
+        total += len(text)
+        collected.append((rel, text))
+    return collected, left_out
+
+
+def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str | None, int | None]:
+    """Which bundled file a finding's span came from, and the line inside it."""
+    for name, text in segments:
+        line = scanners.locate(text, span)
+        if line is not None:
+            return name, line
+    return None, None
+
+
 def _derive_state(findings: list[Finding], judge_verdict: str) -> str:
     red_line = any(
         f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high")
@@ -162,17 +207,36 @@ def audit_skill(
         # review, because the review is someone reading the change.
         findings += scanners.unreadable_artifact_scan(str(work))
 
+        # Everything the agent could be told to read goes to the semantic layer,
+        # not just SKILL.md, with each file's secrets masked first.
+        extras, left_out = _collect_text_files(work, skill_md)
+        segments: list[tuple[str, str]] = [("SKILL.md", redacted)]
+        judge_input = redacted
+        for rel, text in extras:
+            red_text, secret_finds = scanners.redact_secrets(text, file=rel)
+            findings += secret_finds
+            segments.append((rel, red_text))
+            judge_input += f"\n\n----- bundled file: {rel} -----\n{red_text}"
+        if left_out:
+            findings.append(Finding(
+                "pipeline", "unclassified", "medium",
+                file=", ".join(left_out)[:400],
+                detail="These bundled files were not reviewed by the semantic check "
+                       "(too large or not readable as text), so this upload goes to "
+                       "review.",
+            ))
+
         det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
         judge = invoke_judge(
-            settings=settings, rules=rules, skill_text=redacted, det_summary=det_summary,
+            settings=settings, rules=rules, skill_text=judge_input, det_summary=det_summary,
         )
         # Locate every judge finding in the text it was given. Done here, not in
         # the judge, so it holds whether the judge ran locally or over HTTP.
         for f in judge.findings:
             if f.evidence and not f.file:
-                f.file = "SKILL.md"
-                f.line = (scanners.locate(redacted, f.evidence)
-                          or scanners.locate(skill_md, f.evidence))
+                where, line = _locate_in_segments(segments, f.evidence)
+                f.file = where or "SKILL.md"
+                f.line = line if line is not None else scanners.locate(skill_md, f.evidence)
         findings += judge.findings
         if judge.verdict == "error":
             findings.append(Finding("pipeline", "audit_error", "medium",
