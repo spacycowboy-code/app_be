@@ -228,8 +228,37 @@ def audit_skill(
 
         det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
         judge = invoke_judge(
-            settings=settings, rules=rules, skill_text=judge_input, det_summary=det_summary,
+            settings=settings, rules=rules, skill_text=judge_input,
+            det_summary=det_summary, model=settings.audit_kiro_model,
         )
+        models_used = [settings.audit_kiro_model]
+
+        # Rejection is the one irreversible outcome, so ask a second, different
+        # model before taking it. Disagreement becomes human review rather than a
+        # blocked author: model variance should cost review time, not correctness.
+        confirm_model = settings.audit_kiro_model_confirm
+        if judge.verdict == "block" and confirm_model and confirm_model != settings.audit_kiro_model:
+            second = invoke_judge(
+                settings=settings, rules=rules, skill_text=judge_input,
+                det_summary=det_summary, model=confirm_model,
+            )
+            models_used.append(confirm_model)
+            if second.verdict != "block":
+                log.info("confirmation pass (%s) did not agree with the rejection "
+                         "(%s) - routing to review", confirm_model, second.verdict)
+                judge.verdict = "flag"
+                # A disputed finding is not established, so it must not keep the
+                # severity that makes it a red line - otherwise the downgrade is
+                # cosmetic and the state derivation still rejects.
+                for f in judge.findings:
+                    if f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high"):
+                        f.severity = "medium"
+                judge.findings.append(Finding(
+                    "pipeline", "unclassified", "medium",
+                    detail=f"The two judges disagreed on rejecting this skill "
+                           f"({settings.audit_kiro_model} rejected it, "
+                           f"{confirm_model} did not), so it goes to review.",
+                ))
         # Locate every judge finding in the text it was given. Done here, not in
         # the judge, so it holds whether the judge ran locally or over HTTP.
         for f in judge.findings:
@@ -250,7 +279,9 @@ def audit_skill(
     log.info("audit '%s' by %s -> %s (judge=%s, %d findings)",
              name, uploader_eid, state, judge.verdict, len(findings))
     result = AuditResult(state=state, verdict=judge.verdict, raw=judge.raw,
-                         findings=findings, degraded=sorted(set(degraded)))
+                         findings=findings, degraded=sorted(set(degraded)),
+                         judge_model="+".join(models_used),
+                         rules_hash=hashlib.sha256(rules.encode("utf-8")).hexdigest()[:16])
     if use_cache:
         _cache_put(key, result)
     return result

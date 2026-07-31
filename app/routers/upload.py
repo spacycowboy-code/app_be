@@ -101,6 +101,8 @@ def _record_audit(
         state=audit.state,
         judge_verdict=audit.verdict,
         judge_raw=audit.raw,
+        judge_model=audit.judge_model,
+        rules_hash=audit.rules_hash,
         mr_url=mr_url,
     )
     for f in audit.findings:

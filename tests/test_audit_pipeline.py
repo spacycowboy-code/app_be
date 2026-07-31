@@ -278,3 +278,50 @@ def test_a_finding_is_traced_back_to_the_bundled_file_it_came_from():
     assert _locate_in_segments(segments, "ignore all previous rules") == \
         ("reference/notes.md", 2)
     assert _locate_in_segments(segments, "not there") == (None, None)
+
+
+# --- rejection needs a second opinion ---------------------------------------
+
+def _run_audit(monkeypatch, verdicts, model_primary="m-primary", model_confirm="m-confirm"):
+    """Run the pipeline with scripted judge verdicts; returns (result, models asked)."""
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import JudgeResult
+
+    asked: list[str] = []
+
+    def fake_judge(*, settings, rules, skill_text, det_summary, model=None):
+        asked.append(model)
+        verdict = verdicts[len(asked) - 1]
+        finds = ([Finding("judge", "dangerous_instruction", "critical", "rm -rf /")]
+                 if verdict == "block" else [])
+        return JudgeResult(verdict=verdict, findings=finds)
+
+    monkeypatch.setattr(pipeline, "invoke_judge", fake_judge)
+    settings = pipeline.get_settings()
+    monkeypatch.setattr(settings, "audit_kiro_model", model_primary, raising=False)
+    monkeypatch.setattr(settings, "audit_kiro_model_confirm", model_confirm, raising=False)
+    pipeline._verdict_cache.clear()
+    result = pipeline.audit_skill(name="T", skill_md="---\nname: T\ndescription: d\n---\nrm -rf /\n",
+                                  use_cache=False)
+    return result, asked
+
+
+def test_a_rejection_is_confirmed_by_the_second_model(monkeypatch):
+    result, asked = _run_audit(monkeypatch, ["block", "block"])
+    assert asked == ["m-primary", "m-confirm"]      # the second opinion was asked
+    assert result.state == "danger"                  # both agreed: reject
+    assert result.judge_model == "m-primary+m-confirm"
+    assert result.rules_hash                         # the rules are part of the record
+
+
+def test_disagreement_routes_to_review_instead_of_blocking(monkeypatch):
+    result, asked = _run_audit(monkeypatch, ["block", "flag"])
+    assert asked == ["m-primary", "m-confirm"]
+    assert result.state == "suspect"                 # not blocked on a split decision
+    assert any("disagreed" in (f.detail or "") for f in result.findings)
+
+
+def test_a_pass_costs_only_one_call(monkeypatch):
+    result, asked = _run_audit(monkeypatch, ["pass"])
+    assert asked == ["m-primary"]                    # no second call on the common path
+    assert result.state == "pass"

@@ -23,6 +23,8 @@ COLUMNS = [
     ("rp_ai_skill", "storage_path", "VARCHAR(512) NULL"),
     ("rp_ai_skill", "repo_commit", "VARCHAR(64) NULL"),
     ("rp_ai_skill", "audit_state", "VARCHAR(16) NULL"),
+    ("rp_ai_skill_audit_record", "judge_model", "VARCHAR(120) NULL"),
+    ("rp_ai_skill_audit_record", "rules_hash", "VARCHAR(64) NULL"),
     ("rp_ai_skill_finding", "file", "VARCHAR(512) NULL"),
     ("rp_ai_skill_finding", "line", "INT NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),

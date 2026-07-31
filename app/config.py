@@ -57,7 +57,13 @@ class Settings(BaseSettings):
     # kiro-cli binary for the semantic judge (must be logged in on the host).
     audit_kiro_bin: str = "kiro-cli"
     # Judge model; empty => kiro-cli default (auto). Pin before hard-gating.
-    audit_kiro_model: str = ""
+    # Pinned, never "auto": a gate has to give the same verdict for the same
+    # input, and "auto" may switch models without notice.
+    audit_kiro_model: str = "claude-sonnet-5"
+    # Second opinion, asked only when the primary judge wants to reject. A
+    # disagreement routes to human review instead of blocking the author.
+    # Note: claude-opus-5 is an experimental preview; switch when it goes GA.
+    audit_kiro_model_confirm: str = "claude-opus-5"
     # Seconds to wait for the judge; on timeout the audit fails closed.
     audit_judge_timeout: int = 200
     # Remote judge-service URL. Empty => run kiro-cli in-process (host only).

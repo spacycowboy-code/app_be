@@ -33,7 +33,8 @@ def judge(body: dict, x_judge_token: str | None = Header(default=None)) -> dict:
         skill_text=body.get("skill_text", ""),
         det_summary=body.get("det_summary", ""),
         kiro_bin=s.audit_kiro_bin,
-        model=s.audit_kiro_model,
+        # The caller picks the model (primary or the confirmation pass).
+        model=(body.get("model") or s.audit_kiro_model),
         work_dir=s.audit_work_dir,
         timeout=s.audit_judge_timeout,
     )

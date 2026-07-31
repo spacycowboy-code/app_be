@@ -43,6 +43,10 @@ class AuditResult:
     # Checks whose layer could not run, so "no finding" must not be read as
     # "clean" (the verdict itself already fails closed to review).
     degraded: list[str] = field(default_factory=list)
+    # What produced the verdict. Without these the record cannot be reproduced:
+    # the model and the rules text are both inputs to the decision.
+    judge_model: str | None = None
+    rules_hash: str | None = None
 
     @property
     def is_danger(self) -> bool:

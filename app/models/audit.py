@@ -43,6 +43,10 @@ class RpAiSkillAuditRecord(TimestampMixin, Base):
     # Semantic judge verdict: block | flag | pass | error
     judge_verdict: Mapped[str | None] = mapped_column(String(16))
     judge_raw: Mapped[str | None] = mapped_column(Text)
+    # Which model(s) judged it, and the rules text they were given: both are
+    # inputs to the verdict, so the record is only reproducible with them.
+    judge_model: Mapped[str | None] = mapped_column(String(120))
+    rules_hash: Mapped[str | None] = mapped_column(String(64))
     # Draft MR url for suspect uploads (null otherwise / until created).
     mr_url: Mapped[str | None] = mapped_column(String(512))
 

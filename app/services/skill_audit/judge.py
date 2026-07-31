@@ -103,13 +103,14 @@ def run_judge(
 
 
 def _run_remote(url: str, token: str, rules: str, skill_text: str,
-                det_summary: str, timeout: int) -> JudgeResult:
+                det_summary: str, timeout: int, model: str = "") -> JudgeResult:
     """Call a remote judge service (POST /judge) instead of kiro-cli locally."""
     import urllib.error
     import urllib.request
 
     payload = json.dumps(
-        {"rules": rules, "skill_text": skill_text, "det_summary": det_summary}
+        {"rules": rules, "skill_text": skill_text, "det_summary": det_summary,
+         "model": model}
     ).encode()
     headers = {"Content-Type": "application/json"}
     if token:
@@ -135,13 +136,15 @@ def _run_remote(url: str, token: str, rules: str, skill_text: str,
     )
 
 
-def invoke_judge(*, settings, rules: str, skill_text: str, det_summary: str) -> JudgeResult:
+def invoke_judge(*, settings, rules: str, skill_text: str, det_summary: str,
+                 model: str | None = None) -> JudgeResult:
     """Dispatch to the remote judge service if configured, else run locally."""
     if settings.audit_judge_url:
         return _run_remote(settings.audit_judge_url, settings.audit_judge_token,
-                           rules, skill_text, det_summary, settings.audit_judge_timeout)
+                           rules, skill_text, det_summary, settings.audit_judge_timeout,
+                           model=(model or settings.audit_kiro_model))
     return run_judge(
         rules=rules, skill_text=skill_text, det_summary=det_summary,
-        kiro_bin=settings.audit_kiro_bin, model=settings.audit_kiro_model,
+        kiro_bin=settings.audit_kiro_bin, model=(model or settings.audit_kiro_model),
         work_dir=settings.audit_work_dir, timeout=settings.audit_judge_timeout,
     )
