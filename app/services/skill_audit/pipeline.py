@@ -166,6 +166,13 @@ def audit_skill(
         judge = invoke_judge(
             settings=settings, rules=rules, skill_text=redacted, det_summary=det_summary,
         )
+        # Locate every judge finding in the text it was given. Done here, not in
+        # the judge, so it holds whether the judge ran locally or over HTTP.
+        for f in judge.findings:
+            if f.evidence and not f.file:
+                f.file = "SKILL.md"
+                f.line = (scanners.locate(redacted, f.evidence)
+                          or scanners.locate(skill_md, f.evidence))
         findings += judge.findings
         if judge.verdict == "error":
             findings.append(Finding("pipeline", "audit_error", "medium",

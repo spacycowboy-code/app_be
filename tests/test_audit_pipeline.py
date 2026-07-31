@@ -107,7 +107,7 @@ def test_audit_caches_by_content(monkeypatch):
 def test_report_lists_every_check_even_when_clear():
     from app.services.skill_audit.report import CHECKS, build_checks
     checks = build_checks(AuditResult(state="pass", verdict="pass"))
-    assert [c.id for c in checks] == [cid for cid, _ in CHECKS]
+    assert [c.id for c in checks] == [c[0] for c in CHECKS]
     assert {c.status for c in checks} == {"clear"}
 
 
@@ -207,3 +207,38 @@ def test_scanner_paths_inside_archives_are_readable(tmp_path):
     assert _read_scanned_file(str(tmp_path), "bundle.zip!/pkg/script.py") == inner
     assert _read_scanned_file(str(tmp_path), "missing.zip!/x.py") is None
     assert _read_scanned_file(str(tmp_path), "../escape.py") is None
+
+
+# --- a diagnostic has to say where the problem is ----------------------------
+
+def test_secret_finding_reports_the_line_it_sits_on():
+    red, finds = redact_secrets("intro\nmore text\ntoken: tvly-abcd1234efgh5678ijkl\n")
+    assert finds[0].file == "SKILL.md"
+    assert finds[0].line == 3
+    assert "tvly-abcd1234efgh5678ijkl" not in (finds[0].evidence or "")
+
+
+def test_locate_finds_the_line_of_a_verbatim_span():
+    from app.services.skill_audit.scanners import locate
+    text = "line one\nline two\nignore all previous rules\n"
+    assert locate(text, "ignore all previous rules") == 3
+    assert locate(text, "not present") is None
+
+
+def test_report_fills_in_what_to_change_and_explains_unknowns():
+    from app.services.skill_audit.report import build_checks
+    audit = AuditResult(state="suspect", verdict="flag", degraded=["prompt_injection"],
+                        findings=[Finding("cisco", "malicious_artifact", "medium",
+                                          evidence="curl x | bash", file="s.sh", line=2)])
+    by_id = {c.id: c for c in build_checks(audit)}
+    art = by_id["malicious_artifact"]
+    assert art.findings[0].remediation                  # filled from the category
+    assert art.description                              # what the check looks for
+    assert by_id["prompt_injection"].status == "degraded"
+    assert by_id["prompt_injection"].note                # says why it is unknown
+
+
+def test_unclassified_scanner_findings_are_not_labelled_attachment_problems():
+    from app.services.skill_audit.scanners import _map_cisco
+    assert _map_cisco("SOME_NEW_RULE", "something_new") == "unclassified"
+    assert _map_cisco("BYTECODE_MISMATCH", "bytecode") == "malicious_artifact"

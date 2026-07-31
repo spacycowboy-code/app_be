@@ -6,13 +6,23 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Finding:
-    """One piece of evidence produced by a scanner or the judge."""
+    """One diagnostic: what was found, where it is, and what to change.
+
+    The shape follows what compilers and linters settled on, because the person
+    reading it has the same job: find the offending text and fix it. ``file`` may
+    address a file inside an uploaded bundle (``bundle.zip!/scripts/x.py``), and
+    ``evidence`` is the verbatim text that triggered the finding, so the report can
+    point at a location instead of only naming a category.
+    """
 
     source: str          # detect-secrets | cisco | judge | pipeline
-    category: str        # secret | dangerous_instruction | ... | audit_error
+    category: str        # secret | dangerous_instruction | ... | unclassified
     severity: str        # critical | high | medium | low
-    evidence: str | None = None   # verbatim span (secrets already redacted)
-    detail: str | None = None
+    evidence: str | None = None   # verbatim snippet (secrets already redacted)
+    detail: str | None = None     # one sentence: what it means
+    file: str | None = None       # where, relative to the upload
+    line: int | None = None       # 1-based line in that file
+    remediation: str | None = None  # what to change
 
 
 @dataclass

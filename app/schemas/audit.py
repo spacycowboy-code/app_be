@@ -11,13 +11,21 @@ from app.schemas.common import CamelModel
 
 
 class AuditFinding(CamelModel):
-    """One human-readable finding. Secret values are already redacted upstream."""
+    """One diagnostic: what, where, and what to change.
+
+    ``file`` may address a file inside the uploaded bundle
+    (``bundle.zip!/scripts/x.py``); ``evidence`` is the verbatim snippet that
+    triggered it, with secret values already redacted upstream.
+    """
 
     source: str            # detect-secrets | cisco | judge | pipeline
-    category: str          # secret | dangerous_instruction | ... | audit_error
+    category: str          # secret | dangerous_instruction | ... | unclassified
     severity: str          # critical | high | medium | low
     evidence: str | None = None
     detail: str | None = None
+    file: str | None = None
+    line: int | None = None
+    remediation: str | None = None
 
 
 class AuditCheck(CamelModel):
@@ -32,7 +40,9 @@ class AuditCheck(CamelModel):
     id: str                # secret | dangerous_instruction | ...
     label: str             # user-facing label
     status: str            # clear | hit | degraded
+    description: str = ""            # what this check looks for
     severity: str | None = None      # highest severity among findings, when hit
+    note: str | None = None          # why the result is unknown, when degraded
     findings: list[AuditFinding] = []
 
 

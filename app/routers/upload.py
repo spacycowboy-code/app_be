@@ -111,6 +111,8 @@ def _record_audit(
                 severity=f.severity,
                 evidence=f.evidence,
                 detail=f.detail,
+                file=f.file,
+                line=f.line,
             )
         )
     db.add(record)
@@ -157,29 +159,26 @@ def _checks_out(audit: AuditResult) -> list[AuditCheck]:
     """The report the wizard renders: fixed checks, evidence grouped under them."""
     return [
         AuditCheck(
-            id=c.id, label=c.label, status=c.status, severity=c.severity,
-            findings=[
-                AuditFinding(source=f.source, category=f.category,
-                             severity=f.severity, evidence=f.evidence, detail=f.detail)
-                for f in c.findings
-            ],
+            id=c.id, label=c.label, status=c.status, description=c.description,
+            severity=c.severity, note=c.note,
+            findings=[_finding_out(f) for f in c.findings],
         )
         for c in build_checks(audit)
     ]
 
 
+def _finding_out(f) -> AuditFinding:
+    """Serialize one diagnostic, including where it is and what to change."""
+    return AuditFinding(
+        source=f.source, category=f.category, severity=f.severity,
+        evidence=f.evidence, detail=f.detail,
+        file=f.file, line=f.line, remediation=f.remediation,
+    )
+
+
 def _findings_out(audit: AuditResult) -> list[AuditFinding]:
     """Serialize findings for the API (secret values already redacted upstream)."""
-    return [
-        AuditFinding(
-            source=f.source,
-            category=f.category,
-            severity=f.severity,
-            evidence=f.evidence,
-            detail=f.detail,
-        )
-        for f in audit.findings
-    ]
+    return [_finding_out(f) for f in audit.findings]
 
 
 @router.post("/evaluate", response_model=SkillEvaluateResult)

@@ -68,5 +68,9 @@ class RpAiSkillFinding(Base):
     # Verbatim evidence span (secrets are redacted before storage).
     evidence: Mapped[str | None] = mapped_column(Text)
     detail: Mapped[str | None] = mapped_column(Text)
+    # Where it is, so the record and the review comment can point at it. The path
+    # may address a file inside the uploaded bundle (bundle.zip!/scripts/x.py).
+    file: Mapped[str | None] = mapped_column(String(512))
+    line: Mapped[int | None] = mapped_column(Integer)
 
     record: Mapped["RpAiSkillAuditRecord"] = relationship(back_populates="findings")

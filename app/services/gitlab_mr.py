@@ -67,12 +67,16 @@ def _reviewer_id(username: str) -> int | None:
 
 def _findings_markdown(skill_name: str, findings: list[Finding]) -> str:
     lines = [f"### 🔒 安全审计:`{skill_name}` 判为**可疑**,请复核后决定是否合入", ""]
-    lines.append("| source | category | severity | evidence | detail |")
+    lines.append("| 位置 | 检查项 | 严重度 | 命中原文 | 说明 |")
     lines.append("|---|---|---|---|---|")
     for f in findings:
+        where = f.file or "-"
+        if f.line:
+            where = f"{where}:{f.line}"
+        where = where.replace("|", "\\|")[:120]
         ev = (f.evidence or "").replace("|", "\\|").replace("\n", " ")[:120]
         dt = (f.detail or "").replace("|", "\\|").replace("\n", " ")[:160]
-        lines.append(f"| {f.source} | {f.category} | {f.severity} | {ev} | {dt} |")
+        lines.append(f"| `{where}` | {f.category} | {f.severity} | {ev} | {dt} |")
     lines.append("")
     lines.append("_合入此 MR = 该 skill 上线。_")
     return "\n".join(lines)

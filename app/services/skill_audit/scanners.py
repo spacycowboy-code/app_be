@@ -30,19 +30,36 @@ _SECRET_PATS: list[tuple[str, re.Pattern]] = [
 ]
 
 
-def redact_secrets(text: str) -> tuple[str, list[Finding]]:
+def line_of(text: str, index: int) -> int:
+    """1-based line number of a character offset."""
+    return text.count("\n", 0, index) + 1
+
+
+def locate(text: str, span: str) -> int | None:
+    """1-based line where ``span`` first appears, or None when it does not."""
+    if not span:
+        return None
+    i = text.find(span)
+    return line_of(text, i) if i >= 0 else None
+
+
+def redact_secrets(text: str, file: str = "SKILL.md") -> tuple[str, list[Finding]]:
     """Mask any live-format secrets. Returns (redacted_text, findings)."""
     findings: list[Finding] = []
     redacted = text
     for name, pat in _SECRET_PATS:
-        if pat.search(text):
+        m = pat.search(text)
+        if m:
             findings.append(
                 Finding(
                     source="pipeline",
                     category="secret",
                     severity="critical",
+                    # The value itself is never surfaced, only its shape.
                     evidence=f"<redacted:{name}>",
-                    detail=f"live-format secret matched ({name})",
+                    detail=f"A credential in {name} format is written into the file.",
+                    file=file,
+                    line=line_of(text, m.start()),
                 )
             )
         redacted = pat.sub("<REDACTED_SECRET>", redacted)
@@ -202,9 +219,10 @@ def _map_cisco(rule_id: str | None, category: str | None) -> str | None:
         return "hidden_instruction"
     if "BYTECODE" in rid or "BINARY" in rid or cat in ("bytecode", "malware"):
         return "malicious_artifact"
-    # Unmapped but security-relevant (hygiene already dropped, LOW/INFO already
-    # filtered): route to review conservatively, never a red-line auto-reject.
-    return "malicious_artifact"
+    # Security-relevant but outside our vocabulary. Reporting it as an
+    # attachment problem would mislabel it, so it gets its own bucket: the
+    # scanner's own wording is shown and a person decides. Never a red line.
+    return "unclassified"
 
 
 def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
@@ -269,15 +287,20 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         # semantic judge remains the arbiter of instruction-layer intent.
         if cat == "prompt_injection" and sev in ("critical", "high"):
             sev = "medium"
-        title = (it.get("title") or it.get("rule_id") or "")[:200]
-        loc = it.get("file_path") or ""
+        # The scanner already reports file, line, the offending snippet and its
+        # own remediation. Pass them through: without them the report can only
+        # name a category, which is not something an author can act on.
+        line = it.get("line_number")
         findings.append(
             Finding(
                 source="cisco",
                 category=cat,
                 severity=sev,
-                evidence=(f"{loc}: {title}".strip(": ") or None),
-                detail=(it.get("description") or "")[:500] or None,
+                evidence=(str(it.get("snippet") or "").strip() or None),
+                detail=(it.get("description") or it.get("title") or "")[:400] or None,
+                file=(str(it.get("file_path")) if it.get("file_path") else None),
+                line=(int(line) if isinstance(line, (int, str)) and str(line).isdigit() else None),
+                remediation=(str(it.get("remediation") or "").strip()[:300] or None),
             )
         )
     return findings, True
@@ -317,7 +340,8 @@ def unreadable_artifact_scan(target_dir: str) -> list[Finding]:
                 source="pipeline",
                 category="malicious_artifact",
                 severity="medium",
-                evidence=str(path.relative_to(root)),
+                # A binary has no snippet to quote; the location is the fact.
+                file=str(path.relative_to(root)),
                 detail="Bundles a compiled or binary file, which cannot be reviewed "
                        "by reading it.",
             )
@@ -349,6 +373,6 @@ def artifact_scan(target_dir: str) -> list[Finding]:
         if reason:
             findings.append(
                 Finding("pipeline", "malicious_artifact", "medium",
-                        evidence=p.name, detail=reason)
+                        file=p.name, detail=reason)
             )
     return findings
