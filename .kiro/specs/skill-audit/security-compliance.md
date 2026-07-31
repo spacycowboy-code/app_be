@@ -200,6 +200,6 @@ MCP 在本环境禁用,所以判定器用 Kiro 原生的 agent 机制实现(参�
 | 数据库 | 本栈自带的 MySQL 容器(`--profile local-db`),数据在命名卷里 | 现有的托管 MySQL |
 | 数据 | `python -m app.seed` 生成的分类与示例 skill | 真实数据 |
 | skill 仓推送 | 关闭,不建 MR | 开启,需 GitLab token 与评审人 |
-| 判定模型 | `auto` | 应固定版本 |
+| 判定模型 | 与生产相同:主判定 `claude-sonnet-5`,红线复核 `claude-opus-5` | 同左 |
 
-数据库放在容器自带的卷里,而不是容器内的临时目录——否则每次重建镜像都会连同分类一起清空,上传表单的部门下拉就会变空。上生产只需改 `.env`(指向托管 MySQL、开启推送与 token、设置评审人、固定模型),不启用 `local-db` 这个 profile。
+数据库放在容器自带的卷里,而不是容器内的临时目录——否则每次重建镜像都会连同分类一起清空,上传表单的部门下拉就会变空。上生产只需改 `.env`(指向托管 MySQL、开启推送与 GitLab token、设置评审人),不启用 `local-db` 这个 profile。
