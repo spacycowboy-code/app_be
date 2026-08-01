@@ -234,3 +234,29 @@ def test_projection_is_rebuildable_by_running_it_twice(client, monkeypatch):
     first = rec.reconcile_all(SessionLocal())["changed"]
     second = rec.reconcile_all(SessionLocal())["changed"]      # idempotent
     assert first == {"sus": "approved"} and second == {}
+
+
+# --- the reconcile trigger: one function, two triggers ----------------------
+
+def test_webhook_trigger_needs_the_secret_and_then_reconciles(client, monkeypatch):
+    from app.routers import audit as audit_mod
+    from app.services.skill_audit import reconcile as rec
+
+    monkeypatch.setattr(audit_mod.settings, "audit_webhook_token", "", raising=False)
+    assert client.post("/api/audit/reconcile").status_code == 403      # disabled
+
+    monkeypatch.setattr(audit_mod.settings, "audit_webhook_token", "s3cret", raising=False)
+    assert client.post("/api/audit/reconcile").status_code == 401      # wrong token
+
+    _stub_store(monkeypatch)
+    _stub_audit(monkeypatch, AuditResult(state="suspect", verdict="flag",
+                                         findings=[Finding("judge", "malicious_artifact", "medium")]))
+    monkeypatch.setattr(upload_mod.gitlab_mr, "review_suspect",
+                        lambda **kw: "http://gl/-/merge_requests/21")
+    _upload(client, "Sus")
+    monkeypatch.setattr(rec.gitlab_mr, "mr_state", lambda url: "merged")
+
+    r = client.post("/api/audit/reconcile", headers={"X-Gitlab-Token": "s3cret"})
+    assert r.status_code == 200
+    assert r.json()["changed"] == {"sus": "approved"}                  # same convergence
+    assert "sus" in [x["id"] for x in client.get("/api/skills").json()]

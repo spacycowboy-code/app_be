@@ -47,6 +47,21 @@ services:
       retries: 3
       start_period: 15s
 
+  # Converges the audit projection with the review MRs. The periodic sweep is
+  # what makes it correct - the webhook (POST /api/audit/reconcile) only shortens
+  # the delay, and both run the same function.
+  reconciler:
+    image: ${BACKEND_IMAGE:-rp-ai-portal-be}:${IMAGE_TAG:-latest}
+    container_name: ${STACK:-ai-portal-be}-reconciler
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-300}
+    entrypoint: ["python", "-m", "app.reconcile", "--watch"]
+    depends_on:
+      - backend
+
   judge:
     build:
       context: .

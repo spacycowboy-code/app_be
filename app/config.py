@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     audit_mr_project: str = "rp-ai/rp-ai-skill"
     # Reviewer GitLab username assigned on the Draft MR.
     audit_mr_reviewer: str = "ezhgmio"
+    # Shared secret for POST /api/audit/reconcile (the GitLab webhook).
+    # Empty disables the endpoint; the periodic sweep still runs.
+    audit_webhook_token: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:
