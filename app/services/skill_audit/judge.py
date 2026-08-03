@@ -14,8 +14,14 @@ import re
 import subprocess
 
 from app.services.skill_audit.types import Finding, JudgeResult
+from app.services.skill_audit.report import CHECKS as _CHECKS
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+
+# Finding categories as the report names them. A judge "evidence" that is
+# exactly one of these is a label, not a quotation.
+_CATEGORY_LABELS = {c[0] for c in _CHECKS}
 
 
 def _clean(out: str) -> str:
@@ -70,7 +76,16 @@ def run_judge(
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return JudgeResult(verdict="error", raw=f"invoke failed: {exc}", schema_ok=False)
 
-    raw = _clean(proc.stdout)
+    return _parse(_clean(proc.stdout), skill_text)
+
+
+def _parse(raw: str, skill_text: str) -> JudgeResult:
+    """Turn the judge's raw output into a verdict we are willing to trust.
+
+    Kept apart from the subprocess call so the checks it performs - schema,
+    evidence grounding, restatement of deterministic findings - are testable
+    without a model.
+    """
     data = _extract_json(raw)
     if data is None:
         return JudgeResult(verdict="error", raw=raw[:2000], schema_ok=False)
@@ -85,8 +100,15 @@ def run_judge(
     grounded = True
     for f in raw_findings:
         span = f.get("evidence_span", "") or ""
+        # The judge is shown the deterministic findings so it can cross-check them.
+        # Sometimes it hands one back as its own observation, quoting the category
+        # label instead of any text ("evidence_span": "malicious_artifact"). That is
+        # a restatement of something already reported, not a new finding and not a
+        # hallucination: drop it, and do not let it degrade the verdict.
+        if span.strip() in _CATEGORY_LABELS:
+            continue
         if span and span not in skill_text:
-            grounded = False  # hallucinated evidence -> don't fully trust
+            grounded = False  # invented evidence -> don't fully trust
         findings.append(
             Finding(
                 source="judge",

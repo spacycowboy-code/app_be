@@ -367,3 +367,79 @@ def test_ordinary_content_is_not_concealment():
 def test_concealment_in_a_bundled_file_is_addressed_to_that_file():
     finds = scanners.hidden_char_scan("read the docs\u2060here\n", file="pack.zip!/notes.md")
     assert finds and finds[0].file == "pack.zip!/notes.md"
+
+
+def test_a_plain_md_upload_is_not_audited_twice(tmp_path):
+    """The uploaded .md is the definition; materialising it again would report
+    every finding once per copy and leak the uploaded filename into the report."""
+    from app.services.skill_audit.pipeline import _materialize
+
+    skill_md = "---\nname: x\ndescription: y\n---\n\n# X\n"
+    _materialize(tmp_path, skill_md, skill_md.encode(), "my-skill.md")
+    assert [p.name for p in tmp_path.iterdir()] == ["SKILL.md"]
+
+
+def test_a_bundle_is_still_unpacked(tmp_path):
+    import io, zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("scripts/setup.py", "print('hi')\n")
+    from app.services.skill_audit.pipeline import _materialize
+
+    _materialize(tmp_path, "---\nname: x\ndescription: y\n---\n", buf.getvalue(), "pack.zip")
+    assert (tmp_path / "scripts" / "setup.py").is_file()
+
+
+def test_concealment_is_one_finding_per_file_not_one_per_character():
+    text = "# T\n\nstyled text\u200b\u200c\u200b\u200c and more\u2060here\n"
+    finds = scanners.hidden_char_scan(text)
+    assert len(finds) == 1
+    assert finds[0].severity == "high"
+    for expected in ("zero width space", "zero width non-joiner", "word joiner"):
+        assert expected in finds[0].detail
+
+
+def test_an_unreadable_file_is_reported_once_and_in_the_right_bucket(monkeypatch):
+    """A .pyc must read as 'ship reviewable source', not as hidden instructions."""
+    import io, zipfile
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import JudgeResult
+
+    monkeypatch.setattr(pipeline, "invoke_judge",
+                        lambda *a, **k: JudgeResult(verdict="pass", findings=[]))
+    md = "---\nname: x\ndescription: y\n---\n\n# X\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("SKILL.md", md)
+        z.writestr("lib/helper.pyc", b"\x03\xf3\r\n" + b"\x00" * 64)
+    result = pipeline.audit_skill(name="x", skill_md=md, artifact_bytes=buf.getvalue(),
+                                  artifact_filename="p.zip", use_cache=False)
+    pyc = [f for f in result.findings if (f.file or "").endswith("helper.pyc")]
+    assert pyc, "the unreadable artifact must still be reported"
+    assert {f.category for f in pyc} == {"malicious_artifact"}
+
+
+def test_judge_restating_a_deterministic_finding_is_dropped_not_degraded():
+    """The judge is shown the deterministic findings; when it hands one back with
+    the category label as its 'evidence', that is a restatement, not a new finding
+    and not invented evidence."""
+    from app.services.skill_audit import judge
+
+    raw = ('{"verdict": "flag", "findings": [{"category": "malicious_artifact",'
+           ' "severity": "low", "evidence_span": "malicious_artifact",'
+           ' "detail": "Deterministic scan flagged a bundled artifact."}]}')
+    result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
+    assert result.findings == []
+    assert result.grounded is True          # a label is not invented evidence
+
+
+def test_judge_inventing_evidence_still_degrades():
+    from app.services.skill_audit import judge
+
+    raw = ('{"verdict": "block", "findings": [{"category": "dangerous_instruction",'
+           ' "severity": "high", "evidence_span": "rm -rf / --no-preserve-root",'
+           ' "detail": "destroys the filesystem"}]}')
+    result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
+    assert len(result.findings) == 1
+    assert result.grounded is False

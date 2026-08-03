@@ -81,6 +81,14 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(zf.read(member))
     else:
+        # A plain .md upload *is* the definition. Writing it a second time under
+        # its own name would audit the same text twice, so every finding would
+        # appear once for SKILL.md and once for the uploaded filename.
+        try:
+            if artifact_bytes.decode("utf-8") == skill_md:
+                return
+        except UnicodeDecodeError:
+            pass
         name = Path(artifact_filename or "artifact.bin").name
         (work / name).write_bytes(artifact_bytes)
 
@@ -207,6 +215,17 @@ def audit_skill(
         # Independent of the static analyser: unreadable payloads always go to
         # review, because the review is someone reading the change.
         findings += scanners.unreadable_artifact_scan(str(work))
+
+        # A file we cannot read is already reported as an unreadable artifact,
+        # with the fix the author has to make ("ship reviewable source"). A
+        # third-party claim about invisible characters inside that same file
+        # cannot be verified and would file the problem under hidden
+        # instructions, which is not what the author must change.
+        unreadable = {f.file for f in findings if f.category == "malicious_artifact"}
+        findings = [f for f in findings
+                    if not (f.category == "hidden_instruction"
+                            and f.source != "pipeline"
+                            and f.file in unreadable)]
 
         # Everything the agent could be told to read goes to the semantic layer,
         # not just SKILL.md, with each file's secrets masked first.

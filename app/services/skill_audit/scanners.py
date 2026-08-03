@@ -202,40 +202,45 @@ def hidden_char_scan(text: str, file: str = "SKILL.md") -> list[Finding]:
     The static analyser only reports concealment when its own heuristics fire, so
     relying on it alone means a file whose only defect is invisible characters can
     pass unexamined. This is the first-party check for our own definition.
+
+    One finding per file: the fix is the same edit regardless of how many distinct
+    invisible characters were used, and a row per character would read as repeated
+    findings for one problem.
     """
     if not text:
         return []
     native_joiners = bool(_JOINER_SCRIPTS.search(text))
-    findings: list[Finding] = []
-    seen: set[str] = set()
-    for i, ch in enumerate(text):
-        if ch not in _CONCEAL or ch in seen:
+    hits: list[tuple[int, str, str, int, bool]] = []   # index, char, name, count, red_line
+    for ch, name in _CONCEAL.items():
+        i = text.find(ch)
+        if i < 0 or (ch == "\ufeff" and i == 0):      # a leading BOM is an encoding marker
             continue
-        if ch == "\ufeff" and i == 0:      # a leading BOM is an encoding marker
-            continue
-        seen.add(ch)
-        name = _CONCEAL[ch]
-        count = text.count(ch)
         # In Arabic/Hebrew/Indic text these characters are orthography, so the
-        # certainty needed for a red line is absent: route to review instead.
+        # certainty a red line needs is absent: route to review instead.
         red_line = not (native_joiners and ch in ("\u200c", "\u202a", "\u202b",
                                                   "\u202c", "\u202d", "\u202e"))
-        line = line_of(text, i)
-        snippet = text[max(0, i - 30):i + 30].replace(ch, f"<{name}>")
-        findings.append(
-            Finding(
-                source="pipeline",
-                category="hidden_instruction",
-                severity="high" if red_line else "medium",
-                evidence=snippet.strip(),
-                detail=(f"{name} (U+{ord(ch):04X}) appears {count}x in this file; "
-                        "it is invisible when read, so the text a reviewer sees is "
-                        "not the text the agent receives"),
-                file=file,
-                line=line,
-            )
+        hits.append((i, ch, name, text.count(ch), red_line))
+    if not hits:
+        return []
+    hits.sort()
+    first_i, first_ch, _, _, _ = hits[0]
+    listed = ", ".join(f"{n} (U+{ord(c):04X}) x{k}" for _, c, n, k, _ in hits)
+    snippet = text[max(0, first_i - 30):first_i + 30]
+    for _, c, n, _, _ in hits:
+        snippet = snippet.replace(c, f"<{n}>")
+    return [
+        Finding(
+            source="pipeline",
+            category="hidden_instruction",
+            severity="high" if any(h[4] for h in hits) else "medium",
+            evidence=snippet.strip(),
+            detail=(f"invisible characters in this file: {listed}. They cannot be "
+                    "seen when the file is read, so the text a reviewer sees is not "
+                    "the text the agent receives"),
+            file=file,
+            line=line_of(text, first_i),
         )
-    return findings
+    ]
 
 
 def _read_scanned_file(target_dir: str, rel: str) -> str | None:
