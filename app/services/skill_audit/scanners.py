@@ -169,6 +169,75 @@ def has_hidden_chars(text: str) -> bool:
     return bool(_HIDDEN_CHARS.search(text or ""))
 
 
+# The two tiers below exist because "hides content" and "looks like something
+# else" carry different certainty. A non-printing character between the words of
+# an instruction file has no authoring purpose, so it is a red line. A Cyrillic
+# or fullwidth letter can be ordinary text in a Russian or Chinese skill, so it
+# routes to review instead.
+_CONCEAL = {
+    "\u200b": "zero width space",
+    "\u200c": "zero width non-joiner",
+    "\u00ad": "soft hyphen",
+    "\u2060": "word joiner",
+    "\u2061": "function application",
+    "\u2062": "invisible times",
+    "\u2063": "invisible separator",
+    "\u2064": "invisible plus",
+    "\ufeff": "byte order mark",
+    "\u202a": "bidi embedding", "\u202b": "bidi embedding",
+    "\u202c": "bidi pop", "\u202d": "bidi override", "\u202e": "bidi override",
+    "\u2066": "bidi isolate", "\u2067": "bidi isolate",
+    "\u2068": "bidi isolate", "\u2069": "bidi isolate",
+}
+# Scripts that use joiners and bidi controls as ordinary orthography. When the
+# text is written in one of them, the same characters stop being evidence of
+# concealment and are treated as the review-tier signal instead.
+_JOINER_SCRIPTS = re.compile("[\u0590-\u05ff\u0600-\u06ff\u0700-\u074f\u0900-\u0dff]")
+
+
+def hidden_char_scan(text: str, file: str = "SKILL.md") -> list[Finding]:
+    """Report non-printing characters we find ourselves, without waiting for a
+    third-party claim.
+
+    The static analyser only reports concealment when its own heuristics fire, so
+    relying on it alone means a file whose only defect is invisible characters can
+    pass unexamined. This is the first-party check for our own definition.
+    """
+    if not text:
+        return []
+    native_joiners = bool(_JOINER_SCRIPTS.search(text))
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for i, ch in enumerate(text):
+        if ch not in _CONCEAL or ch in seen:
+            continue
+        if ch == "\ufeff" and i == 0:      # a leading BOM is an encoding marker
+            continue
+        seen.add(ch)
+        name = _CONCEAL[ch]
+        count = text.count(ch)
+        # In Arabic/Hebrew/Indic text these characters are orthography, so the
+        # certainty needed for a red line is absent: route to review instead.
+        red_line = not (native_joiners and ch in ("\u200c", "\u202a", "\u202b",
+                                                  "\u202c", "\u202d", "\u202e"))
+        line = line_of(text, i)
+        snippet = text[max(0, i - 30):i + 30].replace(ch, f"<{name}>")
+        findings.append(
+            Finding(
+                source="pipeline",
+                category="hidden_instruction",
+                severity="high" if red_line else "medium",
+                evidence=snippet.strip(),
+                detail=(f"{name} (U+{ord(ch):04X}) appears {count}x in this file; "
+                        "it is invisible when read, so the text a reviewer sees is "
+                        "not the text the agent receives"),
+                file=file,
+                line=line,
+            )
+        )
+    return findings
+
+
 def _read_scanned_file(target_dir: str, rel: str) -> str | None:
     """Read the text a scanner findings points at, or None when it cannot be read.
 

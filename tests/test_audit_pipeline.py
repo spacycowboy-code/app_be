@@ -1,4 +1,6 @@
 """Unit tests: secret redaction + audit-state derivation."""
+import pytest
+from app.services.skill_audit import scanners
 from app.services.skill_audit.scanners import redact_secrets
 from app.services.skill_audit.pipeline import _derive_state
 from app.services.skill_audit.types import AuditResult, Finding
@@ -325,3 +327,43 @@ def test_a_pass_costs_only_one_call(monkeypatch):
     result, asked = _run_audit(monkeypatch, ["pass"])
     assert asked == ["m-primary"]                    # no second call on the common path
     assert result.state == "pass"
+
+
+# --- concealment is found by us, not only when a third party claims it -------
+# Shapes taken from the OASB unicode_stego category (MAL-STEGO-001/003/004/006).
+
+@pytest.mark.parametrize("char, name", [
+    ("\u200b", "zero width space"),
+    ("\u200c", "zero width non-joiner"),
+    ("\u00ad", "soft hyphen"),
+    ("\u2060", "word joiner"),
+    ("\u2062", "invisible times"),
+])
+def test_non_printing_characters_are_a_red_line(char, name):
+    text = f"# Text Formatter\n\nFormats text with proper styling.{char * 12}\n"
+    finds = scanners.hidden_char_scan(text)
+    assert finds, f"{name} not detected"
+    assert finds[0].category == "hidden_instruction"
+    assert finds[0].severity == "high"
+    assert finds[0].line == 3
+    assert name in (finds[0].detail or "")
+
+
+def test_joiner_scripts_keep_their_orthography_out_of_the_red_line():
+    """In Arabic or Indic text a zero width non-joiner is spelling, not hiding."""
+    text = "# مساعد\n\nهذا النص العربي يحتوي على\u200cفاصل عادي.\n"
+    finds = scanners.hidden_char_scan(text)
+    assert finds and finds[0].severity == "medium"   # review, never a hard reject
+
+
+def test_ordinary_content_is_not_concealment():
+    """Emoji joiners, Chinese punctuation and a leading BOM are normal."""
+    for text in ("Team: 👩\u200d💻 and 👨\u200d🚀 review the change\n",
+                 "# 数据导出\n\n用途:导出报表(含中文标点、括号、分号;)\n",
+                 "\ufeff# Report Generator\n\nCreates PDF reports.\n"):
+        assert scanners.hidden_char_scan(text) == [], text[:24]
+
+
+def test_concealment_in_a_bundled_file_is_addressed_to_that_file():
+    finds = scanners.hidden_char_scan("read the docs\u2060here\n", file="pack.zip!/notes.md")
+    assert finds and finds[0].file == "pack.zip!/notes.md"

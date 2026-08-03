@@ -177,6 +177,7 @@ def audit_skill(
     degraded: list[str] = []
     redacted, secret_findings = scanners.redact_secrets(skill_md)
     findings += secret_findings
+    findings += scanners.hidden_char_scan(skill_md)
 
     work = Path(tempfile.mkdtemp(prefix="skill-audit-"))
     try:
@@ -213,6 +214,7 @@ def audit_skill(
         segments: list[tuple[str, str]] = [("SKILL.md", redacted)]
         judge_input = redacted
         for rel, text in extras:
+            findings += scanners.hidden_char_scan(text, file=rel)
             red_text, secret_finds = scanners.redact_secrets(text, file=rel)
             findings += secret_finds
             segments.append((rel, red_text))
