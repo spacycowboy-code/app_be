@@ -22,6 +22,7 @@ from app.models.skill import (
     RpAiSubSkill,
 )
 from app.models.version import RpAiSkillVersion
+from app.models.download import RpAiSkillDownload
 from app.schemas.skill import (
     SkillCreate,
     SkillRead,
@@ -133,11 +134,22 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 def _bump_downloads(db: Session, skill: RpAiSkill) -> None:
-    """Best-effort increment of the download counter (only for plain ints)."""
+    """Record a download: log a timestamped event row (for weekly/temporal
+    dashboards) and increment the cumulative counter. Best-effort — a logging
+    failure must never break the actual download."""
     try:
+        db.add(RpAiSkillDownload(skill_id=skill.id))
         skill.downloads = str(int(str(skill.downloads or "0")) + 1)
         db.commit()
     except (ValueError, TypeError):
+        # Non-numeric counter (e.g. "5.6K"): still keep the event row.
+        db.rollback()
+        try:
+            db.add(RpAiSkillDownload(skill_id=skill.id))
+            db.commit()
+        except Exception:
+            db.rollback()
+    except Exception:
         db.rollback()
 
 
