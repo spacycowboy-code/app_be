@@ -202,14 +202,16 @@ Office 文档(docx/pptx/xlsx)的密级标签由 Microsoft Purview / AIP 写成�
 | docx / pptx / xlsx 取文本 | `python-docx` (MIT, 2 依赖)、`python-pptx` (MIT, 4)、`openpyxl` (MIT, 1) | `markitdown` (38 依赖) | 前者按需引入即可;后者为省几行代码拉进一大片依赖 |
 | PDF 取文本 | `pdfminer.six` (3 依赖) | Apache Tika | Tika 要 JVM 与常驻服务 |
 | 手机号识别 | `phonenumbers` (Google libphonenumber 移植, 0 依赖) | 自写正则 | 带号码规划校验,误报远低于正则 |
-| IMEI / IMSI / 证件号 | `python-stdnum` 2.2 (LGPL, 1 依赖):含 IMEI、IMSI、Luhn、各国身份证(含中国 RIC) | 自写正则 | 带校验位与结构校验;正则只看形状,在满是编号的语料里误报高 |
+| IMEI / IMSI / 证件号 | 自己实现三个校验:IMEI 的 Luhn 校验位、IMSI 的 MCC/MNC 与长度结构、居民身份证的 GB 11643 校验位(约 40 行) | `python-stdnum`(LGPL) | 只需要这三种,不值得为此引入 copyleft 依赖。关键是用**校验位**而不是形状匹配——正则在满是编号的语料里误报高 |
 | 自由文本个人信息(姓名、地址) | 不做 | `presidio-analyzer`(31 依赖,拉 spaCy / transformers / stanza) | 依赖重,且 NER 会带来这一维最不能承受的误报;自由文本已列入边界 |
 | 判断文件真实类型 | `python-magic` (MIT, 0 依赖) | 只看扩展名 | 扩展名可以改 |
 | 策略外置 | 带版本的规则文件 + 哈希(与安全维同机制) | OPA / Rego | 判定标准主要是判定器提示与小表格,引入策略引擎与 DSL 不划算 |
 
 必须自己写的部分:`content_id` 规范化指纹、数据载荷的形状判定(多行同构、字段数一致、行数与体积阈值)、白名单机制、`data_source` 的对照提示词。这些没有现成实现,而且都是本领域特有的。
 
-许可要过一遍:`python-stdnum` 是 LGPL,按原样作为服务端依赖使用、不分发修改版本,通常没问题,但需要确认公司对 copyleft 依赖的要求。
+许可已逐个核实:`phonenumbers` Apache-2.0(仓库 LICENSE),`pdfminer.six`、`python-docx`、`python-pptx`、`openpyxl`、`python-magic` 均为 MIT,都允许商用。唯一的 copyleft 备选 `python-stdnum`(LGPL)已改为自己实现,避免这项讨论。
+
+自写的三个校验也要有测试:每个校验器给正例、改一位的反例、以及形状相同但校验位不对的反例。
 
 ## 角色与身份:现状与要补的
 
