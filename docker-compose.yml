@@ -71,6 +71,13 @@ services:
       # Admin password for configuring data source / dashboards. Set
       # GRAFANA_ADMIN_PASSWORD in .env; do not ship a weak default to prod.
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      # DB connection for the provisioned MySQL data source. These must be
+      # present INSIDE the container: Grafana expands ${...} in the
+      # provisioning YAML from its own process env, not from the compose .env.
+      GRAFANA_DB_HOST: "${GRAFANA_DB_HOST}"
+      GRAFANA_DB_NAME: "${GRAFANA_DB_NAME}"
+      GRAFANA_DB_USER: "${GRAFANA_DB_USER}"
+      GRAFANA_DB_PASSWORD: "${GRAFANA_DB_PASSWORD}"
     # Host 9401 -> container 3000. Optional: prod traffic goes through nginx
     # /grafana; expose it for direct debugging / first-time setup.
     ports:
