@@ -78,6 +78,10 @@ services:
     volumes:
       # Persist dashboards, data sources and Grafana's own SQLite state.
       - grafana-data:/var/lib/grafana
+      # Auto-provision the MySQL data source + Skill Metrics dashboard on
+      # startup (so uid=skill-metrics always exists and is Viewer-readable).
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
       interval: 30s

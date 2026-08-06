@@ -1,0 +1,75 @@
+{
+  "id": null,
+  "uid": "skill-metrics",
+  "title": "Skill Metrics",
+  "tags": ["skills"],
+  "timezone": "",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "annotations": { "list": [] },
+  "time": { "from": "now-90d", "to": "now" },
+  "refresh": "1h",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Weekly Downloads",
+      "type": "timeseries",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 70 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(created_at, '1w') AS time, COUNT(*) AS downloads FROM rp_ai_skill_download WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1;"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Weekly Uploads (new skills)",
+      "type": "timeseries",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 70 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(created_at, '1w') AS time, COUNT(*) AS uploads FROM rp_ai_skill WHERE $__timeFilter(created_at) AND category_id <> 'official' GROUP BY 1 ORDER BY 1;"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Weekly Updates (version re-uploads)",
+      "type": "timeseries",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 70 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroup(v.created_at, '1w') AS time, COUNT(*) AS updates FROM rp_ai_skill_version v WHERE $__timeFilter(v.created_at) AND v.id <> (SELECT MIN(v2.id) FROM rp_ai_skill_version v2 WHERE v2.skill_id = v.skill_id) GROUP BY 1 ORDER BY 1;"
+        }
+      ]
+    }
+  ]
+}

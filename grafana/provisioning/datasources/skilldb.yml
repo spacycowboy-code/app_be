@@ -1,0 +1,21 @@
+apiVersion: 1
+
+# MySQL data source for the portal DB. Credentials come from environment
+# variables (set them in the backend .env; they mirror DATABASE_URL) so no
+# secret is committed. Referenced by dashboards via the fixed uid below.
+datasources:
+  - name: Skill DB
+    uid: skilldb-mysql
+    type: mysql
+    access: proxy
+    # host:port, e.g. mysql.internal.example.com:3306
+    url: ${GRAFANA_DB_HOST}
+    database: ${GRAFANA_DB_NAME}
+    user: ${GRAFANA_DB_USER}
+    isDefault: true
+    editable: false
+    jsonData:
+      maxOpenConns: 5
+      maxIdleConns: 2
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}
