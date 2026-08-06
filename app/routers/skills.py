@@ -133,19 +133,20 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
     return {"skillId": skill.id, "content": _read_skill_md(skill)}
 
 
-def _bump_downloads(db: Session, skill: RpAiSkill) -> None:
-    """Record a download: log a timestamped event row (for weekly/temporal
-    dashboards) and increment the cumulative counter. Best-effort — a logging
-    failure must never break the actual download."""
+def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
+    """Record a download: log a timestamped event row (with the downloader's
+    EID when known, for per-user leaderboards) and increment the cumulative
+    counter. Best-effort — a logging failure must never break the download."""
+    downloader = (eid or "").strip() or None
     try:
-        db.add(RpAiSkillDownload(skill_id=skill.id))
+        db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
         skill.downloads = str(int(str(skill.downloads or "0")) + 1)
         db.commit()
     except (ValueError, TypeError):
         # Non-numeric counter (e.g. "5.6K"): still keep the event row.
         db.rollback()
         try:
-            db.add(RpAiSkillDownload(skill_id=skill.id))
+            db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
             db.commit()
         except Exception:
             db.rollback()
@@ -162,8 +163,15 @@ def _content_disposition(filename: str) -> str:
 
 
 @router.get("/{skill_id}/download")
-def download_skill(skill_id: str, db: Session = Depends(get_db)):
+def download_skill(
+    skill_id: str,
+    eid: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Download a skill as a .zip archive named after the skill's real name.
+
+    ``eid`` (optional) records who downloaded, for per-user leaderboards; the
+    endpoint stays usable anonymously when it is absent.
 
     The archive contains the whole skill folder (SKILL.md + any artifacts +
     manifest) under a top-level directory named after the skill. Skills with
@@ -214,7 +222,7 @@ def download_skill(skill_id: str, db: Session = Depends(get_db)):
         else:
             zf.writestr(str(Path(safe_name) / "SKILL.md"), content or "")
     buf.seek(0)
-    _bump_downloads(db, skill)
+    _bump_downloads(db, skill, eid)
     return StreamingResponse(
         buf,
         media_type="application/zip",

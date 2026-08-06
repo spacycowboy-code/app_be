@@ -24,6 +24,7 @@ COLUMNS = [
     ("rp_ai_skill", "repo_commit", "VARCHAR(64) NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),
     ("rp_ai_market_item", "creator", "VARCHAR(64) NULL"),
+    ("rp_ai_skill_download", "eid", "VARCHAR(64) NULL"),
 ]
 
 

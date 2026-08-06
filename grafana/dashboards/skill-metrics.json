@@ -70,6 +70,57 @@
           "rawSql": "SELECT $__timeGroup(v.created_at, '1w') AS time, COUNT(*) AS updates FROM rp_ai_skill_version v WHERE $__timeFilter(v.created_at) AND v.id <> (SELECT MIN(v2.id) FROM rp_ai_skill_version v2 WHERE v2.skill_id = v.skill_id) GROUP BY 1 ORDER BY 1;"
         }
       ]
+    },
+    {
+      "id": 4,
+      "title": "Top Creators by EID",
+      "type": "barchart",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 80 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT uploader_eid AS eid, COUNT(*) AS creates FROM rp_ai_skill WHERE uploader_eid IS NOT NULL AND category_id <> 'official' AND $__timeFilter(created_at) GROUP BY uploader_eid ORDER BY creates DESC LIMIT 20;"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Top Updaters by EID",
+      "type": "barchart",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 80 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT v.uploader_eid AS eid, COUNT(*) AS updates FROM rp_ai_skill_version v WHERE v.uploader_eid IS NOT NULL AND v.id <> (SELECT MIN(v2.id) FROM rp_ai_skill_version v2 WHERE v2.skill_id = v.skill_id) AND $__timeFilter(v.created_at) GROUP BY v.uploader_eid ORDER BY updates DESC LIMIT 20;"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Top Downloaders by EID",
+      "type": "barchart",
+      "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 80 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT eid, COUNT(*) AS downloads FROM rp_ai_skill_download WHERE eid IS NOT NULL AND $__timeFilter(created_at) GROUP BY eid ORDER BY downloads DESC LIMIT 20;"
+        }
+      ]
     }
   ]
 }
