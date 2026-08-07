@@ -194,18 +194,37 @@ def download_skill(
         else None
     )
 
+    # Re-root at the directory that directly contains SKILL.md. Some skills
+    # were stored with a redundant wrapper directory (e.g.
+    # <name>/<name>/SKILL.md); packing relative to storage_path would then
+    # double-nest the folder in the zip (<name>/<name>/...) and Kiro could not
+    # load the skill. Picking the shallowest SKILL.md's parent as the base
+    # strips the wrapper. For a normal flat skill, base == folder.
+    base = folder
+    if folder and folder.is_dir():
+        skill_mds = sorted(
+            (
+                p
+                for p in folder.rglob("*")
+                if p.is_file() and p.name.lower() == "skill.md"
+            ),
+            key=lambda p: len(p.relative_to(folder).parts),
+        )
+        if skill_mds:
+            base = skill_mds[0].parent
+
     def _include(p: Path) -> bool:
         if not p.is_file() or ".git" in p.parts:
             return False
         if is_official:
-            rel = p.relative_to(folder).parts
+            rel = p.relative_to(base).parts
             if p.name == "manifest.json" or (rel and rel[0] == "artifacts"):
                 return False
         return True
 
     files: list[Path] = []
-    if folder and folder.is_dir():
-        files = [p for p in folder.rglob("*") if _include(p)]
+    if base and base.is_dir():
+        files = [p for p in base.rglob("*") if _include(p)]
 
     content: str | None = None
     if not files:
@@ -218,7 +237,7 @@ def download_skill(
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         if files:
             for p in files:
-                zf.write(p, arcname=str(Path(safe_name) / p.relative_to(folder)))
+                zf.write(p, arcname=str(Path(safe_name) / p.relative_to(base)))
         else:
             zf.writestr(str(Path(safe_name) / "SKILL.md"), content or "")
     buf.seek(0)
