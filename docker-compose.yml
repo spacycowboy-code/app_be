@@ -108,7 +108,59 @@ services:
       retries: 12
       start_period: 20s
 
+
+  # Grafana: dashboards for skill metrics (weekly download/upload/update).
+  # Reached by the frontend iframe via the reverse-proxied /grafana sub-path,
+  # so it must serve from that sub-path. Point its MySQL data source at the
+  # SAME external DB as the backend (the host/credentials from DATABASE_URL in
+  # .env) — the default profile has no MySQL service (the `local-db` profile
+# used by staging does, and Grafana is not wired to it).
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: rp-ai-grafana
+    restart: unless-stopped
+    environment:
+      # Public URL incl. /grafana/ sub-path. Override GRAFANA_ROOT_URL in .env
+      # if the portal is served on a different host/domain/scheme.
+      GF_SERVER_ROOT_URL: "${GRAFANA_ROOT_URL:-http://100.77.162.66:9001/grafana/}"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      # Allow the dashboard to render inside the portal's <iframe>.
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SECURITY_COOKIE_SAMESITE: "lax"
+      # Anonymous read-only view (drop these two if you require Grafana login;
+      # see the security note — anyone who can reach the portal sees the board).
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      # Admin password for configuring data source / dashboards. Set
+      # GRAFANA_ADMIN_PASSWORD in .env; do not ship a weak default to prod.
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      # DB connection for the provisioned MySQL data source. These must be
+      # present INSIDE the container: Grafana expands ${...} in the
+      # provisioning YAML from its own process env, not from the compose .env.
+      GRAFANA_DB_HOST: "${GRAFANA_DB_HOST}"
+      GRAFANA_DB_NAME: "${GRAFANA_DB_NAME}"
+      GRAFANA_DB_USER: "${GRAFANA_DB_USER}"
+      GRAFANA_DB_PASSWORD: "${GRAFANA_DB_PASSWORD}"
+    # Host 9401 -> container 3000. Optional: prod traffic goes through nginx
+    # /grafana; expose it for direct debugging / first-time setup.
+    ports:
+      - "9401:3000"
+    volumes:
+      # Persist dashboards, data sources and Grafana's own SQLite state.
+      - grafana-data:/var/lib/grafana
+      # Auto-provision the MySQL data source + Skill Metrics dashboard on
+      # startup (so uid=skill-metrics always exists and is Viewer-readable).
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
 volumes:
   judge-kiro-home:
   judge-kiro-share:
   db-data:
+  grafana-data:
