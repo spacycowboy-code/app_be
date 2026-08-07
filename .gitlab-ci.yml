@@ -53,8 +53,7 @@ test:
   stage: test
   before_script:
     - python -m pip install --upgrade pip
-    - pip install -r requirements.txt
-    - pip install pytest
+    - pip install -r requirements-dev.txt
   script:
     # Smoke check: the FastAPI app imports without errors.
     - python -c "import app.main; print('app.main imported OK')"

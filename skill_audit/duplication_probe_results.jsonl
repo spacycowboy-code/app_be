@@ -1,0 +1,190 @@
+{"a": "gatecheck", "b": "manifestcheck", "a_name": "GateCheck", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.1562}
+{"a": "5", "b": "7", "a_name": "PCB 布局设计", "b_name": "天线阵列设计", "problem": 0.0833, "method": 0.0}
+{"a": "2", "b": "8", "a_name": "系统架构设计", "b_name": "滤波器与封装设计", "problem": 0.0714, "method": 0.0}
+{"a": "10", "b": "9", "a_name": "协议栈与应用层开发", "b_name": "嵌入式软件开发", "problem": 0.0612, "method": 0.0}
+{"a": "2", "b": "5", "a_name": "系统架构设计", "b_name": "PCB 布局设计", "problem": 0.0588, "method": 0.0}
+{"a": "2", "b": "7", "a_name": "系统架构设计", "b_name": "天线阵列设计", "problem": 0.0588, "method": 0.0}
+{"a": "5", "b": "8", "a_name": "PCB 布局设计", "b_name": "滤波器与封装设计", "problem": 0.0545, "method": 0.0}
+{"a": "7", "b": "8", "a_name": "天线阵列设计", "b_name": "滤波器与封装设计", "problem": 0.0545, "method": 0.0}
+{"a": "11", "b": "4", "a_name": "系统集成测试", "b_name": "算法验证平台", "problem": 0.0364, "method": 0.0}
+{"a": "13", "b": "9", "a_name": "质量问题追踪", "b_name": "嵌入式软件开发", "problem": 0.0213, "method": 0.0}
+{"a": "13", "b": "5", "a_name": "质量问题追踪", "b_name": "PCB 布局设计", "problem": 0.0204, "method": 0.0}
+{"a": "13", "b": "7", "a_name": "质量问题追踪", "b_name": "天线阵列设计", "problem": 0.0204, "method": 0.0}
+{"a": "5", "b": "9", "a_name": "PCB 布局设计", "b_name": "嵌入式软件开发", "problem": 0.0204, "method": 0.0}
+{"a": "7", "b": "9", "a_name": "天线阵列设计", "b_name": "嵌入式软件开发", "problem": 0.0204, "method": 0.0}
+{"a": "13", "b": "15", "a_name": "质量问题追踪", "b_name": "研发项目计划管理", "problem": 0.02, "method": 0.0}
+{"a": "15", "b": "9", "a_name": "研发项目计划管理", "b_name": "嵌入式软件开发", "problem": 0.02, "method": 0.0}
+{"a": "10", "b": "13", "a_name": "协议栈与应用层开发", "b_name": "质量问题追踪", "problem": 0.0196, "method": 0.0}
+{"a": "13", "b": "2", "a_name": "质量问题追踪", "b_name": "系统架构设计", "problem": 0.0196, "method": 0.0}
+{"a": "2", "b": "9", "a_name": "系统架构设计", "b_name": "嵌入式软件开发", "problem": 0.0196, "method": 0.0}
+{"a": "13", "b": "3", "a_name": "质量问题追踪", "b_name": "PA 功放设计助手", "problem": 0.0192, "method": 0.0}
+{"a": "15", "b": "5", "a_name": "研发项目计划管理", "b_name": "PCB 布局设计", "problem": 0.0192, "method": 0.0}
+{"a": "15", "b": "7", "a_name": "研发项目计划管理", "b_name": "天线阵列设计", "problem": 0.0192, "method": 0.0}
+{"a": "3", "b": "9", "a_name": "PA 功放设计助手", "b_name": "嵌入式软件开发", "problem": 0.0192, "method": 0.0}
+{"a": "5", "b": "6", "a_name": "PCB 布局设计", "b_name": "TRX 收发模块设计", "problem": 0.0192, "method": 0.0}
+{"a": "6", "b": "7", "a_name": "TRX 收发模块设计", "b_name": "天线阵列设计", "problem": 0.0192, "method": 0.0}
+{"a": "10", "b": "5", "a_name": "协议栈与应用层开发", "b_name": "PCB 布局设计", "problem": 0.0189, "method": 0.0}
+{"a": "10", "b": "7", "a_name": "协议栈与应用层开发", "b_name": "天线阵列设计", "problem": 0.0189, "method": 0.0}
+{"a": "11", "b": "13", "a_name": "系统集成测试", "b_name": "质量问题追踪", "problem": 0.0189, "method": 0.0}
+{"a": "11", "b": "9", "a_name": "系统集成测试", "b_name": "嵌入式软件开发", "problem": 0.0189, "method": 0.0}
+{"a": "10", "b": "15", "a_name": "协议栈与应用层开发", "b_name": "研发项目计划管理", "problem": 0.0185, "method": 0.0}
+{"a": "15", "b": "2", "a_name": "研发项目计划管理", "b_name": "系统架构设计", "problem": 0.0185, "method": 0.0}
+{"a": "2", "b": "6", "a_name": "系统架构设计", "b_name": "TRX 收发模块设计", "problem": 0.0185, "method": 0.0}
+{"a": "3", "b": "5", "a_name": "PA 功放设计助手", "b_name": "PCB 布局设计", "problem": 0.0185, "method": 0.0}
+{"a": "3", "b": "7", "a_name": "PA 功放设计助手", "b_name": "天线阵列设计", "problem": 0.0185, "method": 0.0}
+{"a": "10", "b": "2", "a_name": "协议栈与应用层开发", "b_name": "系统架构设计", "problem": 0.0182, "method": 0.0}
+{"a": "11", "b": "5", "a_name": "系统集成测试", "b_name": "PCB 布局设计", "problem": 0.0182, "method": 0.0}
+{"a": "11", "b": "7", "a_name": "系统集成测试", "b_name": "天线阵列设计", "problem": 0.0182, "method": 0.0}
+{"a": "12", "b": "4", "a_name": "RF 性能测量平台", "b_name": "算法验证平台", "problem": 0.0182, "method": 0.0}
+{"a": "13", "b": "14", "a_name": "质量问题追踪", "b_name": "可靠性与合规检测", "problem": 0.0182, "method": 0.0}
+{"a": "13", "b": "8", "a_name": "质量问题追踪", "b_name": "滤波器与封装设计", "problem": 0.0182, "method": 0.0}
+{"a": "14", "b": "9", "a_name": "可靠性与合规检测", "b_name": "嵌入式软件开发", "problem": 0.0182, "method": 0.0}
+{"a": "15", "b": "3", "a_name": "研发项目计划管理", "b_name": "PA 功放设计助手", "problem": 0.0182, "method": 0.0}
+{"a": "3", "b": "6", "a_name": "PA 功放设计助手", "b_name": "TRX 收发模块设计", "problem": 0.0182, "method": 0.0}
+{"a": "8", "b": "9", "a_name": "滤波器与封装设计", "b_name": "嵌入式软件开发", "problem": 0.0182, "method": 0.0}
+{"a": "1", "b": "13", "a_name": "产品需求管理", "b_name": "质量问题追踪", "problem": 0.0179, "method": 0.0}
+{"a": "1", "b": "9", "a_name": "产品需求管理", "b_name": "嵌入式软件开发", "problem": 0.0179, "method": 0.0}
+{"a": "10", "b": "3", "a_name": "协议栈与应用层开发", "b_name": "PA 功放设计助手", "problem": 0.0179, "method": 0.0}
+{"a": "11", "b": "15", "a_name": "系统集成测试", "b_name": "研发项目计划管理", "problem": 0.0179, "method": 0.0}
+{"a": "2", "b": "3", "a_name": "系统架构设计", "b_name": "PA 功放设计助手", "problem": 0.0179, "method": 0.0}
+{"a": "10", "b": "11", "a_name": "协议栈与应用层开发", "b_name": "系统集成测试", "problem": 0.0175, "method": 0.0}
+{"a": "11", "b": "2", "a_name": "系统集成测试", "b_name": "系统架构设计", "problem": 0.0175, "method": 0.0}
+{"a": "14", "b": "5", "a_name": "可靠性与合规检测", "b_name": "PCB 布局设计", "problem": 0.0175, "method": 0.0}
+{"a": "14", "b": "7", "a_name": "可靠性与合规检测", "b_name": "天线阵列设计", "problem": 0.0175, "method": 0.0}
+{"a": "1", "b": "5", "a_name": "产品需求管理", "b_name": "PCB 布局设计", "problem": 0.0172, "method": 0.0}
+{"a": "1", "b": "7", "a_name": "产品需求管理", "b_name": "天线阵列设计", "problem": 0.0172, "method": 0.0}
+{"a": "11", "b": "3", "a_name": "系统集成测试", "b_name": "PA 功放设计助手", "problem": 0.0172, "method": 0.0}
+{"a": "14", "b": "15", "a_name": "可靠性与合规检测", "b_name": "研发项目计划管理", "problem": 0.0172, "method": 0.0}
+{"a": "15", "b": "8", "a_name": "研发项目计划管理", "b_name": "滤波器与封装设计", "problem": 0.0172, "method": 0.0}
+{"a": "6", "b": "8", "a_name": "TRX 收发模块设计", "b_name": "滤波器与封装设计", "problem": 0.0172, "method": 0.0}
+{"a": "1", "b": "15", "a_name": "产品需求管理", "b_name": "研发项目计划管理", "problem": 0.0169, "method": 0.0}
+{"a": "10", "b": "14", "a_name": "协议栈与应用层开发", "b_name": "可靠性与合规检测", "problem": 0.0169, "method": 0.0}
+{"a": "10", "b": "8", "a_name": "协议栈与应用层开发", "b_name": "滤波器与封装设计", "problem": 0.0169, "method": 0.0}
+{"a": "14", "b": "2", "a_name": "可靠性与合规检测", "b_name": "系统架构设计", "problem": 0.0169, "method": 0.0}
+{"a": "1", "b": "10", "a_name": "产品需求管理", "b_name": "协议栈与应用层开发", "problem": 0.0167, "method": 0.0}
+{"a": "1", "b": "2", "a_name": "产品需求管理", "b_name": "系统架构设计", "problem": 0.0167, "method": 0.0}
+{"a": "14", "b": "3", "a_name": "可靠性与合规检测", "b_name": "PA 功放设计助手", "problem": 0.0167, "method": 0.0}
+{"a": "3", "b": "8", "a_name": "PA 功放设计助手", "b_name": "滤波器与封装设计", "problem": 0.0167, "method": 0.0}
+{"a": "1", "b": "3", "a_name": "产品需求管理", "b_name": "PA 功放设计助手", "problem": 0.0164, "method": 0.0}
+{"a": "11", "b": "14", "a_name": "系统集成测试", "b_name": "可靠性与合规检测", "problem": 0.0164, "method": 0.0}
+{"a": "11", "b": "8", "a_name": "系统集成测试", "b_name": "滤波器与封装设计", "problem": 0.0164, "method": 0.0}
+{"a": "1", "b": "11", "a_name": "产品需求管理", "b_name": "系统集成测试", "problem": 0.0161, "method": 0.0}
+{"a": "14", "b": "8", "a_name": "可靠性与合规检测", "b_name": "滤波器与封装设计", "problem": 0.0159, "method": 0.0}
+{"a": "1", "b": "14", "a_name": "产品需求管理", "b_name": "可靠性与合规检测", "problem": 0.0156, "method": 0.0}
+{"a": "1", "b": "8", "a_name": "产品需求管理", "b_name": "滤波器与封装设计", "problem": 0.0156, "method": 0.0}
+{"a": "1", "b": "12", "a_name": "产品需求管理", "b_name": "RF 性能测量平台", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "16", "a_name": "产品需求管理", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "4", "a_name": "产品需求管理", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "6", "a_name": "产品需求管理", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "gatecheck", "a_name": "产品需求管理", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "kiro-credit-usage-insight-6a1898", "a_name": "产品需求管理", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "manifestcheck", "a_name": "产品需求管理", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "1", "b": "tavily-web-search", "a_name": "产品需求管理", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "12", "a_name": "协议栈与应用层开发", "b_name": "RF 性能测量平台", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "16", "a_name": "协议栈与应用层开发", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "4", "a_name": "协议栈与应用层开发", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "6", "a_name": "协议栈与应用层开发", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "gatecheck", "a_name": "协议栈与应用层开发", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "kiro-credit-usage-insight-6a1898", "a_name": "协议栈与应用层开发", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "manifestcheck", "a_name": "协议栈与应用层开发", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "10", "b": "tavily-web-search", "a_name": "协议栈与应用层开发", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "12", "a_name": "系统集成测试", "b_name": "RF 性能测量平台", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "16", "a_name": "系统集成测试", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "6", "a_name": "系统集成测试", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "gatecheck", "a_name": "系统集成测试", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "kiro-credit-usage-insight-6a1898", "a_name": "系统集成测试", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "manifestcheck", "a_name": "系统集成测试", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "11", "b": "tavily-web-search", "a_name": "系统集成测试", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "13", "a_name": "RF 性能测量平台", "b_name": "质量问题追踪", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "14", "a_name": "RF 性能测量平台", "b_name": "可靠性与合规检测", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "15", "a_name": "RF 性能测量平台", "b_name": "研发项目计划管理", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "16", "a_name": "RF 性能测量平台", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "2", "a_name": "RF 性能测量平台", "b_name": "系统架构设计", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "3", "a_name": "RF 性能测量平台", "b_name": "PA 功放设计助手", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "5", "a_name": "RF 性能测量平台", "b_name": "PCB 布局设计", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "6", "a_name": "RF 性能测量平台", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "7", "a_name": "RF 性能测量平台", "b_name": "天线阵列设计", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "8", "a_name": "RF 性能测量平台", "b_name": "滤波器与封装设计", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "9", "a_name": "RF 性能测量平台", "b_name": "嵌入式软件开发", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "gatecheck", "a_name": "RF 性能测量平台", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "kiro-credit-usage-insight-6a1898", "a_name": "RF 性能测量平台", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "manifestcheck", "a_name": "RF 性能测量平台", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "12", "b": "tavily-web-search", "a_name": "RF 性能测量平台", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "16", "a_name": "质量问题追踪", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "4", "a_name": "质量问题追踪", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "6", "a_name": "质量问题追踪", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "gatecheck", "a_name": "质量问题追踪", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "kiro-credit-usage-insight-6a1898", "a_name": "质量问题追踪", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "manifestcheck", "a_name": "质量问题追踪", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "13", "b": "tavily-web-search", "a_name": "质量问题追踪", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "16", "a_name": "可靠性与合规检测", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "4", "a_name": "可靠性与合规检测", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "6", "a_name": "可靠性与合规检测", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "gatecheck", "a_name": "可靠性与合规检测", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "kiro-credit-usage-insight-6a1898", "a_name": "可靠性与合规检测", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "manifestcheck", "a_name": "可靠性与合规检测", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "14", "b": "tavily-web-search", "a_name": "可靠性与合规检测", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "16", "a_name": "研发项目计划管理", "b_name": "跨部门协作协调", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "4", "a_name": "研发项目计划管理", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "6", "a_name": "研发项目计划管理", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "gatecheck", "a_name": "研发项目计划管理", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "kiro-credit-usage-insight-6a1898", "a_name": "研发项目计划管理", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "manifestcheck", "a_name": "研发项目计划管理", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "15", "b": "tavily-web-search", "a_name": "研发项目计划管理", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "2", "a_name": "跨部门协作协调", "b_name": "系统架构设计", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "3", "a_name": "跨部门协作协调", "b_name": "PA 功放设计助手", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "4", "a_name": "跨部门协作协调", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "5", "a_name": "跨部门协作协调", "b_name": "PCB 布局设计", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "6", "a_name": "跨部门协作协调", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "7", "a_name": "跨部门协作协调", "b_name": "天线阵列设计", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "8", "a_name": "跨部门协作协调", "b_name": "滤波器与封装设计", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "9", "a_name": "跨部门协作协调", "b_name": "嵌入式软件开发", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "gatecheck", "a_name": "跨部门协作协调", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "kiro-credit-usage-insight-6a1898", "a_name": "跨部门协作协调", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "manifestcheck", "a_name": "跨部门协作协调", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "16", "b": "tavily-web-search", "a_name": "跨部门协作协调", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "2", "b": "4", "a_name": "系统架构设计", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "2", "b": "gatecheck", "a_name": "系统架构设计", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "2", "b": "kiro-credit-usage-insight-6a1898", "a_name": "系统架构设计", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "2", "b": "manifestcheck", "a_name": "系统架构设计", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "2", "b": "tavily-web-search", "a_name": "系统架构设计", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "3", "b": "4", "a_name": "PA 功放设计助手", "b_name": "算法验证平台", "problem": 0.0, "method": 0.0}
+{"a": "3", "b": "gatecheck", "a_name": "PA 功放设计助手", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "3", "b": "kiro-credit-usage-insight-6a1898", "a_name": "PA 功放设计助手", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "3", "b": "manifestcheck", "a_name": "PA 功放设计助手", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "3", "b": "tavily-web-search", "a_name": "PA 功放设计助手", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "5", "a_name": "算法验证平台", "b_name": "PCB 布局设计", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "6", "a_name": "算法验证平台", "b_name": "TRX 收发模块设计", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "7", "a_name": "算法验证平台", "b_name": "天线阵列设计", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "8", "a_name": "算法验证平台", "b_name": "滤波器与封装设计", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "9", "a_name": "算法验证平台", "b_name": "嵌入式软件开发", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "gatecheck", "a_name": "算法验证平台", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "kiro-credit-usage-insight-6a1898", "a_name": "算法验证平台", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "manifestcheck", "a_name": "算法验证平台", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "4", "b": "tavily-web-search", "a_name": "算法验证平台", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "5", "b": "gatecheck", "a_name": "PCB 布局设计", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "5", "b": "kiro-credit-usage-insight-6a1898", "a_name": "PCB 布局设计", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "5", "b": "manifestcheck", "a_name": "PCB 布局设计", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "5", "b": "tavily-web-search", "a_name": "PCB 布局设计", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "6", "b": "9", "a_name": "TRX 收发模块设计", "b_name": "嵌入式软件开发", "problem": 0.0, "method": 0.0}
+{"a": "6", "b": "gatecheck", "a_name": "TRX 收发模块设计", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "6", "b": "kiro-credit-usage-insight-6a1898", "a_name": "TRX 收发模块设计", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "6", "b": "manifestcheck", "a_name": "TRX 收发模块设计", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "6", "b": "tavily-web-search", "a_name": "TRX 收发模块设计", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "7", "b": "gatecheck", "a_name": "天线阵列设计", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "7", "b": "kiro-credit-usage-insight-6a1898", "a_name": "天线阵列设计", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "7", "b": "manifestcheck", "a_name": "天线阵列设计", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "7", "b": "tavily-web-search", "a_name": "天线阵列设计", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "8", "b": "gatecheck", "a_name": "滤波器与封装设计", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "8", "b": "kiro-credit-usage-insight-6a1898", "a_name": "滤波器与封装设计", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "8", "b": "manifestcheck", "a_name": "滤波器与封装设计", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "8", "b": "tavily-web-search", "a_name": "滤波器与封装设计", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "9", "b": "gatecheck", "a_name": "嵌入式软件开发", "b_name": "GateCheck", "problem": 0.0, "method": 0.0}
+{"a": "9", "b": "kiro-credit-usage-insight-6a1898", "a_name": "嵌入式软件开发", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "9", "b": "manifestcheck", "a_name": "嵌入式软件开发", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "9", "b": "tavily-web-search", "a_name": "嵌入式软件开发", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "gatecheck", "b": "kiro-credit-usage-insight-6a1898", "a_name": "GateCheck", "b_name": "Kiro Credit Usage Insight", "problem": 0.0, "method": 0.0}
+{"a": "gatecheck", "b": "tavily-web-search", "a_name": "GateCheck", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "kiro-credit-usage-insight-6a1898", "b": "manifestcheck", "a_name": "Kiro Credit Usage Insight", "b_name": "ManifestCheck", "problem": 0.0, "method": 0.0}
+{"a": "kiro-credit-usage-insight-6a1898", "b": "tavily-web-search", "a_name": "Kiro Credit Usage Insight", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}
+{"a": "manifestcheck", "b": "tavily-web-search", "a_name": "ManifestCheck", "b_name": "Tavily 联网搜索", "problem": 0.0, "method": 0.0}

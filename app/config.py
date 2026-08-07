@@ -51,6 +51,50 @@ class Settings(BaseSettings):
     # Verify TLS when calling the GitLab API (internal certs may be self-signed).
     gitlab_verify_tls: bool = False
 
+    # --- Skill security audit (upload-time gate) ----------------------------
+    # Master switch. When off, uploads skip the audit (state left null).
+    audit_enabled: bool = True
+    # kiro-cli binary for the semantic judge (must be logged in on the host).
+    audit_kiro_bin: str = "kiro-cli"
+    # Judge model; empty => kiro-cli default (auto). Pin before hard-gating.
+    # Pinned, never "auto": a gate has to give the same verdict for the same
+    # input, and "auto" may switch models without notice.
+    audit_kiro_model: str = "claude-sonnet-5"
+    # Second opinion, asked only when the primary judge wants to reject. A
+    # disagreement routes to human review instead of blocking the author.
+    # Note: claude-opus-5 is an experimental preview; switch when it goes GA.
+    audit_kiro_model_confirm: str = "claude-opus-5"
+    # Seconds to wait for the judge; on timeout the audit fails closed.
+    audit_judge_timeout: int = 200
+    # Remote judge-service URL. Empty => run kiro-cli in-process (host only).
+    # Set this in the (cred-less) backend container to call the host judge service.
+    audit_judge_url: str = ""
+    # Optional shared secret required by the judge service (X-Judge-Token).
+    audit_judge_token: str = ""
+    # Red-line rules / criteria injected into the judge prompt.
+    audit_rules_path: str = "skill_audit/rules.md"
+    # Deterministic secret detection (detect-secrets, in-process, 27 detectors).
+    # Broad matches route to review; the regex layer catches live-format keys
+    # as red-line.
+    audit_detect_secrets_enabled: bool = True
+    # Cisco AI Defense skill-scanner (static analyzers, no key): the judge's
+    # blind spots — bundled scripts / .pyc bytecode / unicode-hidden instructions.
+    audit_cisco_enabled: bool = True
+    audit_cisco_bin: str = "skill-scanner"
+    # Working dir for the judge subprocess (kiro-cli writes a small state db).
+    audit_work_dir: str = "/tmp/skill-audit"
+    # EID allowed to see 可疑(suspect) skills while browsing (internal-only).
+    audit_admin_eid: str = "ADMINMM"
+    # 可疑 -> Draft MR review. Needs a GitLab token with `api` scope.
+    audit_review_enabled: bool = True
+    # Skill repo project (path or numeric id) where suspect branches + MRs land.
+    audit_mr_project: str = "rp-ai/rp-ai-skill"
+    # Reviewer GitLab username assigned on the Draft MR.
+    audit_mr_reviewer: str = "ezhgmio"
+    # Shared secret for POST /api/audit/reconcile (the GitLab webhook).
+    # Empty disables the endpoint; the periodic sweep still runs.
+    audit_webhook_token: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -142,7 +142,17 @@ def _generate_body(skill: RpAiSkill) -> str:
 
 
 def build_manifest(skill: RpAiSkill, eid: str, slug: str) -> dict:
-    """Full metadata written to manifest.json (camelCase)."""
+    """Authored metadata written to manifest.json (camelCase).
+
+    Only fields a person authored belong here, because the repository is where
+    they are edited and reviewed. Measured fields (rating, ratingDist,
+    reviewCount, downloads, isTrending) are aggregates of portal activity owned by
+    the database: a snapshot in git would be stale from the moment it is written,
+    keeping it accurate would mean a commit per download, and the churn would bury
+    the instruction diffs a security reviewer has to read. The lifecycle field
+    (status) is likewise derived - see skill_audit.reconcile - so it is not
+    written either. The importer still reads any of these from older manifests.
+    """
     return {
         "id": skill.id,
         "name": skill.name,
@@ -154,16 +164,10 @@ def build_manifest(skill: RpAiSkill, eid: str, slug: str) -> dict:
         "version": skill.version or "1.0.0",
         "author": skill.author,
         "uploaderEid": eid,
-        "rating": skill.rating,
-        "downloads": skill.downloads,
-        "isTrending": skill.is_trending,
         "isFree": skill.is_free,
-        "ratingDist": skill.rating_dist,
-        "reviewCount": skill.review_count,
         "capabilityFull": skill.capability_full,
         "examplePrompt": skill.example_prompt,
         "exampleOutput": skill.example_output,
-        "status": skill.status,
         "inputParams": [
             {"name": p.name, "type": p.type, "required": p.required, "desc": p.description}
             for p in skill.input_params

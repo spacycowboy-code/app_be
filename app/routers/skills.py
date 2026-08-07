@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -37,6 +37,7 @@ from app.services.skill_manifest import (
 )
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services.notify import notify_version_update
+from app.services.eids import normalize_eid
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
@@ -99,6 +100,7 @@ def list_skills(
     status_filter: str | None = Query(None, alias="status"),
     q: str | None = Query(None, description="search in name/description"),
     trending: bool | None = Query(None),
+    x_user_eid: str | None = Header(None),
 ) -> list[RpAiSkill]:
     stmt = select(RpAiSkill)
     if category_id and category_id != "all":
@@ -111,6 +113,16 @@ def list_skills(
         like = f"%{q}%"
         stmt = stmt.where(
             RpAiSkill.name.like(like) | RpAiSkill.description.like(like)
+        )
+    # Visibility is gated by the lifecycle field only: a skill awaiting review
+    # (or rejected by it) is not public. The audit verdict is evidence for why,
+    # not the gate. Admin sees everything and an uploader still sees their own.
+    # (A danger verdict is never stored at all.)
+    requester = normalize_eid(x_user_eid)
+    if requester != settings.audit_admin_eid:
+        stmt = stmt.where(
+            (RpAiSkill.status == "approved")
+            | (RpAiSkill.uploader_eid == requester)
         )
     return list(db.scalars(stmt).all())
 

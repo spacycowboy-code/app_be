@@ -93,12 +93,12 @@ class SkillStorage:
         except subprocess.CalledProcessError:
             return None
 
-    def _push_with_guard(self, tag: str | None) -> bool:
-        """Push branch (and tag) with a small retry/sleep guard."""
+    def _push_with_guard(self, tag: str | None, branch: str | None = None) -> bool:
+        """Push HEAD to `branch` (default: the live branch), with a retry guard."""
         if not settings.skill_repo_push:
             return False
         remote = settings.skill_repo_remote
-        branch = settings.skill_repo_branch
+        branch = branch or settings.skill_repo_branch
         last_err = ""
         for attempt in range(3):
             try:
@@ -135,8 +135,19 @@ class SkillStorage:
         current_version: str | None,
         existing_storage_path: str | None,
         action: str = "upload",
+        target_branch: str | None = None,
     ) -> StoreResult:
-        """Write/refresh a skill folder, bump version, commit, tag and push."""
+        """Write/refresh a skill folder, bump version, commit, tag and push.
+
+        When ``target_branch`` is set (and differs from the live branch), the
+        commit is placed on that branch and pushed there — used for 可疑(suspect)
+        skills that must not land on the live branch until a review MR is merged.
+        """
+        # Suspect content goes on its own branch off live, never on live.
+        on_branch = bool(target_branch and target_branch != settings.skill_repo_branch)
+        if on_branch:
+            self._git("checkout", "-B", target_branch, settings.skill_repo_branch, check=False)
+
         category_slug = sanitize_segment(category_slug, "uncategorized")
 
         # Stable folder: reuse the existing path if the skill already exists.
@@ -195,7 +206,13 @@ class SkillStorage:
             tag = None  # tag may already exist; don't fail the upload
 
         sha = self._current_sha()
-        pushed = self._push_with_guard(tag)
+        pushed = self._push_with_guard(tag, branch=target_branch if on_branch else None)
+
+        if on_branch:
+            # Return the working copy to the live branch; the suspect commit lives
+            # only on the remote feature branch (+ its Draft MR), never on live.
+            self._git("checkout", "-f", settings.skill_repo_branch, check=False)
+            self._git("branch", "-D", target_branch, check=False)
 
         return StoreResult(
             storage_path=str(rel),

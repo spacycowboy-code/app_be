@@ -77,6 +77,8 @@ class RpAiSkill(TimestampMixin, Base):
     storage_path: Mapped[str | None] = mapped_column(String(512))
     # Latest git commit sha that stored this skill.
     repo_commit: Mapped[str | None] = mapped_column(String(64))
+    # Security-audit derived state: pass | suspect (danger is never stored).
+    audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
 
     # Relationships.
     uploader: Mapped["RpAiPortal | None"] = relationship(
