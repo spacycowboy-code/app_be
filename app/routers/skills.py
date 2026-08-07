@@ -133,6 +133,32 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
     return {"skillId": skill.id, "content": _read_skill_md(skill)}
 
 
+def _artifact_archive(folder: "Path | None") -> "Path | None":
+    """The uploaded artifact zip stored under ``artifacts/``, if any. This is
+    the author's original skill package and the source of truth for a
+    download's file layout."""
+    if not folder:
+        return None
+    art = folder / "artifacts"
+    if not art.is_dir():
+        return None
+    zips = sorted(p for p in art.glob("*.zip") if p.is_file())
+    return zips[0] if zips else None
+
+
+def _common_top_dir(members: list[zipfile.ZipInfo]) -> "str | None":
+    """The single top-level directory shared by every archive member, else
+    ``None``. Used to strip a redundant wrapper folder (e.g.
+    ``tavily-web-search/``) so the download isn't double-nested."""
+    tops: set[str] = set()
+    for m in members:
+        head, sep, _ = m.filename.partition("/")
+        if not sep:  # a file at the archive root -> no shared wrapper
+            return None
+        tops.add(head)
+    return next(iter(tops)) if len(tops) == 1 else None
+
+
 def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
     """Record a download: log a timestamped event row (with the downloader's
     EID when known, for per-user leaderboards) and increment the cumulative
@@ -180,8 +206,7 @@ def download_skill(
     """
     skill = _get_skill_or_404(db, skill_id)
     # Official (anthropic) skills: name the archive after the namespaced id
-    # (e.g. "anthropics-xlsx") and ship only the clean skill content — drop the
-    # marketplace-only manifest.json and the redundant nested artifacts/ zip.
+    # (e.g. "anthropics-xlsx"); user skills after the display name.
     is_official = skill.category_id == "official"
     safe_name = (
         sanitize_segment(skill.id, skill_id)
@@ -194,52 +219,63 @@ def download_skill(
         else None
     )
 
-    # Re-root at the directory that directly contains SKILL.md. Some skills
-    # were stored with a redundant wrapper directory (e.g.
-    # <name>/<name>/SKILL.md); packing relative to storage_path would then
-    # double-nest the folder in the zip (<name>/<name>/...) and Kiro could not
-    # load the skill. Picking the shallowest SKILL.md's parent as the base
-    # strips the wrapper. For a normal flat skill, base == folder.
-    base = folder
-    if folder and folder.is_dir():
-        skill_mds = sorted(
-            (
-                p
-                for p in folder.rglob("*")
-                if p.is_file() and p.name.lower() == "skill.md"
-            ),
-            key=lambda p: len(p.relative_to(folder).parts),
-        )
-        if skill_mds:
-            base = skill_mds[0].parent
-
-    def _include(p: Path) -> bool:
-        if not p.is_file() or ".git" in p.parts:
-            return False
-        if is_official:
-            rel = p.relative_to(base).parts
-            if p.name == "manifest.json" or (rel and rel[0] == "artifacts"):
-                return False
-        return True
-
-    files: list[Path] = []
-    if base and base.is_dir():
-        files = [p for p in base.rglob("*") if _include(p)]
-
-    content: str | None = None
-    if not files:
-        # No folder on disk — fall back to the stored instructions as SKILL.md.
-        content = skill.instructions or ""
-        if not content:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容")
-
     buf = io.BytesIO()
+    wrote_any = False
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        if files:
-            for p in files:
-                zf.write(p, arcname=str(Path(safe_name) / p.relative_to(base)))
-        else:
-            zf.writestr(str(Path(safe_name) / "SKILL.md"), content or "")
+        seen: set[str] = set()
+
+        def _add(rel: str, data: bytes) -> None:
+            nonlocal wrote_any
+            rel = rel.strip("/")
+            if not rel:
+                return
+            arc = str(Path(safe_name) / rel)
+            if arc in seen:
+                return
+            seen.add(arc)
+            zf.writestr(arc, data)
+            wrote_any = True
+
+        # 1) A user's uploaded artifact archive is the source of truth for the
+        #    skill's files: it holds the author's original folder (SKILL.md +
+        #    scripts + references). Ship its contents, stripping the single
+        #    top-level wrapper dir so the skill isn't double-nested under
+        #    <name>/<name>/SKILL.md. The loose root SKILL.md is only the
+        #    extracted definition; manifest.json / artifacts/ are marketplace-
+        #    only and must not leak into the downloaded skill.
+        archive = _artifact_archive(folder) if not is_official else None
+        if archive is not None:
+            try:
+                with zipfile.ZipFile(archive) as src:
+                    members = [m for m in src.infolist() if not m.is_dir()]
+                    top = _common_top_dir(members)
+                    for m in members:
+                        rel = m.filename[len(top) + 1 :] if top else m.filename
+                        _add(rel, src.read(m))
+            except zipfile.BadZipFile:
+                # Corrupt / not-really-a-zip artifact: fall back to loose files.
+                pass
+
+        # 2) No usable artifact archive: ship the loose skill files, dropping
+        #    the marketplace-only manifest.json and the artifacts/ directory.
+        if not wrote_any and folder and folder.is_dir():
+            for p in sorted(folder.rglob("*")):
+                if not p.is_file() or ".git" in p.parts:
+                    continue
+                rel = p.relative_to(folder)
+                if (rel.parts and rel.parts[0] == "artifacts") or p.name == "manifest.json":
+                    continue
+                _add(str(rel), p.read_bytes())
+
+        # 3) Nothing on disk: synthesize SKILL.md from the stored instructions.
+        if not wrote_any:
+            content = skill.instructions or ""
+            if not content:
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容"
+                )
+            _add("SKILL.md", content.encode("utf-8"))
+
     buf.seek(0)
     _bump_downloads(db, skill, eid)
     return StreamingResponse(
