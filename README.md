@@ -84,104 +84,45 @@ python -m app.init_db
 
 The API speaks **camelCase** JSON to match the Angular frontend.
 
-## Deployment (Docker + GitLab CI)
+## 部署(镜像 + 环境描述)
 
-The service ships as a Docker image and is deployed by the GitLab pipeline.
+本仓不再包含 Dockerfile(判定器那份除外)、compose 与 deploy 任务。原因见
+`rp-ai-miao/platform-ci` 的 `DESIGN.md`:构建过程属于平台,产物是不可变镜像,
+"在哪台机器上跑哪个标签"属于环境。
 
-### Files
+### 流水线产出
 
-| File                 | Purpose                                                        |
-| -------------------- | -------------------------------------------------------------- |
-| `Dockerfile`         | `python:3.11-slim` + `git`/`ssh`, installs deps, runs uvicorn  |
-| `.dockerignore`      | Keeps `.venv`, `.git`, `.env`, caches out of the build context |
-| `docker-compose.yml` | Runs the container: port, volumes, `.env`, health check        |
-| `log_conf.yaml`      | uvicorn log config: console + rotating files under `/app/logs` |
-| `.gitlab-ci.yml`     | Pipeline: `lint` → `test` → `deploy`                           |
+合并到 `main` 后,共享模板会构建并推送两个镜像:
 
-### Runtime layout
+| 镜像 | 内容 |
+|---|---|
+| `proj-rvc/rp-ai/rp-ai-portal-be:<sha>` | 后端;对账器用同一个镜像,只换 entrypoint |
+| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器;镜像里装了 kiro-cli,配方是本仓的 `Dockerfile.judge` |
 
-- **Port**: host `9000` → container `8000` (uvicorn).
-- **Volumes** (host ↔ container):
-  - `/proj/rp_ait_prod/services/ai-portal-be/gitlab` ↔ `/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill` (skill repo, = `SKILL_REPO_PATH`)
-  - `/proj/rp_ait_prod/logs/ai-portal-be` ↔ `/app/logs` (`backend.log`, `access.log`; 10 MB × 5 rotation)
-- Logs also go to stdout, so `docker compose logs -f` still works.
+本仓在 `.gitlab-ci.yml` 里声明的只有:两个镜像名、应用路径、额外 apt 包、pipx 装的扫描器、
+启动前跑迁移的 entrypoint,以及测试期用的假 `DATABASE_URL`。
 
-### Configuration: the `PROD_ENV` variable
+### 发布与回滚
 
-The repo has **no `.env`** (it is gitignored). Production configuration lives
-in a single **File-type** GitLab CI/CD variable so all settings — current and
-future — are managed in one place, outside the repo.
+在 `platform-ci` 改对应环境描述里的镜像标签:
 
-Add it under **Settings → CI/CD → Variables**:
+| 环境 | 文件 | 端口 |
+|---|---|---|
+| 验收 | `deploy/staging-audit/compose.yml` | 后端 9100,前端 9101 |
+| 生产 | `deploy/prod/compose.yml` | 后端 9000,前端 9001 |
 
-- **Type**: `File`
-- **Key**: `PROD_ENV`
-- **Value**: the complete production `.env` content
-- **Protected**: yes (and mark `main` as a protected branch)
+改标签并合并后触发对应的手动部署任务。**回滚 = revert 那次提交再触发一次**,不需要重新构建。
 
-The `deploy` job writes it out with `cp "$PROD_ENV" .env` before starting the
-container. Example content:
+密钥也在环境侧:`AUDIT_PROD_ENV` / `AUDIT_STAGING_ENV`(File 型 CI 变量),由部署任务投放到
+环境目录,不进 git。
 
-```dotenv
-DATABASE_URL=mysql+pymysql://<user>:<password>@<host>:<port>/<db>?charset=utf8mb4
-APP_NAME=RP AI Portal Backend
-DEBUG=false
-CORS_ORIGINS=https://<frontend-domain>
-GITLAB_TOKEN=<token>
-GITLAB_AGENTS_GROUP=rp-ai/rp-ai-agent
-GITLAB_TOOLS_GROUP=rp-ai/rp-ai-tool
-SKILL_REPO_PUSH=false
-```
+### 判定器的登录态
 
-Settings with sensible defaults in `app/config.py` (e.g. `SKILL_REPO_PATH`,
-`GIT_AUTHOR_*`, `MAX_UPLOAD_BYTES`, `GITLAB_URL`) can be omitted.
-`SKILL_REPO_PUSH=true` requires an SSH key mounted into the container
-(uncomment the `.ssh` volume in `docker-compose.yml`).
+判定器的 kiro-cli 登录存在命名卷里(`*_judge-kiro-home` / `*_judge-kiro-share`),环境描述
+把它们声明为 `external` 并写死卷名。换目录或改卷名会让判定器变成未登录,继而所有上传
+fail-closed 转人工复核。
 
-### Deploy access (SSH)
+### 本地开发
 
-The GitLab runner is a docker executor with no host Docker daemon, so it cannot
-run a persistent container itself. Instead the `deploy` job **SSHes into the
-deploy server** and runs `docker compose` there (the server builds locally — no
-registry push). Add these File/Variable CI/CD variables (mark Protected):
-
-| Variable         | Type     | Purpose                                             |
-| ---------------- | -------- | --------------------------------------------------- |
-| `DEPLOY_HOST`    | Variable | deploy server hostname/IP                           |
-| `DEPLOY_USER`    | Variable | SSH login user (able to run docker on the server)   |
-| `DEPLOY_DIR`     | Variable | target dir, e.g. `/proj/rp_ait_prod/services/ai-portal-be` |
-| `DEPLOY_PORT`    | Variable | optional SSH port (defaults to 22)                  |
-| `DEPLOY_SSH_KEY` | File     | private key; its public key is in the server's `authorized_keys` |
-| `PROD_ENV`       | File     | full production `.env` (see above)                  |
-
-Server prerequisites: Docker + `docker compose` v2 + `rsync` installed,
-`DEPLOY_USER` can run docker, and the bind-mount paths in `docker-compose.yml`
-exist (Docker creates them on first run).
-
-### Pipeline stages
-
-- **lint** — `ruff check` (non-blocking for now).
-- **test** — install deps, smoke-import `app.main`, run `pytest` (tolerates
-  "no tests collected").
-- **deploy** — SSHes into the deploy server, `rsync`s the code + `.env`, then
-  runs `docker compose up -d --build` there. Gated to **`main` + manual**:
-  after a merge to `main`, open the pipeline and click ▶ on the `deploy` job.
-
-### Deploy flow
-
-1. Work on a feature branch → push runs `lint` + `test`.
-2. Open a Merge Request into `main` (protect `main` so changes only land via MR).
-3. After merge, the `main` pipeline exposes a manual `deploy` job — click ▶.
-4. The job rsyncs the repo to `$DEPLOY_DIR`, writes `.env` from `PROD_ENV`, and
-   runs `docker compose up -d --build` on the server.
-
-### Requirements / notes
-
-- The `deploy` job needs network + SSH access from the runner to `DEPLOY_HOST`;
-  the deploy server needs Docker + compose. (If instead you get a runner that
-  runs on the deploy host with host-docker access, the job could run
-  `docker compose` directly and drop the SSH hop.)
-- The API currently authenticates only via the `X-User-Eid` header (no real
-  auth) — do not expose port 9000 to the public internet; keep it internal or
-  behind a gateway.
-- Manual local run: `docker compose up -d --build` (needs a local `.env`).
+`pytest` 覆盖判定逻辑(判定器可在测试里替换)。需要跑起整套时用验收环境,不要在本仓再造
+一份 compose——那会变成与环境描述竞争的第二份事实。
