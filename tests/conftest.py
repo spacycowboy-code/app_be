@@ -10,6 +10,9 @@ import tempfile
 # DATABASE_URL — setdefault would NOT override it, so assign directly.
 os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.gettempdir()}/_audit_test.db"
 os.environ["SKILL_REPO_PUSH"] = "false"
+# The hermetic suite exercises endpoint/business logic, not the auth gate, so
+# turn the site-wide JWT gate off here (its behavior is verified separately).
+os.environ["AUTH_ENABLED"] = "false"
 os.environ.setdefault("SKILL_REPO_PATH", tempfile.mkdtemp())
 os.environ.setdefault("AUDIT_ENABLED", "true")
 os.environ.setdefault("AUDIT_ADMIN_EID", "ADMINMM")

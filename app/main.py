@@ -34,8 +34,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Paths reachable without a session (everything else under /api needs a token).
-AUTH_WHITELIST = {"/health", "/api/version", "/api/auth/login"}
+# Paths reachable without a session. Besides login/health, these two carry
+# their OWN token (webhook / CI) and are called by non-browser clients that
+# have no JWT, so the site-wide JWT gate must let them through to their own
+# auth check.
+AUTH_WHITELIST = {
+    "/health",
+    "/api/version",
+    "/api/auth/login",
+    "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
+    "/api/skills/import-official",  # official-skill sync CI — skill_import_token
+}
 
 
 @app.middleware("http")
