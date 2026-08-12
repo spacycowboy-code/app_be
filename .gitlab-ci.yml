@@ -10,7 +10,7 @@ variables:
 include:
   # 后端镜像:薄层(装依赖 + 拷源码),启动前先跑数据库迁移。
   - project: rp-ai-miao/platform-ci
-    ref: v0.5.2
+    ref: v0.10.0
     file: templates/python-service.yml
     inputs:
       service: rp-ai-portal-be
@@ -21,7 +21,7 @@ include:
 
   # 判定器镜像:配方与薄层实质不同(镜像里要装 kiro-cli),所以用本仓自带的 Dockerfile。
   - project: rp-ai-miao/platform-ci
-    ref: v0.5.2
+    ref: v0.10.0
     file: templates/extra-image.yml
     inputs:
       service: skill-audit-judge
