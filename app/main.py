@@ -6,8 +6,10 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.version import __version__
+from app.services.auth_tokens import TokenError, decode_token
 from app.routers import (
     audit,
+    auth,
     categories,
     comments,
     favorites,
@@ -32,6 +34,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Paths reachable without a session (everything else under /api needs a token).
+AUTH_WHITELIST = {"/health", "/api/version", "/api/auth/login"}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    """Site-wide auth: any /api request (bar the whitelist) needs a valid JWT.
+
+    Sets ``request.state.eid`` / ``request.state.display_name`` from the token
+    so handlers can trust the caller's identity instead of a client-supplied
+    field. CORS preflight (OPTIONS) and non-/api paths pass through.
+    """
+    cfg = get_settings()
+    path = request.url.path
+    if (
+        not cfg.auth_enabled
+        or request.method == "OPTIONS"
+        or not path.startswith("/api/")
+        or path in AUTH_WHITELIST
+    ):
+        return await call_next(request)
+
+    authz = request.headers.get("Authorization", "")
+    token = authz[7:].strip() if authz[:7].lower() == "bearer " else ""
+    try:
+        claims = decode_token(token)
+    except TokenError:
+        return JSONResponse(
+            status_code=401, content={"detail": "未登录或登录已过期，请重新登录"}
+        )
+    request.state.eid = claims.get("sub")
+    request.state.display_name = claims.get("name") or None
+    return await call_next(request)
+
 
 @app.exception_handler(IntegrityError)
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
@@ -43,6 +79,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 
 
 app.include_router(users.router)
+app.include_router(auth.router)
 app.include_router(favorites.router)
 app.include_router(market_favorites.router)
 app.include_router(skills.router)

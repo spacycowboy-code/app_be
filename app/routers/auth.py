@@ -1,0 +1,84 @@
+"""Authentication endpoints: LDAP login -> JWT session, and current-user probe.
+
+``POST /api/auth/login`` verifies the user's personal credentials against
+Active Directory (via the service bind account), upserts the portal user row,
+and returns a signed JWT. ``GET /api/auth/me`` echoes the identity carried by a
+valid token (the auth gate in ``app.main`` has already validated it).
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.database import get_db
+from app.models.user import RpAiPortal
+from app.services import ldap_auth
+from app.services.auth_tokens import create_token
+
+router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., description="Corporate login name (sAMAccountName)")
+    password: str = Field(..., description="Corporate password — verified via LDAP")
+
+
+class LoginResponse(BaseModel):
+    token: str
+    tokenType: str = "Bearer"
+    expiresIn: int
+    eid: str
+    displayName: str | None = None
+
+
+class MeResponse(BaseModel):
+    eid: str
+    displayName: str | None = None
+
+
+def _upsert_user(db: Session, user: ldap_auth.LdapUser) -> None:
+    """Create or refresh the portal user row from LDAP attributes."""
+    row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == user.eid))
+    if row is None:
+        row = RpAiPortal(eid=user.eid)
+        db.add(row)
+    if user.display_name:
+        row.display_name = user.display_name[:128]
+    if user.department:
+        row.department = user.department[:64]
+    db.commit()
+
+
+@router.post("/login", response_model=LoginResponse)
+def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    settings = get_settings()
+    if not settings.auth_enabled:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "登录功能未启用")
+    if not settings.auth_jwt_secret:
+        # Misconfiguration: refuse rather than issue unverifiable tokens.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "认证服务未正确配置")
+
+    try:
+        user = ldap_auth.authenticate(payload.username, payload.password)
+    except ldap_auth.LdapAuthError as exc:
+        if exc.retryable:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
+
+    _upsert_user(db, user)
+    token, expires_in = create_token(user.eid, user.display_name)
+    return LoginResponse(
+        token=token, expiresIn=expires_in, eid=user.eid, displayName=user.display_name
+    )
+
+
+@router.get("/me", response_model=MeResponse)
+def me(request: Request) -> MeResponse:
+    """Return the identity carried by the (already-validated) bearer token."""
+    eid = getattr(request.state, "eid", None)
+    if not eid:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+    return MeResponse(eid=eid, displayName=getattr(request.state, "display_name", None))

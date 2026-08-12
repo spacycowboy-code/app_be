@@ -80,6 +80,30 @@ class RpAiSkill(TimestampMixin, Base):
     # Security-audit derived state: pass | suspect (danger is never stored).
     audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
 
+    @property
+    def uploader_name(self) -> str | None:
+        """The uploader's LDAP display name (from the linked user row).
+
+        ``author`` stores the uploader's EID (identity); the human-readable
+        display name lives on the user record and is resolved here for read
+        models so the UI can show e.g. "Miao Zhang M".
+        """
+        up = self.uploader
+        return up.display_name if up else None
+
+    @property
+    def creator_label(self) -> str | None:
+        """The name to show as the skill's creator.
+
+        For user uploads ``author`` holds the uploader's EID, so show the
+        person's LDAP display name (falling back to the EID). For imported
+        skills ``author`` is a real label (e.g. "Anthropic") that differs from
+        the uploader EID, so show it verbatim.
+        """
+        if self.author and self.author != self.uploader_eid:
+            return self.author
+        return self.uploader_name or self.uploader_eid
+
     # Relationships.
     uploader: Mapped["RpAiPortal | None"] = relationship(
         back_populates="uploaded_skills",

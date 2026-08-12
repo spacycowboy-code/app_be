@@ -292,7 +292,7 @@ async def upload_skill(
     manifest = {
         "name": name,
         "description": effective_description,
-        "author": (author or "").strip() or (existing.uploader_eid if existing else eid),
+        "author": existing.uploader_eid if existing else eid,
         "category": category_label,
         "categoryId": category_id,
         "tags": parsed_tags,
@@ -329,13 +329,9 @@ async def upload_skill(
     skill.name = name
     if effective_description is not None:
         skill.description = effective_description
-    # Display name (author): use the provided value, otherwise fall back to the
-    # uploader/owner EID (only when not already set on an existing skill).
-    display_name = (author or "").strip()
-    if display_name:
-        skill.author = display_name
-    elif not skill.author:
-        skill.author = owner_eid or eid
+    # author stores the uploader's EID (identity). The human display name is
+    # resolved from the user record (uploader.display_name) at read time.
+    skill.author = owner_eid or eid
     skill.category = category_label
     skill.category_id = category_id
     # Auto-assign the image for this skill's group.

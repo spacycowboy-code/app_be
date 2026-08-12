@@ -324,6 +324,9 @@ def update_skill(
     )
     for key, val in scalar_data.items():
         setattr(skill, key, val)
+    # author always stores the uploader's EID (identity), never a display name;
+    # the human display name is resolved from the user record at read time.
+    skill.author = skill.uploader_eid or payload.editor_eid or skill.author
     # When the group (category) is changed, refresh the denormalized label.
     if "category_id" in scalar_data and skill.category_id:
         cat = db.get(RpAiCategory, skill.category_id)

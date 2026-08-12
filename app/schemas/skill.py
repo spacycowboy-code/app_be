@@ -46,6 +46,10 @@ class SkillBase(CamelModel):
     version: str | None = None
     author: str | None = None
     uploader_eid: str | None = None
+    # LDAP display name of the uploader (read-only, resolved from the user row).
+    uploader_name: str | None = None
+    # Name to show as the creator (person's display name, or imported label).
+    creator_label: str | None = None
     capability_full: str | None = None
     rating_dist: list[int] | None = None
     review_count: int = 0
@@ -132,6 +136,8 @@ class SkillSummary(CamelModel):
     tags: list[str] = Field(default_factory=list)
     author: str | None = None
     uploader_eid: str | None = None
+    uploader_name: str | None = None
+    creator_label: str | None = None
     status: SkillStatus = "pending"
     created_at: datetime | None = None
     updated_at: datetime | None = None

@@ -51,6 +51,39 @@ class Settings(BaseSettings):
     # Verify TLS when calling the GitLab API (internal certs may be self-signed).
     gitlab_verify_tls: bool = False
 
+    # --- Authentication: LDAP (Active Directory) + JWT session --------------
+    # Master switch. When off, /api/auth/login rejects and the request gate is
+    # disabled (dev only — never ship with this off).
+    auth_enabled: bool = True
+    # LDAP server URL. Use the domain (not a single DC IP); ldaps => TLS.
+    ldap_url: str = "ldaps://ericsson.se:636"
+    # Search base for user lookups.
+    ldap_base_dn: str = "DC=ericsson,DC=se"
+    # Service/bind account the app uses to search for users (UPN form works on
+    # AD). The password is a SECRET — set via env/.env, never commit it.
+    ldap_bind_user: str = "ecnrpai@ericsson.se"
+    ldap_bind_password: str = ""
+    # Filter to resolve the login name to a user entry ({username} is escaped).
+    ldap_user_filter: str = "(sAMAccountName={username})"
+    # Attribute whose value becomes the portal EID (AD `uid` is already upper).
+    ldap_eid_attr: str = "uid"
+    # Attributes copied onto the user row for display.
+    ldap_display_attr: str = "displayName"
+    ldap_department_attr: str = "department"
+    # Validate the LDAPS server certificate. Kept False for parity with
+    # gitlab_verify_tls until the internal CA bundle is wired in; turn on in prod.
+    ldap_verify_tls: bool = False
+    # Seconds to wait for LDAP operations.
+    ldap_timeout: int = 10
+
+    # HMAC secret for signing session JWTs. REQUIRED in any real deployment
+    # (empty => login disabled). Set via env/.env, never commit it.
+    auth_jwt_secret: str = ""
+    auth_jwt_algorithm: str = "HS256"
+    # Session lifetime in hours.
+    auth_token_ttl_hours: int = 8
+
+
     # --- Skill security audit (upload-time gate) ----------------------------
     # Master switch. When off, uploads skip the audit (state left null).
     audit_enabled: bool = True
