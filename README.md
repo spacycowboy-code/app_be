@@ -96,3 +96,19 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 
 合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rvc/rp-ai/rp-ai-portal-be:<commit sha>`;
 发布就是在环境描述里把镜像标签改成它。
+
+本仓产出**两个**镜像:
+
+| 镜像 | 内容 |
+|---|---|
+| `proj-rvc/rp-ai/rp-ai-portal-be:<sha>` | 后端;对账器用同一个镜像,只换 entrypoint |
+| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器;镜像里装了 kiro-cli,配方是本仓的 `Dockerfile.judge` |
+
+判定器的 kiro-cli 登录态在命名卷里(`*_judge-kiro-home`、`*_judge-kiro-share`),环境描述把它们
+声明为 `external` 并写死卷名。卷名一变判定器就是未登录状态,继而所有上传 fail-closed 转人工复核。
+
+各环境端口:验收后端 9100、前端 9101;生产后端 9000、前端 9001。
+
+本地跑测试用 `pytest`(判定器可在测试里替换)。要跑起整套服务用验收环境,不要在本仓再造一份
+compose——那会与环境描述各说各话。
+
