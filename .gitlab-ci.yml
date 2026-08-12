@@ -1,4 +1,6 @@
-# 本服务在测试期需要的配置。属于服务自己的事实,不进共享模板。
+# 流水线来自共享模板。发布 / 回滚 / 排查见 platform-ci 的操作手册:
+#   https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/README.md
+# 本仓只声明属于本服务的输入;端口、变量、挂载在 platform-ci 的 deploy/<环境>/。
 variables:
   # 导入 app.main 时会校验配置,给一个假的库地址让导入通过(测试自己用 sqlite 临时库)。
   DATABASE_URL: "mysql+pymysql://ci:ci@localhost:3306/ci_db"

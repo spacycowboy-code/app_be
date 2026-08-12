@@ -84,45 +84,15 @@ python -m app.init_db
 
 The API speaks **camelCase** JSON to match the Angular frontend.
 
-## 部署(镜像 + 环境描述)
+## 构建与部署
 
-本仓不再包含 Dockerfile(判定器那份除外)、compose 与 deploy 任务。原因见
-`rp-ai-miao/platform-ci` 的 `DESIGN.md`:构建过程属于平台,产物是不可变镜像,
-"在哪台机器上跑哪个标签"属于环境。
+本仓不含 Dockerfile 与 compose:流水线来自共享模板,部署由环境描述决定。
 
-### 流水线产出
-
-合并到 `main` 后,共享模板会构建并推送两个镜像:
-
-| 镜像 | 内容 |
+| 我要做什么 | 去哪 |
 |---|---|
-| `proj-rvc/rp-ai/rp-ai-portal-be:<sha>` | 后端;对账器用同一个镜像,只换 entrypoint |
-| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器;镜像里装了 kiro-cli,配方是本仓的 `Dockerfile.judge` |
+| 发布、回滚、查现在跑的是什么、排查失败 | [platform-ci 操作手册](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/README.md) |
+| 改本服务的端口、环境变量、挂载目录 | [platform-ci `deploy/`](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/tree/main/deploy) |
+| 为什么这样分工 | [platform-ci DESIGN.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/DESIGN.md) |
 
-本仓在 `.gitlab-ci.yml` 里声明的只有:两个镜像名、应用路径、额外 apt 包、pipx 装的扫描器、
-启动前跑迁移的 entrypoint,以及测试期用的假 `DATABASE_URL`。
-
-### 发布与回滚
-
-在 `platform-ci` 改对应环境描述里的镜像标签:
-
-| 环境 | 文件 | 端口 |
-|---|---|---|
-| 验收 | `deploy/staging-audit/compose.yml` | 后端 9100,前端 9101 |
-| 生产 | `deploy/prod/compose.yml` | 后端 9000,前端 9001 |
-
-改标签并合并后触发对应的手动部署任务。**回滚 = revert 那次提交再触发一次**,不需要重新构建。
-
-密钥也在环境侧:`AUDIT_PROD_ENV` / `AUDIT_STAGING_ENV`(File 型 CI 变量),由部署任务投放到
-环境目录,不进 git。
-
-### 判定器的登录态
-
-判定器的 kiro-cli 登录存在命名卷里(`*_judge-kiro-home` / `*_judge-kiro-share`),环境描述
-把它们声明为 `external` 并写死卷名。换目录或改卷名会让判定器变成未登录,继而所有上传
-fail-closed 转人工复核。
-
-### 本地开发
-
-`pytest` 覆盖判定逻辑(判定器可在测试里替换)。需要跑起整套时用验收环境,不要在本仓再造
-一份 compose——那会变成与环境描述竞争的第二份事实。
+合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rvc/rp-ai/rp-ai-portal-be:<commit sha>`;
+发布就是在环境描述里把镜像标签改成它。
