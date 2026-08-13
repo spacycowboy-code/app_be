@@ -83,6 +83,17 @@ class Settings(BaseSettings):
     # Session lifetime in hours.
     auth_token_ttl_hours: int = 8
 
+    # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
+    # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /
+    # break-glass access. Its EID is `audit_admin_eid` (ADMINMM), so it has
+    # admin rights everywhere. SECURITY: this is a static-credential backdoor —
+    # set a strong password via env (LOCAL_ADMIN_PASSWORD) and set
+    # LOCAL_ADMIN_ENABLED=false in production if you don't need it.
+    local_admin_enabled: bool = True
+    local_admin_username: str = "adminmm"
+    local_admin_password: str = "adminmm"
+    local_admin_display: str = "Administrator"
+
 
     # --- Skill security audit (upload-time gate) ----------------------------
     # Master switch. When off, uploads skip the audit (state left null).

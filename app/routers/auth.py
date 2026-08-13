@@ -7,6 +7,8 @@ valid token (the auth gate in ``app.main`` has already validated it).
 """
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -60,6 +62,28 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
     if not settings.auth_jwt_secret:
         # Misconfiguration: refuse rather than issue unverifiable tokens.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "认证服务未正确配置")
+
+    # Break-glass local admin: authenticates WITHOUT LDAP. Its EID is the admin
+    # EID, so the session has admin rights everywhere. Username match is
+    # case-insensitive; the password is compared in constant time.
+    admin_user = settings.local_admin_username.strip()
+    if (
+        settings.local_admin_enabled
+        and admin_user
+        and payload.username.strip().lower() == admin_user.lower()
+        and secrets.compare_digest(payload.password, settings.local_admin_password)
+    ):
+        admin = ldap_auth.LdapUser(
+            eid=settings.audit_admin_eid.upper(),
+            display_name=settings.local_admin_display,
+            department=None,
+            dn="",
+        )
+        _upsert_user(db, admin)
+        token, expires_in = create_token(admin.eid, admin.display_name)
+        return LoginResponse(
+            token=token, expiresIn=expires_in, eid=admin.eid, displayName=admin.display_name
+        )
 
     try:
         user = ldap_auth.authenticate(payload.username, payload.password)

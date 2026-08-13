@@ -1,11 +1,13 @@
 """Agent市场 endpoints: list, manual create, GitLab sync, delete."""
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
+from app.models.market_favorite import RpAiMarketFavorite
+from app.models.market_download import RpAiMarketDownload
 from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResult
 from app.services.eids import normalize_eid
 from app.services.gitlab_sync import (
@@ -61,7 +63,58 @@ def list_items(
         stmt = stmt.where(
             RpAiMarketItem.name.like(like) | RpAiMarketItem.description.like(like)
         )
-    return list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
+    items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
+    _attach_stats(db, items)
+    return items
+
+
+def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
+    """Attach deduplicated-by-EID favorite/download counts onto each item.
+
+    Favorites are already unique per (eid, item) by table constraint, so the
+    row count is the like count. Downloads are raw events, so we count distinct
+    EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
+    """
+    if not items:
+        return
+    ids = [it.id for it in items]
+    fav = dict(
+        db.execute(
+            select(RpAiMarketFavorite.item_id, func.count(RpAiMarketFavorite.id))
+            .where(RpAiMarketFavorite.item_id.in_(ids))
+            .group_by(RpAiMarketFavorite.item_id)
+        ).all()
+    )
+    dls = dict(
+        db.execute(
+            select(
+                RpAiMarketDownload.item_id,
+                func.count(func.distinct(RpAiMarketDownload.eid)),
+            )
+            .where(RpAiMarketDownload.item_id.in_(ids))
+            .group_by(RpAiMarketDownload.item_id)
+        ).all()
+    )
+    for it in items:
+        it.favorite_count = int(fav.get(it.id, 0))
+        it.download_count = int(dls.get(it.id, 0))
+
+
+@router.post("/{item_id}/download", status_code=status.HTTP_204_NO_CONTENT)
+def record_download(
+    item_id: str,
+    db: Session = Depends(get_db),
+    eid: str | None = Query(default=None),
+) -> None:
+    """Record a download event for a market item (for unique-downloader counts).
+
+    The archive itself is served by GitLab; the frontend calls this so the
+    download is attributed to the user's EID (deduplicated at read time).
+    """
+    if db.get(RpAiMarketItem, item_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    db.add(RpAiMarketDownload(item_id=item_id, eid=normalize_eid(eid) or None))
+    db.commit()
 
 
 @router.post("", response_model=MarketItemRead, status_code=status.HTTP_201_CREATED)

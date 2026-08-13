@@ -138,6 +138,7 @@ class SkillSummary(CamelModel):
     uploader_eid: str | None = None
     uploader_name: str | None = None
     creator_label: str | None = None
+    favorite_count: int = 0
     status: SkillStatus = "pending"
     created_at: datetime | None = None
     updated_at: datetime | None = None

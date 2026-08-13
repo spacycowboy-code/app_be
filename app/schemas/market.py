@@ -54,6 +54,9 @@ class MarketItemRead(CamelModel):
     is_trending: bool = False
     verified: bool = False
     creator: str | None = None
+    # Deduplicated-by-EID stats shown on the card.
+    favorite_count: int = 0
+    download_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

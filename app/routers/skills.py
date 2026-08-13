@@ -124,7 +124,20 @@ def list_skills(
             (RpAiSkill.status == "approved")
             | (RpAiSkill.uploader_eid == requester)
         )
-    return list(db.scalars(stmt).all())
+    skills = list(db.scalars(stmt).all())
+    # Attach the deduplicated like count (favorites are unique per (eid, skill)).
+    if skills:
+        ids = [s.id for s in skills]
+        counts = dict(
+            db.execute(
+                select(RpAiUserFavorite.skill_id, func.count(RpAiUserFavorite.id))
+                .where(RpAiUserFavorite.skill_id.in_(ids))
+                .group_by(RpAiUserFavorite.skill_id)
+            ).all()
+        )
+        for s in skills:
+            s.favorite_count = int(counts.get(s.id, 0))
+    return skills
 
 
 @router.get("/{skill_id}", response_model=SkillRead)
