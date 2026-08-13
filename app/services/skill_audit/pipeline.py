@@ -138,16 +138,39 @@ def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str
     return None, None
 
 
+# Findings that need a person regardless of how severe they look, because what
+# they report is "this could not be judged from here": a file the audit cannot
+# read, a scanner rule outside our vocabulary, a layer that did not run, two
+# judges disagreeing. Severity is not the criterion — "we could not tell" is not
+# a matter of degree.
+REVIEW_SIGNAL_CATEGORIES = ("malicious_artifact", "unclassified", "audit_error")
+
+
 def _derive_state(findings: list[Finding], judge_verdict: str) -> str:
+    """Map evidence to an outcome.
+
+    The gate acts on concealment and overreach, not on capability. A skill that
+    ships scripts, installs dependencies or writes files is doing its job; that
+    is recorded as context (``bundled_code``) and shown in the report, but it is
+    not evidence of anything and must not consume review time. What does consume
+    review time: a red line, something the audit could not read or classify, or
+    anything the semantic judge itself raised.
+    """
     red_line = any(
         f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high")
         for f in findings
     )
     if red_line or judge_verdict == "block":
         return "danger"
-    # Fail closed: judge error / any residual finding / explicit flag -> review.
-    if judge_verdict in ("flag", "error") or findings:
+    if judge_verdict in ("flag", "error"):
         return "suspect"
+    for f in findings:
+        if f.category in REVIEW_SIGNAL_CATEGORIES:
+            return "suspect"
+        # Serious, but not one of the red lines: still not something to publish
+        # without eyes on it.
+        if f.severity in ("critical", "high"):
+            return "suspect"
     return "pass"
 
 
@@ -247,10 +270,9 @@ def audit_skill(
                        "review.",
             ))
 
-        det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
         judge = invoke_judge(
             settings=settings, rules=rules, skill_text=judge_input,
-            det_summary=det_summary, model=settings.audit_kiro_model,
+            model=settings.audit_kiro_model,
         )
         models_used = [settings.audit_kiro_model]
 
@@ -261,7 +283,7 @@ def audit_skill(
         if judge.verdict == "block" and confirm_model and confirm_model != settings.audit_kiro_model:
             second = invoke_judge(
                 settings=settings, rules=rules, skill_text=judge_input,
-                det_summary=det_summary, model=confirm_model,
+                model=confirm_model,
             )
             models_used.append(confirm_model)
             if second.verdict != "block":

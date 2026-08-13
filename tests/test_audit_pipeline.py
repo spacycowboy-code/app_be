@@ -35,8 +35,35 @@ def test_state_suspect_failclosed_on_judge_error():
     assert _derive_state([], "error") == "suspect"
 
 
-def test_state_suspect_on_nonredline_finding():
-    assert _derive_state([Finding("cisco", "malicious_artifact", "medium")], "pass") == "suspect"
+def test_state_suspect_on_unreviewable_attachment():
+    """Not a red line, but nobody could read it, so a person has to."""
+    assert _derive_state([Finding("pipeline", "malicious_artifact", "medium")], "pass") == "suspect"
+
+
+def test_state_suspect_on_a_serious_finding_outside_the_red_lines():
+    assert _derive_state([Finding("cisco", "unclassified", "high")], "pass") == "suspect"
+
+
+def test_shipping_scripts_alone_does_not_cost_a_review():
+    """Almost every real skill ships scripts. If that routes to review, every real
+    skill routes to review and the queue stops carrying information."""
+    findings = [Finding("pipeline", "bundled_code", "low", file=f"tool{i}.py")
+                for i in range(11)]
+    assert _derive_state(findings, "pass") == "pass"
+
+
+def test_a_recorded_capability_still_reaches_the_report():
+    """Not gating is not the same as not reported: the reviewer still sees it."""
+    from app.services.skill_audit.report import build_checks
+    from app.services.skill_audit.types import AuditResult
+
+    checks = build_checks(AuditResult(
+        state="pass", verdict="pass",
+        findings=[Finding("pipeline", "bundled_code", "low", file="setup.ps1",
+                          detail="executable/script artifact (.ps1)")],
+    ))
+    bundled = [c for c in checks if c.id == "bundled_code"]
+    assert bundled and bundled[0].findings
 
 
 def test_state_pass_when_clean():
@@ -48,7 +75,7 @@ def test_artifact_scan_flags_script(tmp_path):
     (tmp_path / "SKILL.md").write_text("x")
     (tmp_path / "setup.sh").write_text("#!/bin/bash\necho hi")
     finds = artifact_scan(str(tmp_path))
-    assert any(f.category == "malicious_artifact" for f in finds)
+    assert [(f.category, f.severity) for f in finds] == [("bundled_code", "low")]
 
 
 def test_artifact_scan_ignores_docs(tmp_path):
@@ -291,7 +318,7 @@ def _run_audit(monkeypatch, verdicts, model_primary="m-primary", model_confirm="
 
     asked: list[str] = []
 
-    def fake_judge(*, settings, rules, skill_text, det_summary, model=None):
+    def fake_judge(*, settings, rules, skill_text, model=None):
         asked.append(model)
         verdict = verdicts[len(asked) - 1]
         finds = ([Finding("judge", "dangerous_instruction", "critical", "rm -rf /")]
@@ -432,6 +459,20 @@ def test_judge_restating_a_deterministic_finding_is_dropped_not_degraded():
     result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
     assert result.findings == []
     assert result.grounded is True          # a label is not invented evidence
+    # The dropped finding was the only thing behind the flag, so the flag goes
+    # with it - otherwise review is asked for with nothing to show.
+    assert result.verdict == "pass"
+
+
+def test_an_unevidenced_rejection_falls_back_to_review_not_to_pass():
+    from app.services.skill_audit import judge
+
+    raw = ('{"verdict": "block", "findings": [{"category": "prompt_injection",'
+           ' "severity": "high", "evidence_span": "prompt_injection",'
+           ' "detail": "Deterministic scan reported prompt injection."}]}')
+    result = judge._parse(raw, skill_text="---\nname: x\n---\n# X\n")
+    assert result.findings == []
+    assert result.verdict == "flag"
 
 
 def test_judge_inventing_evidence_still_degrades():

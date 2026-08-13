@@ -361,6 +361,12 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         # semantic judge remains the arbiter of instruction-layer intent.
         if cat == "prompt_injection" and sev in ("critical", "high"):
             sev = "medium"
+        # A rule we never mapped is a rule whose meaning we do not know, so its
+        # severity is the scanner's opinion about its own taxonomy, not a
+        # statement about our red lines. Showing it as high would claim more than
+        # we can support; it still routes to review as a review signal.
+        if cat == "unclassified" and sev in ("critical", "high"):
+            sev = "medium"
         # The scanner already reports file, line, the offending snippet and its
         # own remediation. Pass them through: without them the report can only
         # name a category, which is not something an author can act on.
@@ -424,10 +430,14 @@ def unreadable_artifact_scan(target_dir: str) -> list[Finding]:
 
 
 def artifact_scan(target_dir: str) -> list[Finding]:
-    """Flag shipped executables/scripts as malicious_artifact (medium, non-red-line).
+    """Record shipped scripts as bundled code, not as a threat.
 
-    Fallback used only when the Cisco scanner is unavailable; a cheap extension/
-    shebang heuristic so bundled executables still route to review.
+    Fallback used only when the Cisco scanner is unavailable. A file extension
+    says what a file is, never what it does: almost every skill that does real
+    work ships a script, so treating that as a finding routes every real skill to
+    review and the queue stops meaning anything. It is recorded as context for
+    whoever reads the report, and the semantic layer — which is given these files
+    verbatim — is what judges their content.
     """
 
     findings: list[Finding] = []
@@ -446,7 +456,7 @@ def artifact_scan(target_dir: str) -> list[Finding]:
                 pass
         if reason:
             findings.append(
-                Finding("pipeline", "malicious_artifact", "medium",
+                Finding("pipeline", "bundled_code", "low",
                         file=p.name, detail=reason)
             )
     return findings
