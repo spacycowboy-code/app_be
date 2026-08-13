@@ -36,8 +36,8 @@ from app.services.skill_manifest import (
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
-from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.services.skill_audit import audit_skill, AuditResult
+from app.services.skill_audit import gate
 from app.services.skill_audit.report import build_checks
 from app.services import gitlab_mr
 from fastapi.concurrency import run_in_threadpool
@@ -80,44 +80,6 @@ def _ensure_user(db: Session, eid: str) -> None:
     if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
         db.add(RpAiPortal(eid=eid))
         db.flush()
-
-
-def _record_audit(
-    db: Session,
-    ref: str,
-    audit: AuditResult,
-    *,
-    skill_id: str | None,
-    skill_name: str,
-    uploader_eid: str | None,
-    mr_url: str | None = None,
-) -> None:
-    """Persist the audit record + its findings (append-only facts)."""
-    record = RpAiSkillAuditRecord(
-        id=ref,
-        skill_id=skill_id,
-        skill_name=skill_name,
-        uploader_eid=uploader_eid,
-        state=audit.state,
-        judge_verdict=audit.verdict,
-        judge_raw=audit.raw,
-        judge_model=audit.judge_model,
-        rules_hash=audit.rules_hash,
-        mr_url=mr_url,
-    )
-    for f in audit.findings:
-        record.findings.append(
-            RpAiSkillFinding(
-                source=f.source,
-                category=f.category,
-                severity=f.severity,
-                evidence=f.evidence,
-                detail=f.detail,
-                file=f.file,
-                line=f.line,
-            )
-        )
-    db.add(record)
 
 
 async def _read_upload(
@@ -212,7 +174,7 @@ async def evaluate_skill(
     # Danger is blocked in the UI (no publish button) so it never reaches
     # publish; persist the blocked-attempt record here for traceability.
     if audit.is_danger:
-        _record_audit(
+        gate.record(
             db, reference, audit, skill_id=None, skill_name=name, uploader_eid=eid or None
         )
         db.commit()
@@ -263,7 +225,7 @@ async def upload_skill(
     )
     audit_ref = uuid.uuid4().hex
     if audit.is_danger:
-        _record_audit(
+        gate.record(
             db, audit_ref, audit, skill_id=None, skill_name=name, uploader_eid=eid
         )
         db.commit()
@@ -302,10 +264,9 @@ async def upload_skill(
     owner_eid = existing.uploader_eid if existing else eid
 
     # Suspect skills are committed to a dedicated review branch, not live.
-    suspect = audit.state == "suspect"
-    review_branch = (
-        f"skill-audit/{resolved_id}-{audit_ref[:8]}" if suspect else None
-    )
+    decision = gate.decide(audit=audit, skill_id=resolved_id, ref=audit_ref)
+    suspect = decision.needs_review
+    review_branch = decision.review_branch
 
     result = skill_storage.store(
         skill_id=resolved_id,
@@ -318,6 +279,7 @@ async def upload_skill(
         artifact_filename=artifact_filename,
         current_version=existing.version if existing else None,
         existing_storage_path=existing.storage_path if existing else None,
+        audit=audit,
         target_branch=review_branch,
     )
 
@@ -348,7 +310,7 @@ async def upload_skill(
     # merged, and a danger verdict never reaches this point (nothing is stored).
     # Recomputable from the audit record + MR state - see skill_audit.reconcile,
     # which is the only other writer.
-    skill.status = "approved" if audit.state == "pass" else "pending"
+    skill.status = decision.status
     # Latest verdict for the current version: display only, never a gate.
     skill.audit_state = audit.state
 
@@ -387,7 +349,7 @@ async def upload_skill(
                 audit_ref=audit_ref,
             )
         )
-    _record_audit(
+    gate.record(
         db, audit_ref, audit,
         skill_id=resolved_id, skill_name=name, uploader_eid=eid, mr_url=mr_url,
     )

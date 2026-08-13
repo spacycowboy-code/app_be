@@ -443,3 +443,70 @@ def test_judge_inventing_evidence_still_degrades():
     result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
     assert len(result.findings) == 1
     assert result.grounded is False
+
+
+# --- the audit is attached to the write, not to a route ----------------------
+
+def test_store_cannot_be_called_without_an_audit_outcome():
+    """The signature is the enforcement: a new write path cannot forget the gate."""
+    import inspect
+
+    from app.services.skill_storage import SkillStorage
+
+    sig = inspect.signature(SkillStorage.store)
+    assert sig.parameters["audit"].default is inspect.Parameter.empty
+
+
+def test_store_refuses_content_the_audit_rejected(tmp_path, monkeypatch):
+    from app.services import skill_storage as mod
+    from app.services.skill_audit.types import AuditResult
+
+    st = mod.SkillStorage()
+    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
+    try:
+        st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+                 instructions="x", artifact_bytes=None, artifact_filename=None,
+                 current_version=None, existing_storage_path=None,
+                 audit=AuditResult(state="danger", verdict="block"))
+    except ValueError as exc:
+        assert "rejected" in str(exc)
+    else:
+        raise AssertionError("a danger verdict must not be writable")
+
+
+def test_store_refuses_to_put_unreviewed_content_on_the_live_branch(tmp_path, monkeypatch):
+    from app.services import skill_storage as mod
+    from app.services.skill_audit.types import AuditResult
+
+    st = mod.SkillStorage()
+    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
+    try:
+        st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+                 instructions="x", artifact_bytes=None, artifact_filename=None,
+                 current_version=None, existing_storage_path=None,
+                 audit=AuditResult(state="suspect", verdict="flag"),
+                 target_branch=None)          # no review branch -> would land live
+    except ValueError as exc:
+        assert "review branch" in str(exc)
+    else:
+        raise AssertionError("suspect content must not land on the live branch")
+
+
+def test_a_review_gets_its_own_branch_per_audit_not_per_skill():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    a = gate.decide(audit=AuditResult(state="suspect", verdict="flag"), skill_id="x")
+    b = gate.decide(audit=AuditResult(state="suspect", verdict="flag"), skill_id="x")
+    assert a.review_branch and b.review_branch and a.review_branch != b.review_branch
+    assert a.status == "pending" and a.needs_review and not a.blocked
+
+
+def test_a_pass_is_published_and_a_danger_is_blocked():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    ok = gate.decide(audit=AuditResult(state="pass", verdict="pass"), skill_id="x")
+    no = gate.decide(audit=AuditResult(state="danger", verdict="block"), skill_id="x")
+    assert ok.status == "approved" and ok.review_branch is None and not ok.blocked
+    assert no.blocked and no.status == "pending"
