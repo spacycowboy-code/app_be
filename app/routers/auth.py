@@ -10,7 +10,7 @@ from __future__ import annotations
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,7 +25,10 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class LoginRequest(BaseModel):
     username: str = Field(..., description="Corporate login name (sAMAccountName)")
-    password: str = Field(..., description="Corporate password — verified via LDAP")
+    # SecretStr: masked in logs/repr/errors and rendered as a password field in
+    # the OpenAPI docs. The raw value (needed for the LDAP bind) is read via
+    # .get_secret_value() only inside the login handler below.
+    password: SecretStr = Field(..., description="Corporate password — verified via LDAP")
 
 
 class LoginResponse(BaseModel):
@@ -71,7 +74,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
         settings.local_admin_enabled
         and admin_user
         and payload.username.strip().lower() == admin_user.lower()
-        and secrets.compare_digest(payload.password, settings.local_admin_password)
+        and secrets.compare_digest(payload.password.get_secret_value(), settings.local_admin_password)
     ):
         admin = ldap_auth.LdapUser(
             eid=settings.audit_admin_eid.upper(),
@@ -86,7 +89,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
         )
 
     try:
-        user = ldap_auth.authenticate(payload.username, payload.password)
+        user = ldap_auth.authenticate(payload.username, payload.password.get_secret_value())
     except ldap_auth.LdapAuthError as exc:
         if exc.retryable:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
