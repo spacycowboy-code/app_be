@@ -165,6 +165,11 @@ def _derive_state(findings: list[Finding], judge_verdict: str) -> str:
     if judge_verdict in ("flag", "error"):
         return "suspect"
     for f in findings:
+        # The judge only reports what it considers a threat, and label restatements
+        # are already dropped before this point, so whatever it still says stands
+        # on its own evidence and goes in front of a person whatever its severity.
+        if f.source == "judge":
+            return "suspect"
         if f.category in REVIEW_SIGNAL_CATEGORIES:
             return "suspect"
         # Serious, but not one of the red lines: still not something to publish

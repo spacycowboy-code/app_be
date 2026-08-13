@@ -34,7 +34,18 @@ N_BENIGN_GUARD = 60
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--endpoint", default="http://localhost:9100/api/skills/evaluate")
+# The API is behind a site-wide auth gate, so a run needs a bearer token; without
+# one every case comes back HTTP401 and the run reports a regression that is not
+# there.
+ap.add_argument("--token", default=os.environ.get("AUDIT_TOKEN", ""),
+                help="bearer token for the API (or AUDIT_TOKEN)")
+# The benign guard dominates the cost: every case is one judge call. Keep the
+# default that the recorded baseline used, but let a targeted run pay less.
+ap.add_argument("--benign", type=int, default=None,
+                help=f"benign guard sample size (default {N_BENIGN_GUARD})")
 args = ap.parse_args()
+if args.benign is not None:
+    N_BENIGN_GUARD = args.benign
 FM_RE = re.compile(r"^---\s+name:\s*(.+?)\s+description:\s*(.+?)\s+---\s*(.*)$", re.S)
 
 
@@ -47,11 +58,12 @@ def post(md, name):
         fh.write(md)
         path = fh.name
     try:
-        out = subprocess.run(
-            ["curl", "-s", "-w", "\n%{http_code}", "--max-time", "180", "-X", "POST",
-             args.endpoint, "-F", "eid=REGRESS", "-F", f"name={name}",
-             "-F", f"file=@{path};type=text/markdown"],
-            capture_output=True, text=True, timeout=240).stdout
+        cmd = ["curl", "-s", "-w", "\n%{http_code}", "--max-time", "180", "-X", "POST",
+               args.endpoint, "-F", "eid=REGRESS", "-F", f"name={name}",
+               "-F", f"file=@{path};type=text/markdown"]
+        if args.token:
+            cmd += ["-H", f"Authorization: Bearer {args.token}"]
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=240).stdout
         payload, _, code = out.rpartition("\n")
         return code.strip(), payload
     finally:
