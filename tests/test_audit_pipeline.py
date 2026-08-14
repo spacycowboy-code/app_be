@@ -287,33 +287,26 @@ def test_bundled_text_files_are_collected_for_review(tmp_path):
     (tmp_path / "logo.png").write_bytes(b"\x89PNG")              # binary: not text
     collected, unreadable = _collect_text_files(tmp_path, main)
     assert unreadable == []
-    # Prose before data, so a budget that runs out costs the least instruction-like
-    # file rather than whichever one sorts first.
-    assert [n for n, _ in collected] == ["reference/notes.md", "mcp.json"]
+    assert sorted(n for n, _ in collected) == ["mcp.json", "reference/notes.md"]
 
 
-def test_the_deterministic_scans_read_a_file_the_judge_only_sees_in_part(tmp_path):
-    """The budget is the model's context limit, not the scanners'. A secret past the
-    per-file cap must still be found: those scans are local and have no reason to
-    stop reading."""
+def test_the_deterministic_scans_read_every_file_in_full(tmp_path):
+    """The budget is the model's context limit, not the scanners'. A secret or a
+    hidden character anywhere in a file must still be found: those scans are local
+    and have no reason to stop reading."""
     from app.services.skill_audit import pipeline
     main = "---\nname: x\ndescription: d\n---\nbody\n"
     (tmp_path / "SKILL.md").write_text(main)
-    tail = "\u200bhidden-instruction-after-the-cap"
-    (tmp_path / "big.md").write_text("a" * (pipeline._PER_FILE_BUDGET + 10) + tail)
+    tail = "\u200bhidden-instruction-at-the-end"
+    (tmp_path / "big.md").write_text("a" * 100_000 + tail)
     collected, unreadable = pipeline._collect_text_files(tmp_path, main)
-    # Collected in full ...
-    assert len(collected[0][1]) > pipeline._PER_FILE_BUDGET
+    assert unreadable == []
     assert tail in collected[0][1]
-    # ... and the judge is handed only the head of it, which is reported.
-    kept, skipped, partial = pipeline._budget_for_judge(collected)
-    assert partial == ["big.md"] and skipped == []
-    assert kept["big.md"] == pipeline._PER_FILE_BUDGET
 
 
 def test_a_real_sized_bundle_reaches_the_judge_whole(tmp_path):
-    """The bundle that made us send a skill to review for being big: 135 KB of text
-    over 8 files, biggest single file 52 KB."""
+    """The bundle that made us send a skill to review for being big: 113K characters
+    of text over 7 files, biggest single file 52K."""
     from app.services.skill_audit import pipeline
     main = "---\nname: x\ndescription: d\n---\nbody\n"
     (tmp_path / "SKILL.md").write_text(main)
@@ -331,23 +324,31 @@ def test_a_real_sized_bundle_reaches_the_judge_whole(tmp_path):
     for rel, n in sizes.items():
         (tmp_path / rel).write_text("y" * n, encoding="utf-8")
     collected, unreadable = pipeline._collect_text_files(tmp_path, main)
-    kept, skipped, partial = pipeline._budget_for_judge(collected)
-    assert unreadable == [] and skipped == [] and partial == []
-    assert sorted(kept) == sorted(sizes)
-    assert all(kept[rel] == n for rel, n in sizes.items())
+    chosen, skipped = pipeline._files_for_judge(collected)
+    assert unreadable == [] and skipped == []
+    assert sorted(chosen) == sorted(sizes)          # every file, whole
+
+
+def test_a_file_is_never_handed_over_in_part(tmp_path):
+    """Handing the judge the first N KB and calling it reviewed is worse than saying
+    we did not read it: the part nobody read is where something would be hidden."""
+    from app.services.skill_audit import pipeline
+    files = [("huge.md", "z" * (pipeline._EXTRA_TEXT_BUDGET + 1))]
+    chosen, skipped = pipeline._files_for_judge(files)
+    assert chosen == [] and skipped == ["huge.md"]
 
 
 def test_the_budget_still_has_an_end_and_says_so(tmp_path):
     from app.services.skill_audit import pipeline
     main = "---\nname: x\ndescription: d\n---\nbody\n"
     (tmp_path / "SKILL.md").write_text(main)
-    per = pipeline._PER_FILE_BUDGET
-    for i in range((pipeline._EXTRA_TEXT_BUDGET // per) + 2):
-        (tmp_path / f"f{i:02}.md").write_text("z" * per)
+    chunk = pipeline._EXTRA_TEXT_BUDGET // 2
+    for i in range(4):
+        (tmp_path / f"f{i:02}.md").write_text("z" * chunk)
     collected, _ = pipeline._collect_text_files(tmp_path, main)
-    kept, skipped, partial = pipeline._budget_for_judge(collected)
-    assert skipped                                    # reported, not silent
-    assert sum(kept.values()) <= pipeline._EXTRA_TEXT_BUDGET
+    chosen, skipped = pipeline._files_for_judge(collected)
+    assert skipped                                  # reported, not silent
+    assert len(chosen) == 2
 
 
 def test_a_finding_is_traced_back_to_the_bundled_file_it_came_from():
