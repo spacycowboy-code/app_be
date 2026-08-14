@@ -361,6 +361,12 @@ def cisco_scan(bin_path: str, target_dir: str) -> tuple[list[Finding], bool]:
         # semantic judge remains the arbiter of instruction-layer intent.
         if cat == "prompt_injection" and sev in ("critical", "high"):
             sev = "medium"
+        # A rule we never mapped is a rule whose meaning we do not know, so its
+        # severity is the scanner's opinion about its own taxonomy, not a
+        # statement about our red lines. Showing it as high would claim more than
+        # we can support; it still routes to review as a review signal.
+        if cat == "unclassified" and sev in ("critical", "high"):
+            sev = "medium"
         # The scanner already reports file, line, the offending snippet and its
         # own remediation. Pass them through: without them the report can only
         # name a category, which is not something an author can act on.
@@ -423,11 +429,16 @@ def unreadable_artifact_scan(target_dir: str) -> list[Finding]:
     return findings
 
 
-def artifact_scan(target_dir: str) -> list[Finding]:
-    """Flag shipped executables/scripts as malicious_artifact (medium, non-red-line).
+def bundle_inventory(target_dir: str) -> list[Finding]:
+    """List the scripts the bundle ships, as context for whoever reads the report.
 
-    Fallback used only when the Cisco scanner is unavailable; a cheap extension/
-    shebang heuristic so bundled executables still route to review.
+    A file extension says what a file is, never what it does: almost every skill
+    that does real work ships a script, so treating that as a finding routes every
+    real skill to review and the queue stops carrying information. What the bundle
+    contains is still worth stating plainly — a reviewer should not have to unpack
+    it to find out — so it is recorded unconditionally and decides nothing. The
+    content of these files is judged by the deterministic scans and by the semantic
+    layer, which is handed them verbatim.
     """
 
     findings: list[Finding] = []
@@ -446,7 +457,7 @@ def artifact_scan(target_dir: str) -> list[Finding]:
                 pass
         if reason:
             findings.append(
-                Finding("pipeline", "malicious_artifact", "medium",
+                Finding("pipeline", "bundled_code", "low",
                         file=p.name, detail=reason)
             )
     return findings

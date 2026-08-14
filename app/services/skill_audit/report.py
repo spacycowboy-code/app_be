@@ -34,6 +34,11 @@ CHECKS: tuple[tuple[str, str, str], ...] = (
      "Suspicious or unreviewable code in the bundled files."),
     ("unclassified", "Other findings",
      "Reported by a scanner but outside our categories, so a person decides."),
+    # Not a threat check: what the skill ships. Listed so the report says what is
+    # in the bundle, which is the context a reviewer needs and the author already
+    # knows. It never changes the outcome on its own.
+    ("bundled_code", "Bundled code",
+     "Scripts shipped with the skill, listed so you can see what is in it."),
 )
 
 # What to change, per category. Finite by design: the specificity a reader needs
@@ -51,6 +56,8 @@ _REMEDIATION = {
                           "not nest archives, and leave build output such as "
                           "__pycache__ out of the bundle.",
     "unclassified": "Read the scanner's message below and decide with the reviewer.",
+    "bundled_code": "Nothing to change: shipping scripts is expected. Their content "
+                    "is judged by the checks above.",
     "audit_error": "Nothing to change: one check could not run, so this upload goes "
                    "to review.",
 }
