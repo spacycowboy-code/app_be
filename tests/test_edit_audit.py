@@ -143,3 +143,36 @@ def test_a_judge_outage_does_not_take_a_live_skill_off_the_market(client, monkey
         skill = db.get(RpAiSkill, sid)
         assert skill.status == "approved"               # still published
         assert skill.description == "d"                 # edit not applied
+
+
+def test_a_review_branch_is_cut_from_the_remote_live_ref(monkeypatch, tmp_path):
+    """Merges happen in GitLab and nothing pulls them back into this clone, so a
+    branch cut from the local ref carries "revert everything merged since"."""
+    from app.services import skill_storage as mod
+    from app.services.skill_audit.types import AuditResult
+
+    st = mod.SkillStorage()
+    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
+    monkeypatch.setattr(mod.settings, "skill_repo_push", True, raising=False)
+    calls: list[tuple] = []
+
+    class Done:
+        returncode = 0
+        stderr = ""
+
+    def fake_git(*args, check=True):
+        calls.append(args)
+        return Done()
+
+    monkeypatch.setattr(st, "_git", fake_git)
+    monkeypatch.setattr(st, "_current_sha", lambda: "abc1234", raising=False)
+    monkeypatch.setattr(st, "_push_with_guard", lambda *a, **k: True, raising=False)
+    st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+             instructions="x", artifact_bytes=None, artifact_filename=None,
+             current_version=None, existing_storage_path=None,
+             audit=AuditResult(state="suspect", verdict="flag"),
+             target_branch="skill-audit/s-deadbeef")
+    fetched = [c for c in calls if c[:1] == ("fetch",)]
+    checkout = [c for c in calls if c[:2] == ("checkout", "-B")]
+    assert fetched, "must synchronise before cutting the review branch"
+    assert checkout and checkout[0][3] == "FETCH_HEAD", checkout
