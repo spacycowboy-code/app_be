@@ -683,3 +683,90 @@ def test_the_inventory_is_recorded_whichever_scanner_ran(tmp_path, monkeypatch):
     inventory = [f for f in result.findings if f.category == "bundled_code"]
     assert [f.file for f in inventory] == ["x.py"]
     assert result.state == "pass"          # context, never a gate
+
+
+# --- the prompt is not a command-line argument --------------------------------
+
+def test_the_prompt_goes_on_stdin_not_in_argv(monkeypatch):
+    """A command-line argument is capped by the kernel at 128 KB per string, which
+    put a ceiling on how much of a skill could be judged that had nothing to do with
+    the model. Past the cap execve fails with E2BIG."""
+    from app.services.skill_audit import judge
+
+    seen = {}
+
+    class Done:
+        stdout = '{"verdict": "pass", "findings": []}'
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        seen["input"] = kw.get("input")
+        return Done()
+
+    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    judge.run_judge(rules="RULES", skill_text="SKILL", kiro_bin="kiro-cli",
+                    model="m", work_dir="/tmp", timeout=10)
+    assert "RULES" in seen["input"] and "SKILL" in seen["input"]
+    assert not any("RULES" in part for part in seen["cmd"])
+
+
+def test_an_exec_failure_fails_closed_instead_of_raising(monkeypatch):
+    """E2BIG and friends are OSError, which used to escape and surface as HTTP 500."""
+    from app.services.skill_audit import judge
+
+    def fake_run(cmd, **kw):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(judge.subprocess, "run", fake_run)
+    result = judge.run_judge(rules="R", skill_text="S", kiro_bin="kiro-cli",
+                             model="m", work_dir="/tmp", timeout=10)
+    assert result.verdict == "error" and not result.schema_ok
+
+
+# --- an upload is unpacked within limits or not at all ------------------------
+
+def _bomb(members: int = 1, size: int = 1024) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("SKILL.md", "---\nname: T\ndescription: d\n---\nbody\n")
+        for i in range(members):
+            zf.writestr(f"pad{i:04}.bin", b"\0" * size)
+    return buf.getvalue()
+
+
+def test_a_bundle_that_unpacks_past_the_limit_is_refused(tmp_path, monkeypatch):
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import BundleTooLarge
+
+    monkeypatch.setattr(pipeline, "_MAX_BUNDLE_BYTES", 64 * 1024)
+    data = _bomb(members=4, size=64 * 1024)          # 256 KB unpacked, 4 KB zipped
+    try:
+        pipeline._materialize(tmp_path, "---\nname: T\n---\n", data, "b.zip")
+    except BundleTooLarge as exc:
+        assert "MB" in str(exc) or "上限" in str(exc)
+    else:
+        raise AssertionError("an over-limit bundle must not be unpacked")
+
+
+def test_a_bundle_with_too_many_members_is_refused(tmp_path, monkeypatch):
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import BundleTooLarge
+
+    monkeypatch.setattr(pipeline, "_MAX_BUNDLE_MEMBERS", 5)
+    try:
+        pipeline._materialize(tmp_path, "---\nname: T\n---\n", _bomb(members=20), "b.zip")
+    except BundleTooLarge:
+        pass
+    else:
+        raise AssertionError("a bundle with too many members must not be unpacked")
+
+
+def test_a_normal_bundle_still_unpacks(tmp_path):
+    from app.services.skill_audit import pipeline
+
+    pipeline._materialize(tmp_path, "---\nname: T\n---\n", _bomb(members=3), "b.zip")
+    assert (tmp_path / "pad0000.bin").is_file()
+    assert (tmp_path / "SKILL.md").is_file()

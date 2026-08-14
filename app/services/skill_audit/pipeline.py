@@ -22,7 +22,7 @@ from app.config import get_settings
 from app.models.audit import RED_LINE_CATEGORIES
 from app.services.skill_audit import scanners
 from app.services.skill_audit.judge import invoke_judge
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.skill_audit.types import AuditResult, BundleTooLarge, Finding
 
 log = logging.getLogger("skill_audit")
 
@@ -71,15 +71,30 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
         return
     if zipfile.is_zipfile(io.BytesIO(artifact_bytes)):
         with zipfile.ZipFile(io.BytesIO(artifact_bytes)) as zf:
-            for member in zf.namelist():
-                dest = (work / member).resolve()
+            members = zf.infolist()
+            if len(members) > _MAX_BUNDLE_MEMBERS:
+                raise BundleTooLarge(
+                    f"技能包内文件数 {len(members)} 超过上限 {_MAX_BUNDLE_MEMBERS}。")
+            written = 0
+            for member in members:
+                dest = (work / member.filename).resolve()
                 if not str(dest).startswith(str(work.resolve())):
                     continue  # zip-slip guard
-                if member.endswith("/"):
+                if member.filename.endswith("/"):
                     dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(zf.read(member))
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Copy in chunks against a running total rather than trusting the
+                # declared size: a zip header can claim anything, and the number
+                # that matters is what reaches the disk.
+                with zf.open(member) as src, open(dest, "wb") as out:
+                    while chunk := src.read(64 * 1024):
+                        written += len(chunk)
+                        if written > _MAX_BUNDLE_BYTES:
+                            raise BundleTooLarge(
+                                f"技能包解压后超过上限 "
+                                f"{_MAX_BUNDLE_BYTES // (1024 * 1024)} MB。")
+                        out.write(chunk)
     else:
         # A plain .md upload *is* the definition. Writing it a second time under
         # its own name would audit the same text twice, so every finding would
@@ -104,13 +119,19 @@ _TEXT_EXT = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
 # character (CJK; ASCII is three to four times better). The largest bundle we have
 # audited holds 113K characters of text, so this leaves room to spare.
 #
-# A bound still has to exist — an unbounded prompt fails as an opaque model error
-# instead of an honest "we could not read all of it" — and whatever does not fit is
-# reported rather than silently dropped. There is deliberately no per-file cap:
-# handing the judge the first N KB of a file and calling it reviewed is worse than
-# saying we did not read it, because the part nobody read is where something would
-# be hidden.
-_EXTRA_TEXT_BUDGET = 256 * 1024
+# A bound still has to exist so a pathological bundle cannot be shipped to the
+# model as a prompt it will refuse, and whatever does not fit is reported rather
+# than silently dropped. There is deliberately no per-file cap: handing the judge
+# the first N KB of a file and calling it reviewed is worse than saying we did not
+# read it, because the part nobody read is where something would be hidden.
+_EXTRA_TEXT_BUDGET = 500 * 1024
+# What an uploaded bundle may unpack to. Nothing here judges content: it stops a
+# highly compressed archive from filling the deploy host's disk before any check
+# runs. Sized off what real skills ship — the largest bundle audited unpacks to a
+# few hundred KB, and the file-count record is 63 — so these are three orders of
+# magnitude of headroom, and a bundle past them is a mistake, not a skill.
+_MAX_BUNDLE_BYTES = 50 * 1024 * 1024
+_MAX_BUNDLE_MEMBERS = 2000
 
 
 def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str]], list[str]]:

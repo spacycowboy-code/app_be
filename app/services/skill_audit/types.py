@@ -51,3 +51,10 @@ class AuditResult:
     @property
     def is_danger(self) -> bool:
         return self.state == "danger"
+
+class BundleTooLarge(Exception):
+    """The upload cannot be unpacked within the limits, so it is not audited.
+
+    Not a verdict about the content: nothing was examined. The uploader has to ship
+    a smaller bundle, and there is nothing for a reviewer to decide.
+    """
