@@ -285,19 +285,69 @@ def test_bundled_text_files_are_collected_for_review(tmp_path):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run.py").write_text("print(1)")     # code: static layer
     (tmp_path / "logo.png").write_bytes(b"\x89PNG")              # binary: not text
-    collected, left_out = _collect_text_files(tmp_path, main)
-    names = sorted(n for n, _ in collected)
-    assert names == ["mcp.json", "reference/notes.md"]
-    assert left_out == []
+    collected, unreadable = _collect_text_files(tmp_path, main)
+    assert unreadable == []
+    # Prose before data, so a budget that runs out costs the least instruction-like
+    # file rather than whichever one sorts first.
+    assert [n for n, _ in collected] == ["reference/notes.md", "mcp.json"]
 
 
-def test_oversized_bundled_text_is_reported_not_ignored(tmp_path):
+def test_the_deterministic_scans_read_a_file_the_judge_only_sees_in_part(tmp_path):
+    """The budget is the model's context limit, not the scanners'. A secret past the
+    per-file cap must still be found: those scans are local and have no reason to
+    stop reading."""
     from app.services.skill_audit import pipeline
     main = "---\nname: x\ndescription: d\n---\nbody\n"
     (tmp_path / "SKILL.md").write_text(main)
-    (tmp_path / "big.md").write_text("x" * (pipeline._EXTRA_TEXT_BUDGET + 1))
-    collected, left_out = pipeline._collect_text_files(tmp_path, main)
-    assert collected == [] and left_out == ["big.md"]
+    tail = "\u200bhidden-instruction-after-the-cap"
+    (tmp_path / "big.md").write_text("a" * (pipeline._PER_FILE_BUDGET + 10) + tail)
+    collected, unreadable = pipeline._collect_text_files(tmp_path, main)
+    # Collected in full ...
+    assert len(collected[0][1]) > pipeline._PER_FILE_BUDGET
+    assert tail in collected[0][1]
+    # ... and the judge is handed only the head of it, which is reported.
+    kept, skipped, partial = pipeline._budget_for_judge(collected)
+    assert partial == ["big.md"] and skipped == []
+    assert kept["big.md"] == pipeline._PER_FILE_BUDGET
+
+
+def test_a_real_sized_bundle_reaches_the_judge_whole(tmp_path):
+    """The bundle that made us send a skill to review for being big: 135 KB of text
+    over 8 files, biggest single file 52 KB."""
+    from app.services.skill_audit import pipeline
+    main = "---\nname: x\ndescription: d\n---\nbody\n"
+    (tmp_path / "SKILL.md").write_text(main)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "references").mkdir()
+    sizes = {
+        "scripts/README.md": 52_044,
+        "scripts/api_endpoints.json": 31_825,
+        "references/pri-interfaces.md": 10_820,
+        "scripts/使用说明.md": 10_553,
+        "references/piweb-interfaces.md": 9_344,
+        "references/troubleshooting.md": 8_209,
+        "scripts/config.json": 2_728,
+    }
+    for rel, n in sizes.items():
+        (tmp_path / rel).write_text("y" * n, encoding="utf-8")
+    collected, unreadable = pipeline._collect_text_files(tmp_path, main)
+    kept, skipped, partial = pipeline._budget_for_judge(collected)
+    assert unreadable == [] and skipped == [] and partial == []
+    assert sorted(kept) == sorted(sizes)
+    assert all(kept[rel] == n for rel, n in sizes.items())
+
+
+def test_the_budget_still_has_an_end_and_says_so(tmp_path):
+    from app.services.skill_audit import pipeline
+    main = "---\nname: x\ndescription: d\n---\nbody\n"
+    (tmp_path / "SKILL.md").write_text(main)
+    per = pipeline._PER_FILE_BUDGET
+    for i in range((pipeline._EXTRA_TEXT_BUDGET // per) + 2):
+        (tmp_path / f"f{i:02}.md").write_text("z" * per)
+    collected, _ = pipeline._collect_text_files(tmp_path, main)
+    kept, skipped, partial = pipeline._budget_for_judge(collected)
+    assert skipped                                    # reported, not silent
+    assert sum(kept.values()) <= pipeline._EXTRA_TEXT_BUDGET
 
 
 def test_a_finding_is_traced_back_to_the_bundled_file_it_came_from():
@@ -485,6 +535,104 @@ def test_judge_inventing_evidence_still_degrades():
     assert len(result.findings) == 1
     assert result.grounded is False
 
+
+# --- the audit is attached to the write, not to a route ----------------------
+
+def test_store_cannot_be_called_without_an_audit_outcome():
+    """The signature is the enforcement: a new write path cannot forget the gate."""
+    import inspect
+
+    from app.services.skill_storage import SkillStorage
+
+    sig = inspect.signature(SkillStorage.store)
+    assert sig.parameters["audit"].default is inspect.Parameter.empty
+
+
+def test_store_refuses_content_the_audit_rejected(tmp_path, monkeypatch):
+    from app.services import skill_storage as mod
+    from app.services.skill_audit.types import AuditResult
+
+    st = mod.SkillStorage()
+    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
+    try:
+        st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+                 instructions="x", artifact_bytes=None, artifact_filename=None,
+                 current_version=None, existing_storage_path=None,
+                 audit=AuditResult(state="danger", verdict="block"))
+    except ValueError as exc:
+        assert "rejected" in str(exc)
+    else:
+        raise AssertionError("a danger verdict must not be writable")
+
+
+def test_store_refuses_to_put_unreviewed_content_on_the_live_branch(tmp_path, monkeypatch):
+    from app.services import skill_storage as mod
+    from app.services.skill_audit.types import AuditResult
+
+    st = mod.SkillStorage()
+    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
+    try:
+        st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+                 instructions="x", artifact_bytes=None, artifact_filename=None,
+                 current_version=None, existing_storage_path=None,
+                 audit=AuditResult(state="suspect", verdict="flag"),
+                 target_branch=None)          # no review branch -> would land live
+    except ValueError as exc:
+        assert "review branch" in str(exc)
+    else:
+        raise AssertionError("suspect content must not land on the live branch")
+
+
+def test_a_review_gets_its_own_branch_per_audit_not_per_skill():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    a = gate.decide(audit=AuditResult(state="suspect", verdict="flag"), skill_id="x")
+    b = gate.decide(audit=AuditResult(state="suspect", verdict="flag"), skill_id="x")
+    assert a.review_branch and b.review_branch and a.review_branch != b.review_branch
+    assert a.status == "pending" and a.needs_review and not a.blocked
+
+
+def test_a_pass_is_published_and_a_danger_is_blocked():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    ok = gate.decide(audit=AuditResult(state="pass", verdict="pass"), skill_id="x")
+    no = gate.decide(audit=AuditResult(state="danger", verdict="block"), skill_id="x")
+    assert ok.status == "approved" and ok.review_branch is None and not ok.blocked
+    assert no.blocked and no.status == "pending"
+
+
+# --- an audit that could not run must not change what is already published ----
+
+def test_an_unusable_verdict_over_live_content_asks_for_a_retry():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    d = gate.decide(audit=AuditResult(state="suspect", verdict="error"),
+                    skill_id="x", replaces_published=True)
+    assert d.unavailable
+
+
+def test_an_unusable_verdict_with_nothing_live_still_fails_closed():
+    """Nothing is published yet, so failing closed costs the submitter a review and
+    nobody else anything: that is the right trade and stays as it was."""
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    d = gate.decide(audit=AuditResult(state="suspect", verdict="error"),
+                    skill_id="x", replaces_published=False)
+    assert not d.unavailable and d.needs_review and d.status == "pending"
+
+
+def test_a_usable_verdict_is_never_treated_as_unavailable():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    for verdict, state in (("pass", "pass"), ("flag", "suspect"), ("block", "danger")):
+        d = gate.decide(audit=AuditResult(state=state, verdict=verdict),
+                        skill_id="x", replaces_published=True)
+        assert not d.unavailable
 
 def test_a_rejection_resting_on_invented_evidence_goes_to_review(monkeypatch):
     """The judge's self-check flagged invented evidence but nothing acted on it, so a

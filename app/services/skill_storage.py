@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
+from app.services.skill_audit.types import AuditResult
 
 settings = get_settings()
 
@@ -134,10 +135,18 @@ class SkillStorage:
         artifact_filename: str | None,
         current_version: str | None,
         existing_storage_path: str | None,
+        audit: AuditResult,
         action: str = "upload",
         target_branch: str | None = None,
     ) -> StoreResult:
         """Write/refresh a skill folder, bump version, commit, tag and push.
+
+        ``audit`` is required, and required by design: this is the only way
+        content reaches the skill repo, so asking for the audit outcome here
+        means a caller cannot write unaudited content — including a route added
+        later, which is how the edit path came to bypass the check in the first
+        place. The two rules the outcome implies are enforced rather than trusted
+        to every call site.
 
         When ``target_branch`` is set (and differs from the live branch), the
         commit is placed on that branch and pushed there — used for 可疑(suspect)
@@ -145,6 +154,16 @@ class SkillStorage:
         """
         # Suspect content goes on its own branch off live, never on live.
         on_branch = bool(target_branch and target_branch != settings.skill_repo_branch)
+        if audit.state == "danger":
+            raise ValueError(
+                "refusing to write content the audit rejected "
+                f"(skill_id={skill_id!r})"
+            )
+        if audit.state == "suspect" and not on_branch:
+            raise ValueError(
+                "content awaiting review must be written to a review branch, "
+                f"not to {settings.skill_repo_branch!r} (skill_id={skill_id!r})"
+            )
         if on_branch:
             self._git("checkout", "-B", target_branch, settings.skill_repo_branch, check=False)
 

@@ -36,6 +36,9 @@ from app.services.skill_manifest import (
     render_skill_md,
 )
 from app.services.skill_storage import sanitize_segment, skill_storage
+from app.services import gitlab_mr
+from app.services.skill_audit import audit_skill, AuditResult, gate
+from fastapi.concurrency import run_in_threadpool
 from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
 
@@ -327,7 +330,7 @@ def create_skill(payload: SkillCreate, db: Session = Depends(get_db)) -> RpAiSki
 
 
 @router.put("/{skill_id}", response_model=SkillRead)
-def update_skill(
+async def update_skill(
     skill_id: str, payload: SkillUpdate, db: Session = Depends(get_db)
 ) -> RpAiSkill:
     skill = _get_skill_or_404(db, skill_id)
@@ -368,6 +371,46 @@ def update_skill(
 
     db.flush()  # make edited fields/children visible for manifest building
 
+    # The same audit as an upload, on the same content, before anything is
+    # written. This route used to write straight to the skill repo: the audit was
+    # attached to the upload route instead of to the act of writing, so editing a
+    # skill was a way to put unaudited content in the repo.
+    editor = payload.editor_eid or skill.uploader_eid
+    audit: AuditResult = await run_in_threadpool(
+        lambda: audit_skill(
+            name=skill.name,
+            skill_md=md_content,
+            uploader_eid=editor,
+        )
+    )
+    decision = gate.decide(audit=audit, skill_id=skill.id,
+                           replaces_published=skill.status == "approved")
+
+    if decision.unavailable:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "安全审计暂时不可用，本次编辑未保存，请稍后重试。",
+        )
+
+    if decision.blocked:
+        # Nothing is written and the edit itself is discarded, but the record of
+        # the rejection is kept: "why was this refused" has to be answerable.
+        #
+        # The record is deliberately not linked to the skill. The projection takes
+        # the skill's displayed verdict from its latest linked record, so linking a
+        # rejected *edit* would mark a live skill as dangerous while what is
+        # published is still the older content that passed. A rejected edit says
+        # nothing about the published content; the skill name keeps it traceable.
+        db.rollback()
+        gate.record(db, decision.ref, audit, skill_id=None,
+                    skill_name=skill.name, uploader_eid=editor)
+        db.commit()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"编辑被安全审计拒绝：命中安全红线。参考编号 {decision.ref}",
+        )
+
     # Persist the edit into the git-managed skill repo: refresh the folder
     # files, bump the version, commit, tag and push (same flow as upload).
     owner_eid = skill.uploader_eid or "ericsson"
@@ -383,11 +426,18 @@ def update_skill(
         artifact_filename=None,
         current_version=skill.version,
         existing_storage_path=skill.storage_path,
+        audit=audit,
         action="edit",
+        target_branch=decision.review_branch,
     )
     skill.version = result.version
     skill.storage_path = result.storage_path
     skill.repo_commit = result.commit_sha
+    # An edit that needs review takes the skill out of the market until the review
+    # MR is merged. The reviewed-and-published content is whatever is on the live
+    # branch; this edit is not it yet.
+    skill.status = decision.status
+    skill.audit_state = audit.state
 
     db.add(
         RpAiSkillVersion(
@@ -399,6 +449,22 @@ def update_skill(
             notes="Edited via portal",
         )
     )
+
+    # A review is a person reading a change, so the change has to be somewhere
+    # they can read it: same Draft MR as an upload takes.
+    mr_url = None
+    if decision.needs_review:
+        mr_url = await run_in_threadpool(
+            lambda: gitlab_mr.review_suspect(
+                source_branch=decision.review_branch,
+                target_branch=settings.skill_repo_branch,
+                skill_name=skill.name,
+                findings=audit.findings,
+                audit_ref=decision.ref,
+            )
+        )
+    gate.record(db, decision.ref, audit, skill_id=skill.id,
+                skill_name=skill.name, uploader_eid=editor, mr_url=mr_url)
 
     # Notify users who favorited this skill about the new version.
     notify_version_update(db, skill, result.version, actor_eid=payload.editor_eid)

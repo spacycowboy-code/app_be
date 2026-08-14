@@ -33,16 +33,45 @@ class InputParamSchema(CamelModel):
 
 # --- skill schemas ---------------------------------------------------------
 class SkillBase(CamelModel):
+    """What the author of a skill provides.
+
+    Deliberately does not carry the fields the server derives — rating, downloads,
+    review counts, trending, lifecycle status, version, resolved names. They used
+    to live here, and because this model is also the input model, a client could
+    set its own skill to ``approved`` or write its own rating and download count.
+    A field belongs on the input surface only if the person submitting the skill
+    is the one who decides it.
+    """
+
     name: str
     description: str | None = None
     category: str | None = None
     category_id: str | None = None
     image: str | None = None
+    is_free: bool = True
+    tags: list[str] = Field(default_factory=list)
+    capability_full: str | None = None
+    example_prompt: str | None = None
+    example_output: str | None = None
+    instructions: str | None = None
+
+    @field_validator("tags", mode="before")
+    @classmethod
+    def _coerce_tags(cls, v: object) -> object:
+        return v if v is not None else []
+
+
+class SkillDerived(CamelModel):
+    """What the server decides. Read-only from the API's point of view.
+
+    ``status`` is written by exactly three places: the upload gate (from the audit
+    outcome), the official import (auto-approved), and the reconciler (from the
+    review MR's state). None of them is the client.
+    """
+
     rating: float = 0.0
     downloads: str = "0"
     is_trending: bool = False
-    is_free: bool = True
-    tags: list[str] = Field(default_factory=list)
     version: str | None = None
     author: str | None = None
     uploader_eid: str | None = None
@@ -50,18 +79,13 @@ class SkillBase(CamelModel):
     uploader_name: str | None = None
     # Name to show as the creator (person's display name, or imported label).
     creator_label: str | None = None
-    capability_full: str | None = None
     rating_dist: list[int] | None = None
     review_count: int = 0
-    example_prompt: str | None = None
-    example_output: str | None = None
-    instructions: str | None = None
     status: SkillStatus = "pending"
-
-    @field_validator("tags", mode="before")
-    @classmethod
-    def _coerce_tags(cls, v: object) -> object:
-        return v if v is not None else []
+    # Why a skill is not public yet: pass | suspect | danger. Without it an admin
+    # sees "pending" and cannot tell whether it is waiting on a review or on
+    # something else.
+    audit_state: str | None = None
 
 
 class SkillCreate(SkillBase):
@@ -73,25 +97,24 @@ class SkillCreate(SkillBase):
 
 
 class SkillUpdate(CamelModel):
+    """The editable surface. Same rule as SkillBase: only what the author decides.
+
+    Extra keys are ignored rather than rejected, so a client that still posts the
+    whole skill object (rating, downloads, status) keeps working — those values
+    are simply not writable any more.
+    """
+
     name: str | None = None
     description: str | None = None
     category: str | None = None
     category_id: str | None = None
     image: str | None = None
-    rating: float | None = None
-    downloads: str | None = None
-    is_trending: bool | None = None
     is_free: bool | None = None
     tags: list[str] | None = None
-    version: str | None = None
-    author: str | None = None
     capability_full: str | None = None
-    rating_dist: list[int] | None = None
-    review_count: int | None = None
     example_prompt: str | None = None
     example_output: str | None = None
     instructions: str | None = None
-    status: SkillStatus | None = None
     cases: list[SkillCaseSchema] | None = None
     sub_skills: list[SubSkillSchema] | None = None
     input_params: list[InputParamSchema] | None = None
@@ -102,7 +125,7 @@ class SkillUpdate(CamelModel):
     skill_md: str | None = None
 
 
-class SkillRead(SkillBase):
+class SkillRead(SkillBase, SkillDerived):
     id: str
     cases: list[SkillCaseSchema] = Field(default_factory=list)
     sub_skills: list[SubSkillSchema] = Field(default_factory=list)
@@ -140,5 +163,7 @@ class SkillSummary(CamelModel):
     creator_label: str | None = None
     favorite_count: int = 0
     status: SkillStatus = "pending"
+    # Why it is not public yet, for whoever has to act on the queue.
+    audit_state: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
