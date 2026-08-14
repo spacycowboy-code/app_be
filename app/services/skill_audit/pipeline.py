@@ -113,14 +113,16 @@ _PER_FILE_BUDGET = 64 * 1024
 _INSTRUCTION_EXT = {".md", ".txt", ".rst"}
 
 
-def _collect_text_files(
-    work: Path, main_text: str
-) -> tuple[list[tuple[str, str]], list[str], list[str]]:
-    """Bundled text files worth reviewing, the ones left out, the ones truncated."""
+def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str]], list[str]]:
+    """Every readable bundled text file in full, plus the ones we could not decode.
+
+    No budget here on purpose. The deterministic scans (hidden characters, plaintext
+    secrets) are local and cheap, so they read everything; the budget belongs to the
+    one layer that has a context limit, and applying it here would mean a secret past
+    the first N KB of a file went unseen by a scanner that had no reason to stop.
+    """
     collected: list[tuple[str, str]] = []
-    left_out: list[str] = []
-    truncated: list[str] = []
-    total = 0
+    unreadable: list[str] = []
     candidates = sorted(
         (p for p in work.rglob("*") if p.is_file() and p.suffix.lower() in _TEXT_EXT),
         key=lambda p: (p.suffix.lower() not in _INSTRUCTION_EXT, str(p)),
@@ -130,24 +132,40 @@ def _collect_text_files(
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            left_out.append(rel)
+            unreadable.append(rel)
             continue
         if rel == "SKILL.md" or text == main_text:
             continue                        # already the main input
         if not text.strip():
             continue
-        # One large data file must not crowd out everything else in the bundle.
-        # Cutting it is reported, not silent: the part nobody read is exactly
-        # where something would be hidden.
-        if len(text) > _PER_FILE_BUDGET:
-            text = text[:_PER_FILE_BUDGET]
-            truncated.append(rel)
-        if total + len(text) > _EXTRA_TEXT_BUDGET:
-            left_out.append(rel)
-            continue
-        total += len(text)
         collected.append((rel, text))
-    return collected, left_out, truncated
+    return collected, unreadable
+
+
+def _budget_for_judge(files: list[tuple[str, str]]) -> tuple[dict[str, int], list[str], list[str]]:
+    """How much of each file the semantic layer gets.
+
+    Per-file cap first, so one large data file cannot crowd out the rest of the
+    bundle, then the total. Returns the number of characters kept per file, the
+    files it never sees, and the files it sees only in part — the last two are
+    reported as findings, because the part nobody read is where something would be
+    hidden.
+    """
+    kept: dict[str, int] = {}
+    skipped: list[str] = []
+    partial: list[str] = []
+    total = 0
+    for rel, text in files:
+        take = min(len(text), _PER_FILE_BUDGET)
+        if total + take > _EXTRA_TEXT_BUDGET:
+            skipped.append(rel)
+            kept[rel] = 0
+            continue
+        if take < len(text):
+            partial.append(rel)
+        kept[rel] = take
+        total += take
+    return kept, skipped, partial
 
 
 def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str | None, int | None]:
@@ -250,15 +268,20 @@ def audit_skill(
 
         # Everything the agent could be told to read goes to the semantic layer,
         # not just SKILL.md, with each file's secrets masked first.
-        extras, left_out, truncated = _collect_text_files(work, skill_md)
+        extras, unreadable_text = _collect_text_files(work, skill_md)
+        kept, skipped, partial = _budget_for_judge(extras)
+        left_out = unreadable_text + skipped
         segments: list[tuple[str, str]] = [("SKILL.md", redacted)]
         judge_input = redacted
         for rel, text in extras:
+            # Deterministic scans read the whole file; only the prompt is budgeted.
             findings += scanners.hidden_char_scan(text, file=rel)
             red_text, secret_finds = scanners.redact_secrets(text, file=rel)
             findings += secret_finds
             segments.append((rel, red_text))
-            judge_input += f"\n\n----- bundled file: {rel} -----\n{red_text}"
+            take = kept.get(rel, 0)
+            if take:
+                judge_input += f"\n\n----- bundled file: {rel} -----\n{red_text[:take]}"
         if left_out:
             findings.append(Finding(
                 "pipeline", "unclassified", "medium",
@@ -267,10 +290,10 @@ def audit_skill(
                        "(too large or not readable as text), so this upload goes to "
                        "review.",
             ))
-        if truncated:
+        if partial:
             findings.append(Finding(
                 "pipeline", "unclassified", "medium",
-                file=", ".join(truncated)[:400],
+                file=", ".join(partial)[:400],
                 detail="These bundled files were only reviewed up to their first "
                        f"{_PER_FILE_BUDGET // 1024} KB, so the rest has not been "
                        "read by anyone and this upload goes to review.",
