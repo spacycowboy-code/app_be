@@ -264,7 +264,17 @@ async def upload_skill(
     owner_eid = existing.uploader_eid if existing else eid
 
     # Suspect skills are committed to a dedicated review branch, not live.
-    decision = gate.decide(audit=audit, skill_id=resolved_id, ref=audit_ref)
+    decision = gate.decide(
+        audit=audit, skill_id=resolved_id, ref=audit_ref,
+        # A new version of a skill that is already published is subject to the
+        # same rule: an audit that could not run must not unpublish it.
+        replaces_published=bool(existing and existing.status == "approved"),
+    )
+    if decision.unavailable:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "安全审计暂时不可用，本次上传未保存，请稍后重试。",
+        )
     suspect = decision.needs_review
     review_branch = decision.review_branch
 

@@ -136,7 +136,7 @@ def test_a_judge_outage_does_not_take_a_live_skill_off_the_market(client, monkey
                         lambda **kw: AuditResult(state="suspect", verdict="error"))
 
     r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
-    assert r.status_code == 503
+    assert r.status_code == 503, r.text
     assert len(calls) == writes_before                  # nothing written
 
     with SessionLocal() as db:

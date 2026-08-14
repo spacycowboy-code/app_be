@@ -560,3 +560,35 @@ def test_a_pass_is_published_and_a_danger_is_blocked():
     no = gate.decide(audit=AuditResult(state="danger", verdict="block"), skill_id="x")
     assert ok.status == "approved" and ok.review_branch is None and not ok.blocked
     assert no.blocked and no.status == "pending"
+
+
+# --- an audit that could not run must not change what is already published ----
+
+def test_an_unusable_verdict_over_live_content_asks_for_a_retry():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    d = gate.decide(audit=AuditResult(state="suspect", verdict="error"),
+                    skill_id="x", replaces_published=True)
+    assert d.unavailable
+
+
+def test_an_unusable_verdict_with_nothing_live_still_fails_closed():
+    """Nothing is published yet, so failing closed costs the submitter a review and
+    nobody else anything: that is the right trade and stays as it was."""
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    d = gate.decide(audit=AuditResult(state="suspect", verdict="error"),
+                    skill_id="x", replaces_published=False)
+    assert not d.unavailable and d.needs_review and d.status == "pending"
+
+
+def test_a_usable_verdict_is_never_treated_as_unavailable():
+    from app.services.skill_audit import gate
+    from app.services.skill_audit.types import AuditResult
+
+    for verdict, state in (("pass", "pass"), ("flag", "suspect"), ("block", "danger")):
+        d = gate.decide(audit=AuditResult(state=state, verdict=verdict),
+                        skill_id="x", replaces_published=True)
+        assert not d.unavailable

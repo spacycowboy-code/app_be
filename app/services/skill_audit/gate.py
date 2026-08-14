@@ -14,6 +14,12 @@ What each outcome means:
               stays ``pending`` until a reviewer merges the MR. Content that has
               not been reviewed is not content that is published.
 * ``pass``    written live.
+
+And one rule that is not about the content at all: an audit that could not run
+cannot change what is already published. Failing closed is right when nothing is
+live yet — the cost lands on the person submitting. When something *is* live, the
+same reflex takes a working skill off the market because a service was down, and
+the cost lands on everyone using it. That is a worse outcome than waiting.
 """
 from __future__ import annotations
 
@@ -33,10 +39,23 @@ class WriteDecision:
     audit: AuditResult
     ref: str                       # shown to the author; keys the audit record
     review_branch: str | None      # set when the content must not land live
+    # Whether this write would replace content that is already published.
+    replaces_published: bool = False
 
     @property
     def blocked(self) -> bool:
         return self.audit.state == "danger"
+
+    @property
+    def unavailable(self) -> bool:
+        """The audit could not be established, over content that is already live.
+
+        The caller must change nothing and ask for a retry. Anywhere else an
+        unusable verdict routes to review, which fails closed at the submitter's
+        expense; here it would fail closed at the expense of every user of a skill
+        that was fine a minute ago.
+        """
+        return self.audit.verdict == "error" and self.replaces_published
 
     @property
     def needs_review(self) -> bool:
@@ -49,14 +68,15 @@ class WriteDecision:
 
 
 def decide(*, audit: AuditResult, skill_id: str | None = None,
-           ref: str | None = None) -> WriteDecision:
+           ref: str | None = None, replaces_published: bool = False) -> WriteDecision:
     ref = ref or uuid.uuid4().hex
     branch = None
     if audit.state == "suspect":
         # One branch per audit, not per skill: two reviews of the same skill are
         # two different pieces of content and must not overwrite each other.
         branch = f"skill-audit/{skill_id or 'new'}-{ref[:8]}"
-    return WriteDecision(audit=audit, ref=ref, review_branch=branch)
+    return WriteDecision(audit=audit, ref=ref, review_branch=branch,
+                         replaces_published=replaces_published)
 
 
 def record(
