@@ -307,6 +307,26 @@ def audit_skill(
                            f"({settings.audit_kiro_model} rejected it, "
                            f"{confirm_model} did not), so it goes to review.",
                 ))
+        # An outcome has to be supported by evidence that is actually in the text we
+        # audited. The judge self-check already marks a finding whose quoted span
+        # cannot be found (invented evidence), but nothing acted on it, so a
+        # rejection could rest on a quotation that does not exist. Same treatment as
+        # two judges disagreeing: the severe outcome is not established, and what is
+        # not established costs review time rather than the author's upload.
+        if not judge.grounded and judge.verdict == "block":
+            log.info("judge quoted evidence not present in the audited text - "
+                     "routing to review instead of rejecting")
+            judge.verdict = "flag"
+            for f in judge.findings:
+                if f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high"):
+                    f.severity = "medium"
+            judge.findings.append(Finding(
+                "pipeline", "unclassified", "medium",
+                detail="The semantic judge quoted evidence that is not present in "
+                       "the audited text, so its rejection could not be confirmed "
+                       "and this upload goes to review.",
+            ))
+
         # Locate every judge finding in the text it was given. Done here, not in
         # the judge, so it holds whether the judge ran locally or over HTTP.
         for f in judge.findings:

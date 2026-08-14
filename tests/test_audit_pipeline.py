@@ -484,3 +484,28 @@ def test_judge_inventing_evidence_still_degrades():
     result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
     assert len(result.findings) == 1
     assert result.grounded is False
+
+
+def test_a_rejection_resting_on_invented_evidence_goes_to_review(monkeypatch):
+    """The judge's self-check flagged invented evidence but nothing acted on it, so a
+    rejection could rest on a quotation that is not in the text."""
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import JudgeResult
+
+    def fake_judge(**kw):
+        return JudgeResult(
+            verdict="block",
+            findings=[Finding("judge", "dangerous_instruction", "critical",
+                              "rm -rf / --no-preserve-root", "destroys the disk")],
+            grounded=False,          # that span is not in the skill text
+        )
+
+    monkeypatch.setattr(pipeline, "invoke_judge", fake_judge)
+    result = pipeline.audit_skill(
+        name="T", skill_md="---\nname: T\ndescription: d\n---\nharmless\n",
+        use_cache=False,
+    )
+    assert result.state == "suspect"          # not danger
+    assert result.verdict == "flag"
+    assert any("not present in the audited text" in (f.detail or "")
+               for f in result.findings)
