@@ -383,6 +383,19 @@ async def update_skill(
             uploader_eid=editor,
         )
     )
+    if audit.verdict == "error":
+        # The judge could not be reached or could not be parsed. On an upload,
+        # failing closed costs the uploader a review; here it would cost everyone
+        # else the skill: the edit would land on a review branch and the skill
+        # would leave the market until someone merged it — because a typo was
+        # fixed while a service was down. Nothing is written and nothing is
+        # demoted; the author retries.
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "安全审计暂时不可用，本次编辑未保存，请稍后重试。",
+        )
+
     decision = gate.decide(audit=audit, skill_id=skill.id)
 
     if decision.blocked:

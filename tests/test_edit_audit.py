@@ -123,3 +123,23 @@ def test_editing_metadata_without_touching_the_content_is_still_audited(
     r = client.put(f"/api/skills/{sid}", json={"description": "new description"})
     assert r.status_code == 200, r.text
     assert len(seen) == 1
+
+
+def test_a_judge_outage_does_not_take_a_live_skill_off_the_market(client, monkeypatch):
+    """Failing closed on an edit would punish everyone but the editor: the skill
+    would leave the market because a service was down while someone fixed a typo."""
+    calls: list = []
+    _stub_store(monkeypatch, calls)
+    sid = _create_skill(client, monkeypatch)
+    writes_before = len(calls)
+    monkeypatch.setattr(skills_mod, "audit_skill",
+                        lambda **kw: AuditResult(state="suspect", verdict="error"))
+
+    r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
+    assert r.status_code == 503
+    assert len(calls) == writes_before                  # nothing written
+
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, sid)
+        assert skill.status == "approved"               # still published
+        assert skill.description == "d"                 # edit not applied
