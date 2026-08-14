@@ -138,16 +138,44 @@ def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str
     return None, None
 
 
+# Findings that need a person regardless of how severe they look, because what
+# they report is "this could not be judged from here": a file the audit cannot
+# read, a scanner rule outside our vocabulary, a layer that did not run, two
+# judges disagreeing. Severity is not the criterion — "we could not tell" is not
+# a matter of degree.
+REVIEW_SIGNAL_CATEGORIES = ("malicious_artifact", "unclassified", "audit_error")
+
+
 def _derive_state(findings: list[Finding], judge_verdict: str) -> str:
+    """Map evidence to an outcome.
+
+    The gate acts on concealment and overreach, not on capability. A skill that
+    ships scripts, installs dependencies or writes files is doing its job; that
+    is recorded as context (``bundled_code``) and shown in the report, but it is
+    not evidence of anything and must not consume review time. What does consume
+    review time: a red line, something the audit could not read or classify, or
+    anything the semantic judge itself raised.
+    """
     red_line = any(
         f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high")
         for f in findings
     )
     if red_line or judge_verdict == "block":
         return "danger"
-    # Fail closed: judge error / any residual finding / explicit flag -> review.
-    if judge_verdict in ("flag", "error") or findings:
+    if judge_verdict in ("flag", "error"):
         return "suspect"
+    for f in findings:
+        # The judge only reports what it considers a threat, and label restatements
+        # are already dropped before this point, so whatever it still says stands
+        # on its own evidence and goes in front of a person whatever its severity.
+        if f.source == "judge":
+            return "suspect"
+        if f.category in REVIEW_SIGNAL_CATEGORIES:
+            return "suspect"
+        # Serious, but not one of the red lines: still not something to publish
+        # without eyes on it.
+        if f.severity in ("critical", "high"):
+            return "suspect"
     return "pass"
 
 
@@ -201,16 +229,23 @@ def audit_skill(
         # Static scan of the judge's blind spots (bundled scripts / .pyc /
         # unicode-hidden). Cisco is primary; if unavailable, fall back to the
         # cheap artifact heuristic (a deterministic backstop, logged).
+        # What the bundle ships is a fact about the upload, not the output of a
+        # scanner, so it is recorded either way. It used to be produced only when
+        # the static analyser was unavailable — a fallback whose purpose was to
+        # still route bundles to review — so the report's contents depended on
+        # which scanner happened to run, and once "ships a script" stopped routing
+        # to review the fallback had no purpose left.
+        findings += scanners.bundle_inventory(str(work))
         if settings.audit_cisco_enabled:
             cisco_findings, cisco_ran = scanners.cisco_scan(
                 settings.audit_cisco_bin, str(work))
             if cisco_ran:
                 findings += cisco_findings
             else:
-                log.warning("cisco skill-scanner unavailable; using artifact heuristic fallback")
-                findings += scanners.artifact_scan(str(work))
-        else:
-            findings += scanners.artifact_scan(str(work))
+                # Say which layer did not run instead of substituting a cruder one:
+                # "we could not tell" is what routes this to review.
+                log.warning("cisco skill-scanner unavailable; static layer degraded")
+                degraded.append("static")
 
         # Independent of the static analyser: unreadable payloads always go to
         # review, because the review is someone reading the change.
@@ -247,10 +282,9 @@ def audit_skill(
                        "review.",
             ))
 
-        det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
         judge = invoke_judge(
             settings=settings, rules=rules, skill_text=judge_input,
-            det_summary=det_summary, model=settings.audit_kiro_model,
+            model=settings.audit_kiro_model,
         )
         models_used = [settings.audit_kiro_model]
 
@@ -261,7 +295,7 @@ def audit_skill(
         if judge.verdict == "block" and confirm_model and confirm_model != settings.audit_kiro_model:
             second = invoke_judge(
                 settings=settings, rules=rules, skill_text=judge_input,
-                det_summary=det_summary, model=confirm_model,
+                model=confirm_model,
             )
             models_used.append(confirm_model)
             if second.verdict != "block":
@@ -280,6 +314,26 @@ def audit_skill(
                            f"({settings.audit_kiro_model} rejected it, "
                            f"{confirm_model} did not), so it goes to review.",
                 ))
+        # An outcome has to be supported by evidence that is actually in the text we
+        # audited. The judge self-check already marks a finding whose quoted span
+        # cannot be found (invented evidence), but nothing acted on it, so a
+        # rejection could rest on a quotation that does not exist. Same treatment as
+        # two judges disagreeing: the severe outcome is not established, and what is
+        # not established costs review time rather than the author's upload.
+        if not judge.grounded and judge.verdict == "block":
+            log.info("judge quoted evidence not present in the audited text - "
+                     "routing to review instead of rejecting")
+            judge.verdict = "flag"
+            for f in judge.findings:
+                if f.category in RED_LINE_CATEGORIES and f.severity in ("critical", "high"):
+                    f.severity = "medium"
+            judge.findings.append(Finding(
+                "pipeline", "unclassified", "medium",
+                detail="The semantic judge quoted evidence that is not present in "
+                       "the audited text, so its rejection could not be confirmed "
+                       "and this upload goes to review.",
+            ))
+
         # Locate every judge finding in the text it was given. Done here, not in
         # the judge, so it holds whether the judge ran locally or over HTTP.
         for f in judge.findings:

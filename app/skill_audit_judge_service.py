@@ -31,7 +31,6 @@ def judge(body: dict, x_judge_token: str | None = Header(default=None)) -> dict:
     result = run_judge(
         rules=body.get("rules", ""),
         skill_text=body.get("skill_text", ""),
-        det_summary=body.get("det_summary", ""),
         kiro_bin=s.audit_kiro_bin,
         # The caller picks the model (primary or the confirmation pass).
         model=(body.get("model") or s.audit_kiro_model),

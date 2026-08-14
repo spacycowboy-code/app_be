@@ -1,7 +1,10 @@
 """Semantic judge: a read-only Kiro agent invoked headless via kiro-cli.
 
 The skill content is passed in the prompt as UNTRUSTED DATA together with the
-red-line rules and the deterministic findings. The judge runs tool-less
+red-line rules. The deterministic findings are deliberately withheld: a model
+shown a conclusion tends to agree with it (sycophancy), and an agreeing second
+opinion is not a second opinion. The two layers stay independent and the policy
+layer combines them. The judge runs tool-less
 (``--trust-tools=``) so it cannot execute anything; it only emits a strict JSON
 verdict. We then self-check that output (schema + evidence grounding) before
 trusting it. Any failure returns verdict="error" so the pipeline fails closed.
@@ -51,7 +54,6 @@ def run_judge(
     *,
     rules: str,
     skill_text: str,
-    det_summary: str,
     kiro_bin: str,
     model: str,
     work_dir: str,
@@ -60,7 +62,6 @@ def run_judge(
     prompt = (
         rules
         + "\n\n=== SKILL UNDER AUDIT ===\n" + skill_text
-        + "\n\n=== DETERMINISTIC FINDINGS ===\n" + (det_summary or "(none)")
         + "\n\nNow output ONLY the JSON verdict."
     )
     cmd = [kiro_bin, "chat", "--no-interactive", "--trust-tools="]
@@ -100,11 +101,9 @@ def _parse(raw: str, skill_text: str) -> JudgeResult:
     grounded = True
     for f in raw_findings:
         span = f.get("evidence_span", "") or ""
-        # The judge is shown the deterministic findings so it can cross-check them.
-        # Sometimes it hands one back as its own observation, quoting the category
-        # label instead of any text ("evidence_span": "malicious_artifact"). That is
-        # a restatement of something already reported, not a new finding and not a
-        # hallucination: drop it, and do not let it degrade the verdict.
+        # A finding whose evidence is one of our own category names quotes a label,
+        # not the skill: it restates something already reported instead of
+        # observing anything. Drop it.
         if span.strip() in _CATEGORY_LABELS:
             continue
         if span and span not in skill_text:
@@ -118,6 +117,18 @@ def _parse(raw: str, skill_text: str) -> JudgeResult:
                 detail=(f.get("why") or "")[:500] or None,
             )
         )
+    # The rules define the verdict as a function of the findings ("no finding ->
+    # pass"), so once dropped findings are gone the verdict has to be recomputed
+    # from what is left. Otherwise a verdict raised by a dropped finding survives
+    # it, and the audit routes a skill to review with nothing to show the
+    # reviewer. Rejection is treated differently on purpose: an unevidenced
+    # rejection is not established, but it is also not a clean bill of health, so
+    # it falls back to review rather than to pass.
+    if not findings:
+        if verdict == "flag":
+            verdict = "pass"
+        elif verdict == "block":
+            verdict = "flag"
     return JudgeResult(
         verdict=verdict, findings=findings, raw=raw[:2000],
         schema_ok=True, grounded=grounded,
@@ -125,13 +136,13 @@ def _parse(raw: str, skill_text: str) -> JudgeResult:
 
 
 def _run_remote(url: str, token: str, rules: str, skill_text: str,
-                det_summary: str, timeout: int, model: str = "") -> JudgeResult:
+                timeout: int, model: str = "") -> JudgeResult:
     """Call a remote judge service (POST /judge) instead of kiro-cli locally."""
     import urllib.error
     import urllib.request
 
     payload = json.dumps(
-        {"rules": rules, "skill_text": skill_text, "det_summary": det_summary,
+        {"rules": rules, "skill_text": skill_text,
          "model": model}
     ).encode()
     headers = {"Content-Type": "application/json"}
@@ -158,15 +169,15 @@ def _run_remote(url: str, token: str, rules: str, skill_text: str,
     )
 
 
-def invoke_judge(*, settings, rules: str, skill_text: str, det_summary: str,
+def invoke_judge(*, settings, rules: str, skill_text: str,
                  model: str | None = None) -> JudgeResult:
     """Dispatch to the remote judge service if configured, else run locally."""
     if settings.audit_judge_url:
         return _run_remote(settings.audit_judge_url, settings.audit_judge_token,
-                           rules, skill_text, det_summary, settings.audit_judge_timeout,
+                           rules, skill_text, settings.audit_judge_timeout,
                            model=(model or settings.audit_kiro_model))
     return run_judge(
-        rules=rules, skill_text=skill_text, det_summary=det_summary,
+        rules=rules, skill_text=skill_text,
         kiro_bin=settings.audit_kiro_bin, model=(model or settings.audit_kiro_model),
         work_dir=settings.audit_work_dir, timeout=settings.audit_judge_timeout,
     )

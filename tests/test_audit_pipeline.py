@@ -35,27 +35,54 @@ def test_state_suspect_failclosed_on_judge_error():
     assert _derive_state([], "error") == "suspect"
 
 
-def test_state_suspect_on_nonredline_finding():
-    assert _derive_state([Finding("cisco", "malicious_artifact", "medium")], "pass") == "suspect"
+def test_state_suspect_on_unreviewable_attachment():
+    """Not a red line, but nobody could read it, so a person has to."""
+    assert _derive_state([Finding("pipeline", "malicious_artifact", "medium")], "pass") == "suspect"
+
+
+def test_state_suspect_on_a_serious_finding_outside_the_red_lines():
+    assert _derive_state([Finding("cisco", "unclassified", "high")], "pass") == "suspect"
+
+
+def test_shipping_scripts_alone_does_not_cost_a_review():
+    """Almost every real skill ships scripts. If that routes to review, every real
+    skill routes to review and the queue stops carrying information."""
+    findings = [Finding("pipeline", "bundled_code", "low", file=f"tool{i}.py")
+                for i in range(11)]
+    assert _derive_state(findings, "pass") == "pass"
+
+
+def test_a_recorded_capability_still_reaches_the_report():
+    """Not gating is not the same as not reported: the reviewer still sees it."""
+    from app.services.skill_audit.report import build_checks
+    from app.services.skill_audit.types import AuditResult
+
+    checks = build_checks(AuditResult(
+        state="pass", verdict="pass",
+        findings=[Finding("pipeline", "bundled_code", "low", file="setup.ps1",
+                          detail="executable/script artifact (.ps1)")],
+    ))
+    bundled = [c for c in checks if c.id == "bundled_code"]
+    assert bundled and bundled[0].findings
 
 
 def test_state_pass_when_clean():
     assert _derive_state([], "pass") == "pass"
 
 
-def test_artifact_scan_flags_script(tmp_path):
-    from app.services.skill_audit.scanners import artifact_scan
+def test_the_inventory_lists_a_shipped_script(tmp_path):
+    from app.services.skill_audit.scanners import bundle_inventory
     (tmp_path / "SKILL.md").write_text("x")
     (tmp_path / "setup.sh").write_text("#!/bin/bash\necho hi")
-    finds = artifact_scan(str(tmp_path))
-    assert any(f.category == "malicious_artifact" for f in finds)
+    finds = bundle_inventory(str(tmp_path))
+    assert [(f.category, f.severity) for f in finds] == [("bundled_code", "low")]
 
 
-def test_artifact_scan_ignores_docs(tmp_path):
-    from app.services.skill_audit.scanners import artifact_scan
+def test_the_inventory_ignores_documents(tmp_path):
+    from app.services.skill_audit.scanners import bundle_inventory
     (tmp_path / "SKILL.md").write_text("x")
     (tmp_path / "notes.txt").write_text("hello")
-    assert artifact_scan(str(tmp_path)) == []
+    assert bundle_inventory(str(tmp_path)) == []
 
 
 # --- Cisco finding mapping (threat whitelist; hygiene noise dropped) --------
@@ -291,7 +318,7 @@ def _run_audit(monkeypatch, verdicts, model_primary="m-primary", model_confirm="
 
     asked: list[str] = []
 
-    def fake_judge(*, settings, rules, skill_text, det_summary, model=None):
+    def fake_judge(*, settings, rules, skill_text, model=None):
         asked.append(model)
         verdict = verdicts[len(asked) - 1]
         finds = ([Finding("judge", "dangerous_instruction", "critical", "rm -rf /")]
@@ -432,6 +459,20 @@ def test_judge_restating_a_deterministic_finding_is_dropped_not_degraded():
     result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
     assert result.findings == []
     assert result.grounded is True          # a label is not invented evidence
+    # The dropped finding was the only thing behind the flag, so the flag goes
+    # with it - otherwise review is asked for with nothing to show.
+    assert result.verdict == "pass"
+
+
+def test_an_unevidenced_rejection_falls_back_to_review_not_to_pass():
+    from app.services.skill_audit import judge
+
+    raw = ('{"verdict": "block", "findings": [{"category": "prompt_injection",'
+           ' "severity": "high", "evidence_span": "prompt_injection",'
+           ' "detail": "Deterministic scan reported prompt injection."}]}')
+    result = judge._parse(raw, skill_text="---\nname: x\n---\n# X\n")
+    assert result.findings == []
+    assert result.verdict == "flag"
 
 
 def test_judge_inventing_evidence_still_degrades():
@@ -443,3 +484,53 @@ def test_judge_inventing_evidence_still_degrades():
     result = judge._parse(raw, skill_text="---\nname: x\ndescription: y\n---\n# X\n")
     assert len(result.findings) == 1
     assert result.grounded is False
+
+
+def test_a_rejection_resting_on_invented_evidence_goes_to_review(monkeypatch):
+    """The judge's self-check flagged invented evidence but nothing acted on it, so a
+    rejection could rest on a quotation that is not in the text."""
+    from app.services.skill_audit import pipeline
+    from app.services.skill_audit.types import JudgeResult
+
+    def fake_judge(**kw):
+        return JudgeResult(
+            verdict="block",
+            findings=[Finding("judge", "dangerous_instruction", "critical",
+                              "rm -rf / --no-preserve-root", "destroys the disk")],
+            grounded=False,          # that span is not in the skill text
+        )
+
+    monkeypatch.setattr(pipeline, "invoke_judge", fake_judge)
+    result = pipeline.audit_skill(
+        name="T", skill_md="---\nname: T\ndescription: d\n---\nharmless\n",
+        use_cache=False,
+    )
+    assert result.state == "suspect"          # not danger
+    assert result.verdict == "flag"
+    assert any("not present in the audited text" in (f.detail or "")
+               for f in result.findings)
+
+
+def test_the_inventory_is_recorded_whichever_scanner_ran(tmp_path, monkeypatch):
+    """What the bundle ships is a fact about the upload, so the report must not
+    depend on whether the static analyser happened to be available."""
+    import io
+    import zipfile
+
+    from app.services.skill_audit import pipeline, scanners
+    from app.services.skill_audit.types import JudgeResult
+
+    monkeypatch.setattr(pipeline, "invoke_judge", lambda **kw: JudgeResult(verdict="pass"))
+    # Analyser present but silent, which is the normal case for a benign bundle:
+    # previously that meant no inventory in the report at all.
+    monkeypatch.setattr(scanners, "cisco_scan", lambda *a, **k: ([], True))
+    md = "---\nname: T\ndescription: d\n---\nrun scripts/x.py\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("SKILL.md", md)
+        zf.writestr("scripts/x.py", "print(1)\n")
+    result = pipeline.audit_skill(name="T", skill_md=md, artifact_bytes=buf.getvalue(),
+                                 artifact_filename="b.zip", use_cache=False)
+    inventory = [f for f in result.findings if f.category == "bundled_code"]
+    assert [f.file for f in inventory] == ["x.py"]
+    assert result.state == "pass"          # context, never a gate
