@@ -429,15 +429,16 @@ def unreadable_artifact_scan(target_dir: str) -> list[Finding]:
     return findings
 
 
-def artifact_scan(target_dir: str) -> list[Finding]:
-    """Record shipped scripts as bundled code, not as a threat.
+def bundle_inventory(target_dir: str) -> list[Finding]:
+    """List the scripts the bundle ships, as context for whoever reads the report.
 
-    Fallback used only when the Cisco scanner is unavailable. A file extension
-    says what a file is, never what it does: almost every skill that does real
-    work ships a script, so treating that as a finding routes every real skill to
-    review and the queue stops meaning anything. It is recorded as context for
-    whoever reads the report, and the semantic layer — which is given these files
-    verbatim — is what judges their content.
+    A file extension says what a file is, never what it does: almost every skill
+    that does real work ships a script, so treating that as a finding routes every
+    real skill to review and the queue stops carrying information. What the bundle
+    contains is still worth stating plainly — a reviewer should not have to unpack
+    it to find out — so it is recorded unconditionally and decides nothing. The
+    content of these files is judged by the deterministic scans and by the semantic
+    layer, which is handed them verbatim.
     """
 
     findings: list[Finding] = []

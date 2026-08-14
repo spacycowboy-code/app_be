@@ -229,16 +229,23 @@ def audit_skill(
         # Static scan of the judge's blind spots (bundled scripts / .pyc /
         # unicode-hidden). Cisco is primary; if unavailable, fall back to the
         # cheap artifact heuristic (a deterministic backstop, logged).
+        # What the bundle ships is a fact about the upload, not the output of a
+        # scanner, so it is recorded either way. It used to be produced only when
+        # the static analyser was unavailable — a fallback whose purpose was to
+        # still route bundles to review — so the report's contents depended on
+        # which scanner happened to run, and once "ships a script" stopped routing
+        # to review the fallback had no purpose left.
+        findings += scanners.bundle_inventory(str(work))
         if settings.audit_cisco_enabled:
             cisco_findings, cisco_ran = scanners.cisco_scan(
                 settings.audit_cisco_bin, str(work))
             if cisco_ran:
                 findings += cisco_findings
             else:
-                log.warning("cisco skill-scanner unavailable; using artifact heuristic fallback")
-                findings += scanners.artifact_scan(str(work))
-        else:
-            findings += scanners.artifact_scan(str(work))
+                # Say which layer did not run instead of substituting a cruder one:
+                # "we could not tell" is what routes this to review.
+                log.warning("cisco skill-scanner unavailable; static layer degraded")
+                degraded.append("static")
 
         # Independent of the static analyser: unreadable payloads always go to
         # review, because the review is someone reading the change.

@@ -70,19 +70,19 @@ def test_state_pass_when_clean():
     assert _derive_state([], "pass") == "pass"
 
 
-def test_artifact_scan_flags_script(tmp_path):
-    from app.services.skill_audit.scanners import artifact_scan
+def test_the_inventory_lists_a_shipped_script(tmp_path):
+    from app.services.skill_audit.scanners import bundle_inventory
     (tmp_path / "SKILL.md").write_text("x")
     (tmp_path / "setup.sh").write_text("#!/bin/bash\necho hi")
-    finds = artifact_scan(str(tmp_path))
+    finds = bundle_inventory(str(tmp_path))
     assert [(f.category, f.severity) for f in finds] == [("bundled_code", "low")]
 
 
-def test_artifact_scan_ignores_docs(tmp_path):
-    from app.services.skill_audit.scanners import artifact_scan
+def test_the_inventory_ignores_documents(tmp_path):
+    from app.services.skill_audit.scanners import bundle_inventory
     (tmp_path / "SKILL.md").write_text("x")
     (tmp_path / "notes.txt").write_text("hello")
-    assert artifact_scan(str(tmp_path)) == []
+    assert bundle_inventory(str(tmp_path)) == []
 
 
 # --- Cisco finding mapping (threat whitelist; hygiene noise dropped) --------
@@ -509,3 +509,28 @@ def test_a_rejection_resting_on_invented_evidence_goes_to_review(monkeypatch):
     assert result.verdict == "flag"
     assert any("not present in the audited text" in (f.detail or "")
                for f in result.findings)
+
+
+def test_the_inventory_is_recorded_whichever_scanner_ran(tmp_path, monkeypatch):
+    """What the bundle ships is a fact about the upload, so the report must not
+    depend on whether the static analyser happened to be available."""
+    import io
+    import zipfile
+
+    from app.services.skill_audit import pipeline, scanners
+    from app.services.skill_audit.types import JudgeResult
+
+    monkeypatch.setattr(pipeline, "invoke_judge", lambda **kw: JudgeResult(verdict="pass"))
+    # Analyser present but silent, which is the normal case for a benign bundle:
+    # previously that meant no inventory in the report at all.
+    monkeypatch.setattr(scanners, "cisco_scan", lambda *a, **k: ([], True))
+    md = "---\nname: T\ndescription: d\n---\nrun scripts/x.py\n"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("SKILL.md", md)
+        zf.writestr("scripts/x.py", "print(1)\n")
+    result = pipeline.audit_skill(name="T", skill_md=md, artifact_bytes=buf.getvalue(),
+                                 artifact_filename="b.zip", use_cache=False)
+    inventory = [f for f in result.findings if f.category == "bundled_code"]
+    assert [f.file for f in inventory] == ["x.py"]
+    assert result.state == "pass"          # context, never a gate
