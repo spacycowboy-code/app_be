@@ -165,7 +165,21 @@ class SkillStorage:
                 f"not to {settings.skill_repo_branch!r} (skill_id={skill_id!r})"
             )
         if on_branch:
-            self._git("checkout", "-B", target_branch, settings.skill_repo_branch, check=False)
+            # Cut the review branch from the live branch *as it is on the remote*,
+            # not as this clone last saw it. Merges happen in GitLab and nothing
+            # pulls them back here, so the local ref drifts: a branch cut from it
+            # carries "revert everything merged since" in its diff. GitLab then
+            # either reports a conflict — which is the lucky case — or merges it
+            # cleanly and silently undoes work that was already reviewed and
+            # accepted. The live path self-heals because a stale push is rejected
+            # and retried after a rebase; pushing a new branch always succeeds, so
+            # this path has to synchronise deliberately.
+            base = settings.skill_repo_branch
+            if settings.skill_repo_push:
+                remote = settings.skill_repo_remote
+                if self._git("fetch", remote, base, check=False).returncode == 0:
+                    base = "FETCH_HEAD"
+            self._git("checkout", "-B", target_branch, base, check=False)
 
         category_slug = sanitize_segment(category_slug, "uncategorized")
 
