@@ -67,14 +67,20 @@ def run_judge(
     cmd = [kiro_bin, "chat", "--no-interactive", "--trust-tools="]
     if model:
         cmd += ["--model", model]
-    cmd.append(prompt)
 
     os.makedirs(work_dir, exist_ok=True)
     try:
+        # The prompt goes on stdin, not in argv. A command-line argument is capped
+        # by the kernel at 128 KB per string, which put a ceiling on how much of a
+        # skill could be judged that had nothing to do with the model: these models
+        # read a million tokens. Past the cap execve fails with E2BIG, which is an
+        # OSError and not one of the two exceptions this used to catch, so an
+        # oversized bundle surfaced as HTTP 500 instead of failing closed.
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, cwd=work_dir
+            cmd, input=prompt, capture_output=True, text=True,
+            timeout=timeout, cwd=work_dir,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         return JudgeResult(verdict="error", raw=f"invoke failed: {exc}", schema_ok=False)
 
     return _parse(_clean(proc.stdout), skill_text)

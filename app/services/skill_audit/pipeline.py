@@ -22,7 +22,7 @@ from app.config import get_settings
 from app.models.audit import RED_LINE_CATEGORIES
 from app.services.skill_audit import scanners
 from app.services.skill_audit.judge import invoke_judge
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.skill_audit.types import AuditResult, BundleTooLarge, Finding
 
 log = logging.getLogger("skill_audit")
 
@@ -71,15 +71,30 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
         return
     if zipfile.is_zipfile(io.BytesIO(artifact_bytes)):
         with zipfile.ZipFile(io.BytesIO(artifact_bytes)) as zf:
-            for member in zf.namelist():
-                dest = (work / member).resolve()
+            members = zf.infolist()
+            if len(members) > _MAX_BUNDLE_MEMBERS:
+                raise BundleTooLarge(
+                    f"技能包内文件数 {len(members)} 超过上限 {_MAX_BUNDLE_MEMBERS}。")
+            written = 0
+            for member in members:
+                dest = (work / member.filename).resolve()
                 if not str(dest).startswith(str(work.resolve())):
                     continue  # zip-slip guard
-                if member.endswith("/"):
+                if member.filename.endswith("/"):
                     dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(zf.read(member))
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Copy in chunks against a running total rather than trusting the
+                # declared size: a zip header can claim anything, and the number
+                # that matters is what reaches the disk.
+                with zf.open(member) as src, open(dest, "wb") as out:
+                    while chunk := src.read(64 * 1024):
+                        written += len(chunk)
+                        if written > _MAX_BUNDLE_BYTES:
+                            raise BundleTooLarge(
+                                f"技能包解压后超过上限 "
+                                f"{_MAX_BUNDLE_BYTES // (1024 * 1024)} MB。")
+                        out.write(chunk)
     else:
         # A plain .md upload *is* the definition. Writing it a second time under
         # its own name would audit the same text twice, so every finding would
@@ -98,19 +113,25 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
 # unreviewed - the static layer keys off code patterns and does not read prose.
 _TEXT_EXT = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
              ".rst", ".csv", ".properties"}
-# Total budget for the extra text handed to the judge, and the most any single
-# file may take of it. Both are sized from what real skills ship: the largest
-# bundle we have audited carries 135 KB of text over 8 files, its biggest single
-# file being a 52 KB README, and the largest skill in the repo carries 51 KB.
-# At 64 KB the budget was the reason skills went to review — a 135 KB bundle had
-# two files nobody ever read, which is a review reason we created, not one the
-# skill earned. Anything still left out or truncated is reported, so an oversized
-# bundle goes to review instead of passing unexamined.
-_EXTRA_TEXT_BUDGET = 256 * 1024
-_PER_FILE_BUDGET = 64 * 1024
-# Prose carries instructions; data files usually carry data. When the budget does
-# run out, what goes unread should be the least instruction-like thing there.
-_INSTRUCTION_EXT = {".md", ".txt", ".rst"}
+# How much bundled text goes into one prompt. Sized from what the judge can read,
+# not from what files happen to weigh: the judge models (claude-sonnet-5, confirmed
+# by claude-opus-5) carry a 1M token context, and the worst case is one token per
+# character (CJK; ASCII is three to four times better). The largest bundle we have
+# audited holds 113K characters of text, so this leaves room to spare.
+#
+# A bound still has to exist so a pathological bundle cannot be shipped to the
+# model as a prompt it will refuse, and whatever does not fit is reported rather
+# than silently dropped. There is deliberately no per-file cap: handing the judge
+# the first N KB of a file and calling it reviewed is worse than saying we did not
+# read it, because the part nobody read is where something would be hidden.
+_EXTRA_TEXT_BUDGET = 500 * 1024
+# What an uploaded bundle may unpack to. Nothing here judges content: it stops a
+# highly compressed archive from filling the deploy host's disk before any check
+# runs. Sized off what real skills ship — the largest bundle audited unpacks to a
+# few hundred KB, and the file-count record is 63 — so these are three orders of
+# magnitude of headroom, and a bundle past them is a mistake, not a skill.
+_MAX_BUNDLE_BYTES = 50 * 1024 * 1024
+_MAX_BUNDLE_MEMBERS = 2000
 
 
 def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str]], list[str]]:
@@ -123,11 +144,8 @@ def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str
     """
     collected: list[tuple[str, str]] = []
     unreadable: list[str] = []
-    candidates = sorted(
-        (p for p in work.rglob("*") if p.is_file() and p.suffix.lower() in _TEXT_EXT),
-        key=lambda p: (p.suffix.lower() not in _INSTRUCTION_EXT, str(p)),
-    )
-    for path in candidates:
+    for path in sorted(p for p in work.rglob("*")
+                       if p.is_file() and p.suffix.lower() in _TEXT_EXT):
         rel = str(path.relative_to(work))
         try:
             text = path.read_text(encoding="utf-8")
@@ -142,30 +160,22 @@ def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str
     return collected, unreadable
 
 
-def _budget_for_judge(files: list[tuple[str, str]]) -> tuple[dict[str, int], list[str], list[str]]:
-    """How much of each file the semantic layer gets.
+def _files_for_judge(files: list[tuple[str, str]]) -> tuple[list[str], list[str]]:
+    """Which bundled files fit into one prompt, and which do not.
 
-    Per-file cap first, so one large data file cannot crowd out the rest of the
-    bundle, then the total. Returns the number of characters kept per file, the
-    files it never sees, and the files it sees only in part — the last two are
-    reported as findings, because the part nobody read is where something would be
-    hidden.
+    Whole files only. What does not fit is reported, so an oversized bundle goes to
+    review instead of passing unexamined.
     """
-    kept: dict[str, int] = {}
+    chosen: list[str] = []
     skipped: list[str] = []
-    partial: list[str] = []
     total = 0
     for rel, text in files:
-        take = min(len(text), _PER_FILE_BUDGET)
-        if total + take > _EXTRA_TEXT_BUDGET:
+        if total + len(text) > _EXTRA_TEXT_BUDGET:
             skipped.append(rel)
-            kept[rel] = 0
             continue
-        if take < len(text):
-            partial.append(rel)
-        kept[rel] = take
-        total += take
-    return kept, skipped, partial
+        chosen.append(rel)
+        total += len(text)
+    return chosen, skipped
 
 
 def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str | None, int | None]:
@@ -304,7 +314,7 @@ def audit_skill(
         # Everything the agent could be told to read goes to the semantic layer,
         # not just SKILL.md, with each file's secrets masked first.
         extras, unreadable_text = _collect_text_files(work, skill_md)
-        kept, skipped, partial = _budget_for_judge(extras)
+        chosen, skipped = _files_for_judge(extras)
         left_out = unreadable_text + skipped
         segments: list[tuple[str, str]] = [("SKILL.md", redacted)]
         judge_input = redacted
@@ -314,24 +324,15 @@ def audit_skill(
             red_text, secret_finds = scanners.redact_secrets(text, file=rel)
             findings += secret_finds
             segments.append((rel, red_text))
-            take = kept.get(rel, 0)
-            if take:
-                judge_input += f"\n\n----- bundled file: {rel} -----\n{red_text[:take]}"
+            if rel in chosen:
+                judge_input += f"\n\n----- bundled file: {rel} -----\n{red_text}"
         if left_out:
             findings.append(Finding(
                 "pipeline", "unclassified", "medium",
                 file=", ".join(left_out)[:400],
                 detail="These bundled files were not reviewed by the semantic check "
-                       "(too large or not readable as text), so this upload goes to "
-                       "review.",
-            ))
-        if partial:
-            findings.append(Finding(
-                "pipeline", "unclassified", "medium",
-                file=", ".join(partial)[:400],
-                detail="These bundled files were only reviewed up to their first "
-                       f"{_PER_FILE_BUDGET // 1024} KB, so the rest has not been "
-                       "read by anyone and this upload goes to review.",
+                       "(not readable as text, or larger than one prompt), so this "
+                       "upload goes to review.",
             ))
 
         judge = invoke_judge(

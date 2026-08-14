@@ -1,5 +1,5 @@
 """FastAPI application entry point."""
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
 from app.version import __version__
 from app.services.auth_tokens import TokenError, decode_token
+from app.services.skill_audit.types import BundleTooLarge
 from app.routers import (
     audit,
     auth,
@@ -25,6 +26,17 @@ from app.routers import (
 settings = get_settings()
 
 app = FastAPI(title=settings.app_name, version=__version__)
+
+@app.exception_handler(BundleTooLarge)
+async def _bundle_too_large(_request: Request, exc: BundleTooLarge) -> JSONResponse:
+    """A bundle we will not unpack is an input problem, answered as one.
+
+    Reported where the uploader can act on it, with the reason. It is not an audit
+    verdict — nothing was examined — so no audit record is written.
+    """
+    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        content={"detail": str(exc)})
+
 
 app.add_middleware(
     CORSMiddleware,
