@@ -388,6 +388,12 @@ async def update_skill(
     if decision.blocked:
         # Nothing is written and the edit itself is discarded, but the record of
         # the rejection is kept: "why was this refused" has to be answerable.
+        #
+        # The record is deliberately not linked to the skill. The projection takes
+        # the skill's displayed verdict from its latest linked record, so linking a
+        # rejected *edit* would mark a live skill as dangerous while what is
+        # published is still the older content that passed. A rejected edit says
+        # nothing about the published content; the skill name keeps it traceable.
         db.rollback()
         gate.record(db, decision.ref, audit, skill_id=None,
                     skill_name=skill.name, uploader_eid=editor)
