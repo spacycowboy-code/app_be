@@ -98,19 +98,34 @@ def _materialize(work: Path, skill_md: str, artifact_bytes: bytes | None,
 # unreviewed - the static layer keys off code patterns and does not read prose.
 _TEXT_EXT = {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg",
              ".rst", ".csv", ".properties"}
-# Total budget for the extra text handed to the judge. Anything left out is
-# reported, so an oversized bundle goes to review instead of passing unexamined.
-_EXTRA_TEXT_BUDGET = 64 * 1024
+# Total budget for the extra text handed to the judge, and the most any single
+# file may take of it. Both are sized from what real skills ship: the largest
+# bundle we have audited carries 135 KB of text over 8 files, its biggest single
+# file being a 52 KB README, and the largest skill in the repo carries 51 KB.
+# At 64 KB the budget was the reason skills went to review — a 135 KB bundle had
+# two files nobody ever read, which is a review reason we created, not one the
+# skill earned. Anything still left out or truncated is reported, so an oversized
+# bundle goes to review instead of passing unexamined.
+_EXTRA_TEXT_BUDGET = 256 * 1024
+_PER_FILE_BUDGET = 64 * 1024
+# Prose carries instructions; data files usually carry data. When the budget does
+# run out, what goes unread should be the least instruction-like thing there.
+_INSTRUCTION_EXT = {".md", ".txt", ".rst"}
 
 
-def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str]], list[str]]:
-    """Bundled text files worth reviewing, plus the ones left out."""
+def _collect_text_files(
+    work: Path, main_text: str
+) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+    """Bundled text files worth reviewing, the ones left out, the ones truncated."""
     collected: list[tuple[str, str]] = []
     left_out: list[str] = []
+    truncated: list[str] = []
     total = 0
-    for path in sorted(work.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in _TEXT_EXT:
-            continue
+    candidates = sorted(
+        (p for p in work.rglob("*") if p.is_file() and p.suffix.lower() in _TEXT_EXT),
+        key=lambda p: (p.suffix.lower() not in _INSTRUCTION_EXT, str(p)),
+    )
+    for path in candidates:
         rel = str(path.relative_to(work))
         try:
             text = path.read_text(encoding="utf-8")
@@ -121,12 +136,18 @@ def _collect_text_files(work: Path, main_text: str) -> tuple[list[tuple[str, str
             continue                        # already the main input
         if not text.strip():
             continue
+        # One large data file must not crowd out everything else in the bundle.
+        # Cutting it is reported, not silent: the part nobody read is exactly
+        # where something would be hidden.
+        if len(text) > _PER_FILE_BUDGET:
+            text = text[:_PER_FILE_BUDGET]
+            truncated.append(rel)
         if total + len(text) > _EXTRA_TEXT_BUDGET:
             left_out.append(rel)
             continue
         total += len(text)
         collected.append((rel, text))
-    return collected, left_out
+    return collected, left_out, truncated
 
 
 def _locate_in_segments(segments: list[tuple[str, str]], span: str) -> tuple[str | None, int | None]:
@@ -229,7 +250,7 @@ def audit_skill(
 
         # Everything the agent could be told to read goes to the semantic layer,
         # not just SKILL.md, with each file's secrets masked first.
-        extras, left_out = _collect_text_files(work, skill_md)
+        extras, left_out, truncated = _collect_text_files(work, skill_md)
         segments: list[tuple[str, str]] = [("SKILL.md", redacted)]
         judge_input = redacted
         for rel, text in extras:
@@ -245,6 +266,14 @@ def audit_skill(
                 detail="These bundled files were not reviewed by the semantic check "
                        "(too large or not readable as text), so this upload goes to "
                        "review.",
+            ))
+        if truncated:
+            findings.append(Finding(
+                "pipeline", "unclassified", "medium",
+                file=", ".join(truncated)[:400],
+                detail="These bundled files were only reviewed up to their first "
+                       f"{_PER_FILE_BUDGET // 1024} KB, so the rest has not been "
+                       "read by anyone and this upload goes to review.",
             ))
 
         det_summary = ", ".join(sorted({f.category for f in findings})) or "(none)"
