@@ -4,12 +4,15 @@
 Active Directory (via the service bind account), upserts the portal user row,
 and returns a signed JWT. ``GET /api/auth/me`` echoes the identity carried by a
 valid token (the auth gate in ``app.main`` has already validated it).
+``GET /api/auth/verify`` is the same check reduced to a status code plus an
+identity header, for nginx's ``auth_request`` (see ``verify`` below).
 """
 from __future__ import annotations
 
+import re
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -109,3 +112,35 @@ def me(request: Request) -> MeResponse:
     if not eid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
     return MeResponse(eid=eid, displayName=getattr(request.state, "display_name", None))
+
+
+#: An EID is a signum: ASCII only. Anything else is refused rather than copied
+#: into a response header, because that header is what nginx forwards to another
+#: service as the caller's identity (see ``verify``).
+_EID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+@router.get("/verify", status_code=status.HTTP_204_NO_CONTENT)
+def verify(request: Request) -> Response:
+    """Session check for nginx's ``auth_request``: status code + identity header.
+
+    The portal's frontend nginx reverse-proxies tools that have no idea what a
+    portal JWT is (currently EriDoc, under ``/api/eridoc/``). It sends every
+    such request here first: 204 means the caller holds a valid session, and
+    ``X-Auth-Eid`` tells nginx whose it is, so it can inject that signum as the
+    tool's ``X-Forwarded-User``. 401 makes nginx refuse the request outright.
+
+    Deliberately not in ``AUTH_WHITELIST``: the site-wide gate in ``app.main``
+    is what validates the token, and this handler only reports the result. That
+    also makes the failure mode safe — with ``auth_enabled=false`` the gate
+    stops setting ``request.state.eid``, so this returns 401 and the proxied
+    tool becomes unreachable instead of anonymous.
+
+    ``Response`` is returned directly rather than via ``response_model``: a 204
+    must not carry a body, and the whole point here is the header.
+    """
+    eid = str(getattr(request.state, "eid", "") or "").strip()
+    if not eid or not _EID_RE.match(eid):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+    return Response(status_code=status.HTTP_204_NO_CONTENT,
+                    headers={"X-Auth-Eid": eid.upper()})

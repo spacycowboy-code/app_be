@@ -63,6 +63,9 @@ python -m app.init_db
 
 | Method | Path                                   | Description                     |
 | ------ | -------------------------------------- | ------------------------------- |
+| POST   | `/api/auth/login`                      | LDAP login → JWT session        |
+| GET    | `/api/auth/me`                         | Identity of the current session  |
+| GET    | `/api/auth/verify`                     | 204 + `X-Auth-Eid`, for nginx `auth_request` |
 | POST   | `/api/users`                           | Create/get user (by EID)        |
 | GET    | `/api/users/{eid}`                     | Get user                        |
 | GET    | `/api/users/{eid}/skills`              | Skills uploaded by the user     |
@@ -81,6 +84,13 @@ python -m app.init_db
 
 `GET /api/skills` supports query params: `categoryId`, `status`, `q`
 (name/description search), `trending`.
+
+`GET /api/auth/verify` exists for the frontend nginx, not for the browser: it
+reduces the session check to a status code plus an `X-Auth-Eid` header, so nginx
+can hand that signum to a proxied tool that knows nothing about portal JWTs (the
+EriDoc tool under `/api/eridoc/`, which authenticates by `X-Forwarded-User`).
+`/api/auth/me` cannot serve that purpose — `auth_request` can only read a header,
+not a JSON body.
 
 The API speaks **camelCase** JSON to match the Angular frontend.
 
