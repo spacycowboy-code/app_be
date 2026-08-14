@@ -176,3 +176,47 @@ def test_a_review_branch_is_cut_from_the_remote_live_ref(monkeypatch, tmp_path):
     checkout = [c for c in calls if c[:2] == ("checkout", "-B")]
     assert fetched, "must synchronise before cutting the review branch"
     assert checkout and checkout[0][3] == "FETCH_HEAD", checkout
+
+
+# --- a review says who uploaded the skill -------------------------------------
+
+def test_the_review_mr_names_the_uploader(client, monkeypatch):
+    """A reviewer's first question is who to talk to. Before this it could only be
+    inferred from the folder name inside the diff."""
+    calls: list = []
+    _stub_store(monkeypatch, calls)
+    sid = _create_skill(client, monkeypatch)
+    monkeypatch.setattr(skills_mod, "audit_skill", lambda **kw: AuditResult(
+        state="suspect", verdict="flag",
+        findings=[Finding("judge", "dangerous_instruction", "medium", "sudo", "elevates")]))
+    opened: list = []
+    monkeypatch.setattr(skills_mod.gitlab_mr, "review_suspect",
+                        lambda **kw: opened.append(kw) or "http://mr/9")
+
+    r = client.put(f"/api/skills/{sid}", json={"skillMd": EDITED_MD, "editorEid": "TESTER"})
+    assert r.status_code == 200, r.text
+    assert opened and opened[0]["uploader"] == "TESTER"
+
+
+def test_the_uploader_label_prefers_the_display_name(monkeypatch):
+    from app.database import SessionLocal
+    from app.models.user import RpAiPortal
+    from app.services.skill_audit import gate
+
+    with SessionLocal() as db:
+        db.add(RpAiPortal(eid="EYINCNG", display_name="Terry Yin"))
+        db.commit()
+        assert gate._uploader_label(db, "EYINCNG") == "Terry Yin (EYINCNG)"
+        assert gate._uploader_label(db, "NOBODY") == "NOBODY"
+        assert gate._uploader_label(db, None) is None
+
+
+def test_the_findings_table_carries_the_uploader():
+    from app.services.gitlab_mr import _findings_markdown
+    from app.services.skill_audit.types import Finding as F
+
+    body = _findings_markdown("s", [F("judge", "dangerous_instruction", "medium")],
+                              "Terry Yin (EYINCNG)")
+    assert "**上传者:** Terry Yin (EYINCNG)" in body
+    # Still fine when we do not know who it was.
+    assert "上传者" not in _findings_markdown("s", [], None)

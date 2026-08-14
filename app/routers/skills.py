@@ -461,6 +461,7 @@ async def update_skill(
                 skill_name=skill.name,
                 findings=audit.findings,
                 audit_ref=decision.ref,
+                uploader=gate._uploader_label(db, editor),
             )
         )
     gate.record(db, decision.ref, audit, skill_id=skill.id,

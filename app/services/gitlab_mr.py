@@ -65,8 +65,13 @@ def _reviewer_id(username: str) -> int | None:
         return None
 
 
-def _findings_markdown(skill_name: str, findings: list[Finding]) -> str:
+def _findings_markdown(skill_name: str, findings: list[Finding],
+                       uploader: str | None = None) -> str:
     lines = [f"### 🔒 安全审计:`{skill_name}` 判为**可疑**,请复核后决定是否合入", ""]
+    # Who uploaded it, stated rather than left to be inferred from the folder name
+    # in the diff. A reviewer's first question is who to talk to.
+    if uploader:
+        lines += [f"**上传者:** {uploader}", ""]
     lines.append("| 位置 | 检查项 | 严重度 | 命中原文 | 说明 |")
     lines.append("|---|---|---|---|---|")
     for f in findings:
@@ -84,7 +89,7 @@ def _findings_markdown(skill_name: str, findings: list[Finding]) -> str:
 
 def review_suspect(
     *, source_branch: str, target_branch: str, skill_name: str,
-    findings: list[Finding], audit_ref: str,
+    findings: list[Finding], audit_ref: str, uploader: str | None = None,
 ) -> str | None:
     """Create a Draft MR from source_branch and post findings. Returns MR url."""
     settings = get_settings()
@@ -94,8 +99,10 @@ def review_suspect(
         payload = {
             "source_branch": source_branch,
             "target_branch": target_branch,
-            "title": f"Draft: [skill-audit] 可疑复核 {skill_name} ({audit_ref})",
-            "description": _findings_markdown(skill_name, findings),
+            "title": (f"Draft: [skill-audit] 可疑复核 {skill_name}"
+                      + (f" — {uploader}" if uploader else "")
+                      + f" ({audit_ref})"),
+            "description": _findings_markdown(skill_name, findings, uploader),
             "remove_source_branch": True,
         }
         rid = _reviewer_id(settings.audit_mr_reviewer) if settings.audit_mr_reviewer else None
@@ -108,7 +115,7 @@ def review_suspect(
         if iid:
             try:
                 _request("POST", f"projects/{_project()}/merge_requests/{iid}/notes",
-                         {"body": _findings_markdown(skill_name, findings)})
+                         {"body": _findings_markdown(skill_name, findings, uploader)})
             except Exception as exc:  # note is best-effort
                 log.warning("MR note failed: %s", exc)
         log.info("opened Draft MR for suspect skill '%s': %s", skill_name, mr_url)
