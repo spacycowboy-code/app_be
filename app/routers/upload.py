@@ -357,6 +357,7 @@ async def upload_skill(
                 skill_name=name,
                 findings=audit.findings,
                 audit_ref=audit_ref,
+                uploader=gate._uploader_label(db, eid),
             )
         )
     gate.record(

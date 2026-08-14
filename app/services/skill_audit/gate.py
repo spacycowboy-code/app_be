@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
+from app.models.user import RpAiPortal
 from app.services.skill_audit.types import AuditResult
 
 
@@ -115,3 +116,18 @@ def record(
             )
         )
     db.add(rec)
+
+def _uploader_label(db: Session, eid: str | None) -> str | None:
+    """How to name the uploader to a human: display name plus EID when known.
+
+    The EID alone is what a reviewer has to look up; the display name alone is
+    ambiguous. Both, or the EID if the user row has no display name yet.
+    """
+    if not eid:
+        return None
+    # The user row's primary key is an autoincrement id, not the EID, so this is a
+    # lookup by column — db.get() would silently return None and every review MR
+    # would name a bare EID.
+    user = db.query(RpAiPortal).filter(RpAiPortal.eid == eid).first()
+    name = user.display_name if user else None
+    return f"{name} ({eid})" if name else eid
