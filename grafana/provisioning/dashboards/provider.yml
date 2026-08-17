@@ -1,13 +1,37 @@
 apiVersion: 1
 
-# Load dashboard JSON files from the mounted dashboards dir on startup.
+# Dashboard loader.
+#
+# OWNERSHIP: the UI is where dashboards are edited. Grafana's own database is the
+# source of truth, and the JSON files here are a *seed* — enough for a fresh
+# instance to come up with the Skill Metrics board instead of an empty Grafana.
+#
+# Two consequences of that choice:
+#
+# 1. Grafana's database MUST be on a persistent volume (/var/lib/grafana). It
+#    holds every UI-created dashboard, folder, user and alert rule; without a
+#    volume, `docker compose up --force-recreate` silently discards all of it and
+#    only the seed files below come back.
+# 2. Editing a seeded dashboard's JSON file overwrites the UI's copy of *that*
+#    dashboard on the next reload (see updateIntervalSeconds). So change these
+#    files deliberately, not casually. Dashboards created in the UI are never
+#    touched by provisioning.
+#
+# To pull UI dashboards back into git, run tools/export_dashboards.py — it writes
+# to grafana/backup/, deliberately NOT to the provisioned path below, since a
+# snapshot living in the provisioned directory would start overwriting the UI it
+# was copied from.
 providers:
   - name: skill-dashboards
     orgId: 1
     folder: ''
     type: file
+    # Deletion from the UI is allowed; provisioning restores the seed on the
+    # next interval, so a mistaken delete is self-healing rather than fatal.
     disableDeletion: false
     updateIntervalSeconds: 30
+    # Required for UI-first editing: without it Grafana refuses to save changes
+    # to a provisioned dashboard at all.
     allowUiUpdates: true
     options:
       path: /var/lib/grafana/dashboards
