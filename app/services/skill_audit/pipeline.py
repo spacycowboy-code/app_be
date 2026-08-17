@@ -16,6 +16,7 @@ import shutil
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 from app.config import get_settings
@@ -165,6 +166,7 @@ def audit_skill(
     artifact_filename: str | None = None,
     uploader_eid: str | None = None,
     use_cache: bool = True,
+    on_progress: Callable[[str], None] | None = None,
 ) -> AuditResult:
     """Audit one upload: materialise it, scan it once, decide.
 
@@ -204,6 +206,7 @@ def audit_skill(
             policy_path=settings.audit_policy_path,
             timeout=settings.audit_scan_timeout,
             use_behavioral=settings.audit_behavioral_enabled,
+            on_progress=on_progress,
             env=scan.llm_env(base_url=settings.audit_llm_base_url,
                              api_key=settings.audit_judge_token,
                              model=settings.audit_kiro_model),

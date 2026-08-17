@@ -416,3 +416,10 @@ def list_versions(skill_id: str, db: Session = Depends(get_db)) -> list[RpAiSkil
             .order_by(RpAiSkillVersion.id.desc())
         ).all()
     )
+
+
+# Streaming twin of /evaluate. Registered here so it can reuse the helpers above rather
+# than duplicating the upload parsing and the report shaping.
+from app.routers.upload_stream import register as _register_stream  # noqa: E402
+
+_register_stream(router, _read_upload, _checks_out, _findings_out, normalize_eid)

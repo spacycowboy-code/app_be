@@ -17,6 +17,8 @@ import logging
 import os
 import pathlib
 import subprocess
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.services.skill_audit.acp import extract_json
@@ -31,6 +33,16 @@ INCOMPLETE_RULES = frozenset({
     "LLM_CONTEXT_BUDGET_EXCEEDED",
     "META_ANALYSIS_FAILED",
 })
+
+
+# The scanner narrates its own progress on stderr. Three lines, and they land exactly on
+# the boundaries between the phases, so they can drive a real progress display instead of
+# a timer pretending to be one. Measured on a real skill: +3.8s, +28.2s, +79.3s of 80.7s.
+STAGE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("Using Meta-Analyzer", "semantic"),        # deterministic analyzers done
+    ("Running meta-analysis", "arbitration"),   # semantic analysis done
+    ("Meta-analysis complete", "reporting"),    # arbitration done
+)
 
 
 @dataclass
@@ -112,8 +124,44 @@ def llm_env(*, base_url: str, api_key: str, model: str) -> dict[str, str]:
     }
 
 
+@dataclass
+class _Completed:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _run(cmd: list[str], *, timeout: int, env: dict[str, str],
+         on_progress: Callable[[str], None] | None) -> _Completed:
+    """Run the scanner, reporting each phase boundary as the scanner announces it.
+
+    Without a callback this is subprocess.run. With one, stderr is read line by line so a
+    caller can tell someone what is happening now rather than animating a guess.
+    """
+    if on_progress is None:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        return _Completed(done.returncode, done.stdout, done.stderr)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, bufsize=1, env=env)
+    lines: list[str] = []
+    deadline = time.monotonic() + timeout
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        lines.append(line)
+        for marker, stage in STAGE_MARKERS:
+            if marker in line:
+                on_progress(stage)
+                break
+        if time.monotonic() > deadline:
+            proc.kill()
+            raise subprocess.TimeoutExpired(cmd, timeout)
+    out, _ = proc.communicate(timeout=max(1, int(deadline - time.monotonic())))
+    return _Completed(proc.returncode, out or "", "".join(lines))
+
+
 def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
          env: dict[str, str] | None = None,
+         on_progress: Callable[[str], None] | None = None,
          use_llm: bool = True, enable_meta: bool = True,
          use_behavioral: bool = False) -> ScanReport:
     """Scan a materialised skill directory.
@@ -129,8 +177,8 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
     if use_behavioral:
         cmd.append("--use-behavioral")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              env={**os.environ, **(env or {})})
+        proc = _run(cmd, timeout=timeout, env={**os.environ, **(env or {})},
+                    on_progress=on_progress)
     except subprocess.TimeoutExpired:
         log.warning("scanner timed out after %ss on %s", timeout, target_dir)
         return ScanReport(ran=False, error=f"timed out after {timeout}s")
