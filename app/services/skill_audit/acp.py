@@ -9,6 +9,8 @@ tools at all.
 from __future__ import annotations
 
 import json
+import os
+import os
 import re
 import subprocess
 import time
@@ -116,6 +118,10 @@ class AcpSession:
     session_id: str | None = field(default=None, init=False)
 
     def _start(self) -> None:
+        # The agent is spawned with cwd set, and Popen fails outright if it does not
+        # exist. Create it: a missing scratch directory would otherwise surface as the
+        # scanner's LLM analyzer failing, i.e. as a skill going to review.
+        os.makedirs(self.cwd, exist_ok=True)
         cmd = [self.bin_path, "acp", "--trust-tools="]
         if self.agent:
             cmd += ["--agent", self.agent]

@@ -17,6 +17,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 
+from app.services.skill_audit.acp import extract_json
 from app.services.skill_audit.types import Finding
 
 log = logging.getLogger(__name__)
@@ -125,8 +126,12 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
         tail = (proc.stderr or "").strip()[-300:]
         log.warning("scanner produced no report (rc=%s): %s", proc.returncode, tail)
         return ScanReport(ran=False, error=tail or f"no output (rc={proc.returncode})")
+    # stdout is not a clean channel: when an LLM call fails, litellm prints its own
+    # banner there, ahead of the report. Taking the JSON object out of the stream rather
+    # than assuming the stream *is* JSON keeps a noisy dependency from turning a completed
+    # scan into "no report", which the gate would read as "not checked".
     try:
-        report = json.loads(proc.stdout)
+        report = json.loads(extract_json(proc.stdout))
     except json.JSONDecodeError as exc:
         return ScanReport(ran=False, error=f"unparseable report: {exc}")
 

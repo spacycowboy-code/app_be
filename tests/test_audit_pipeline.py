@@ -239,3 +239,33 @@ class TestAuditSkill:
         pipeline.audit_skill(name="t", skill_md=md)
         pipeline.audit_skill(name="t", skill_md=md)
         assert calls["n"] == 1
+
+
+class TestReportParsingIsRobust:
+    """stdout carries other people's output too."""
+
+    def test_a_litellm_banner_before_the_report_is_ignored(self, monkeypatch):
+        banner = ("\n\x1b[1;31mGive Feedback / Get Help: "
+                  "https://github.com/BerriAI/litellm/issues/new\x1b[0m\n"
+                  "LiteLLM.Info: If you need to debug this error, use "
+                  "`litellm._turn_on_debug()'.\n\n")
+        payload = {"is_safe": True, "max_severity": "SAFE", "findings": [],
+                   "analyzers_used": ["static_analyzer"]}
+
+        class Done:
+            returncode = 0
+            stdout = banner + json.dumps(payload)
+            stderr = ""
+
+        monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: Done())
+        r = scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=1)
+        assert r.ran is True and r.analyzers_used == ["static_analyzer"]
+
+    def test_genuinely_unparseable_output_still_fails_closed(self, monkeypatch):
+        class Done:
+            returncode = 0
+            stdout = "Traceback (most recent call last):\n  File ...\n"
+            stderr = ""
+
+        monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: Done())
+        assert scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=1).ran is False
