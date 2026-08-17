@@ -19,6 +19,7 @@ from app.services.gitlab_sync import (
     GitLabError,
     GitLabProject,
     fetch_readme_description,
+    fetch_head_commit_sha,
     fetch_repo_archive,
     list_group_projects,
 )
@@ -216,6 +217,7 @@ def create_install_token(
         )
 
     eid = getattr(request.state, "eid", None)
+    project_id = item.id[3:]
 
     # The path is built here, from the item we just loaded — it is never taken
     # from the caller. Accepting a caller-supplied path would turn this into
@@ -229,6 +231,10 @@ def create_install_token(
         "expiresIn": expires_in,
         "path": path,
         "filename": f"{_slugify(item.name) or item.id}.zip",
+        # Lets a re-install skip the whole unpack when the code has not changed.
+        # ``None`` when GitLab could not be asked — the caller then reinstalls,
+        # which is the pre-existing behaviour, so this never blocks anything.
+        "version": fetch_head_commit_sha(project_id),
     }
 
 

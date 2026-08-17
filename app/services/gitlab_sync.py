@@ -134,6 +134,34 @@ def fetch_repo_archive(project_id: int | str, ref: str | None = None) -> bytes:
         raise GitLabError(f"无法连接 GitLab: {exc.reason}") from exc
 
 
+def fetch_head_commit_sha(project_id: int | str, ref: str | None = None) -> str | None:
+    """Short commit sha the archive would be built from, or ``None``.
+
+    Used as a version marker so a re-install can tell "same code, nothing to do"
+    from "new code, unpack it". The sha is the right identity for that: the zip
+    bytes are not guaranteed to be reproducible, and the item's ``version``
+    column is hand-maintained metadata that nobody updates.
+
+    **Failures return ``None`` instead of raising**, unlike
+    :func:`fetch_repo_archive`. This is an optimisation, not correctness: without
+    a version the caller reinstalls, which is what it would have done anyway. A
+    download that fails must be loud; a version lookup that fails must not block
+    the download it was only trying to save.
+
+    Only ever call this with an id that came out of our own database — same rule
+    as :func:`fetch_repo_archive`, for the same reason.
+    """
+    path = f"/projects/{urllib.parse.quote(str(project_id), safe='')}/repository/commits/"
+    try:
+        data, _ = _api_get(path + urllib.parse.quote(ref or "HEAD", safe=""))
+    except Exception:  # noqa: BLE001 - see docstring: never block on this
+        return None
+    if isinstance(data, dict):
+        sha = data.get("short_id") or data.get("id")
+        return str(sha)[:12] if sha else None
+    return None
+
+
 def _clean_desc(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"[*_`#]+", "", text)
