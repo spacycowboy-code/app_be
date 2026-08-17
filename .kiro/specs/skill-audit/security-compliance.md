@@ -170,10 +170,20 @@ compliance audits",实测代价:一个真实中文技能在 strict 下 14 条命
 **按规则取舍,不按类别整片丢。** `policy_violation` 里既有纯卫生项,也有不能丢的两条:
 `UNANALYZABLE_BINARY`(读不了的文件)与 `MANIFEST_DESCRIPTION_TOO_LONG`。
 
-**必须覆盖的两个默认值**,否则语义层会在真实技能上频繁"未核实":
-`llm_analysis.max_total_prompt_chars` 默认 10 万字符,真实包普遍超过(实测 22 次
-`LLM_CONTEXT_BUDGET_EXCEEDED`)——按最大真实包留余量;`llm_analysis.max_output_tokens` 默认 8192,
-而实测回包达到 19,077 字符,截断后的 JSON 无法解析。两项调整后该类失败归零。
+**送给语义层的量必须覆盖**,否则被截断的部分在报告里仍算"已审"。默认值在 46 个真实技能上的实测:
+SKILL.md 有 11%、代码文件有 21%、其他文本有 19% 超过上限;单次调用组装后的提示词最大 333,641 字符,
+而 `max_total_prompt_chars` 默认 100,000——会切掉那个技能的三分之二(实测 22 次
+`LLM_CONTEXT_BUDGET_EXCEEDED`)。取值规则是**覆盖最大观测值并留约 1.5 倍余量**:
+
+| 项 | 最大观测 | 默认 | 取值 |
+|---|---|---|---|
+| `max_total_prompt_chars` | 333,641 | 100,000 | 600,000 |
+| `max_instruction_body_chars` | 33,168 | 20,000 | 50,000 |
+| `max_code_file_chars` | 89,682 | 15,000 | 140,000 |
+| `max_referenced_file_chars` | 53,963 | 10,000 | 80,000 |
+
+**`max_output_tokens` 不动。** 269 次调用里最大回包 13,228 字符 ≈ 3,779 token,默认 8192 从未成为约束;
+先前以为需要调大,那是把"模型答成散文报告"误判成截断。
 
 **每条命中自带的 `snippet` 与 `remediation` 必须透传**,否则记录里只剩"某文件某行命中了某规则",
 作者无法答复,复核者无法判断。
