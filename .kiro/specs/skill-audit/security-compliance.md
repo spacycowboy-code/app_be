@@ -34,15 +34,21 @@
 
 依据:OWASP LLM Top 10 2025、CWE-798(硬编码凭据)、USENIX Security 2026(该研究测得 84% 的 skill 漏洞出现在自然语言指令里,而不是代码里)。
 
-每个判定类别对应的公开标准,便于追溯分类依据。界面上只显示"检查项"这一列,不显示标准编号:
+**类别词汇只有一套,就是扫描器规则包声明的那套。** 它在 385 条规则上声明了 17 个类别,并自带到公开框架的
+映射(`threats/cisco_ai_taxonomy.py`,AITECH / AISUBTECH + 框架映射),所以分类依据可追溯,不需要我们
+另写一张对照表。**我们的语义判定器也输出这套类别名**——两层用同一套词汇,同一个类别由两层独立命中就是互证,
+而不是需要翻译的两种说法。
 
-| 判定 category | 面向用户的检查项 | OWASP LLM Top 10 (2025) | 主要 CWE | 处理 |
-|---|---|---|---|---|
-| `secret` | 敏感信息(密钥/凭据) | LLM02 Sensitive Information Disclosure | CWE-798 Use of Hard-coded Credentials | 拒绝 |
-| `prompt_injection` | 提示注入 | LLM01 Prompt Injection | CWE-1427 Improper Neutralization of Input Used for an LLM Prompt | 拒绝 |
-| `hidden_instruction` | 隐蔽/混淆指令 | LLM01 Prompt Injection(混淆/间接) | CWE-1427 | 拒绝 |
-| `dangerous_instruction` | 危险操作指令 | LLM06 Excessive Agency | CWE-77 Command Injection / CWE-94 Code Injection | 拒绝 |
-| `malicious_artifact` | 附件安全 | LLM03 Supply Chain | CWE-506 Embedded Malicious Code | 复核 |
+曾经自造过一套五个类别(`secret` / `dangerous_instruction` / `malicious_artifact` / `hidden_instruction` /
+`prompt_injection`),与工具的词汇只有一个名字重合,于是中间必须有一次翻译;那次翻译把 `obfuscation` 变成
+红线类"隐藏指令"(中文注释因此被判危险),又把 `TOOL_ABUSE_UNDECLARED_NETWORK`、`DATA_EXFIL_SOCKET_CONNECT`
+压成"未分类"。自造词汇同时也更粗:工具有 `agent_manipulation`(99 条规则)与 `tool_poisoning`(24 条),
+而"操纵 agent"正是恶意技能要做的事。
+
+参与门禁的类别与处理,即下文"裁决"那张表;界面上只显示面向用户的检查项名称,不显示类别标识符与框架编号。
+
+**展示是展示,不是第二套语义。** 界面上的中文检查项名称由一张展示映射提供,**遇到没有映射的类别时直接显示
+工具自己的 `title`**,不猜、不归到"其他"。这张映射只影响措辞,不影响任何判定。
 
 ## 机制总览:查哪些层面、怎么查
 
@@ -124,6 +130,21 @@
 1. **没见过的类别默认转复核。** 工具升级会加新规则、新类别;裁决表遇到不认识的类别时落到"未核实",不静默放过。
 2. **某个分析器没跑完 = 未核实 = 转复核。** 不区分是超时、崩了还是没装。
 3. **判定可复现。** 审计记录存判定模型 + `rules.md` 哈希 + **扫描器版本 + 策略指纹**。
+
+**严重度的刻度也取自工具,含义按它的规则赋值反推,不自己发明。** 曾经在提示词里只把
+`critical|high|medium|low` 列成枚举、从不定义,然后拿这个没有刻度的数去做门禁判断。工具的赋值方式是一致的:
+`DATA_EXFIL_NETWORK_REQUESTS`(出现网络调用原语)是 MEDIUM,而 `DATA_EXFIL_HTTP_POST`(POST 的目标或载荷
+里出现凭据字样)是 CRITICAL;`PROMPT_INJECTION_IGNORE_INSTRUCTIONS` 是 CRITICAL。可以读出来的分界是
+**能力与已然的行为**:
+
+| 级别 | 含义 | 例 |
+|---|---|---|
+| critical / high | 文本或代码呈现的是**行为本身**——有对象、有载荷、有目标地址 | 把凭据 POST 到某地址;要求助手忽略既有规则 |
+| medium | 只呈现**能力**,没有指向这次行为的证据 | 用了网络原语;声明之外的网络访问 |
+| low / info | 卫生与上下文,不指向任何行为 | 描述超长;夹带了脚本;未知二进制 |
+
+这条分界与本维度的判据一致:门对**隐瞒与越权**发力,不对**有能力**发力。所以它同时是判定器给分的规则,
+也是裁决表读分的规则,两边不会各自漂移。
 
 ### 工具与调用方式
 - 密钥:正则红线层(命中=红线拒绝)+ detect-secrets(进程内,约 23 个固定格式检测器;命中=转复核,因为覆盖面广、假阳性偏高)。两层都在把文本交给判定器之前脱敏,密钥不外泄给模型。
