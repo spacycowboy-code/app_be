@@ -87,7 +87,11 @@ class Settings(BaseSettings):
     auth_jwt_algorithm: str = "HS256"
     # Session lifetime in hours.
     auth_token_ttl_hours: int = 8
-
+    # Lifetime of a single-path "scoped" token, in MINUTES. These are pasted
+    # into terminals and agent prompts, i.e. into places that keep history, so
+    # the short window is the containment rather than an inconvenience. Raising
+    # it much past a few minutes defeats the point.
+    scoped_token_ttl_minutes: int = 10
     # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
     # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /
     # break-glass access. Its EID is `audit_admin_eid` (ADMINMM), so it has
