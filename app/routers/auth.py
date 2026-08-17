@@ -9,6 +9,7 @@ identity header, for nginx's ``auth_request`` (see ``verify`` below).
 """
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 
@@ -24,6 +25,8 @@ from app.services import ldap_auth
 from app.services.auth_tokens import create_token
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+logger = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -61,12 +64,15 @@ def _upsert_user(db: Session, user: ldap_auth.LdapUser) -> None:
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(
+    payload: LoginRequest, request: Request, db: Session = Depends(get_db)
+) -> LoginResponse:
     settings = get_settings()
     if not settings.auth_enabled:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "登录功能未启用")
     if not settings.auth_jwt_secret:
         # Misconfiguration: refuse rather than issue unverifiable tokens.
+        logger.error("Login refused: auth_jwt_secret is not configured")
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "认证服务未正确配置")
 
     # Break-glass local admin: authenticates WITHOUT LDAP. Its EID is the admin
@@ -94,6 +100,16 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
     try:
         user = ldap_auth.authenticate(payload.username, payload.password.get_secret_value())
     except ldap_auth.LdapAuthError as exc:
+        # One log line per rejected login, carrying the machine-readable reason
+        # and the caller's address. This is the record that was missing when
+        # "some people get 401" had to be diagnosed from user reports alone.
+        logger.warning(
+            "Login rejected: user=%r reason=%s retryable=%s client=%s",
+            payload.username,
+            exc.reason,
+            exc.retryable,
+            request.client.host if request.client else "?",
+        )
         if exc.retryable:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc

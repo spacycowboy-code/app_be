@@ -1,4 +1,6 @@
 """FastAPI application entry point."""
+import logging
+
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -24,6 +26,15 @@ from app.routers import (
 )
 
 settings = get_settings()
+
+# Without a handler on the root logger, Python's last-resort handler only emits
+# WARNING and above, so successful logins (INFO) would never reach the container
+# log — and a login audit trail that only records failures is half a trail.
+# uvicorn configures its own loggers; this covers ours.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 app = FastAPI(title=settings.app_name, version=__version__)
 
