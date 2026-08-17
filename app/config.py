@@ -92,6 +92,19 @@ class Settings(BaseSettings):
     # the short window is the containment rather than an inconvenience. Raising
     # it much past a few minutes defeats the point.
     scoped_token_ttl_minutes: int = 10
+
+    # --- Sign-in statistics access (Dashboard) ------------------------------
+    # EIDs allowed to read /api/login-stats, i.e. the active-user counts and the
+    # signums behind them. Enforced in the endpoint: the sidebar also hides the
+    # Dashboard from everyone else, but hiding a link is not access control.
+    # Comma-separated; compared uppercase.
+    dashboard_eids: str = "EZHGMIO,ADMINMM,EBAOXUE"
+    # Time zone whose midnight starts a "day" for the active-user counts. This
+    # must be the *users'* zone, not the database server's: the DB runs on UTC+2
+    # while the team is in UTC+8, so counting from the DB's midnight would file
+    # every sign-in between 00:00 and 06:00 Beijing under the previous day.
+    stats_timezone: str = "Asia/Shanghai"
+
     # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
     # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /
     # break-glass access. Its EID is `audit_admin_eid` (ADMINMM), so it has
@@ -170,6 +183,10 @@ class Settings(BaseSettings):
     @property
     def ldap_email_login_attr_list(self) -> list[str]:
         return [a.strip() for a in self.ldap_email_login_attrs.split(",") if a.strip()]
+
+    @property
+    def dashboard_eid_list(self) -> list[str]:
+        return [e.strip().upper() for e in self.dashboard_eids.split(",") if e.strip()]
 
 
 @lru_cache

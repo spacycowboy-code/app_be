@@ -16,6 +16,7 @@ from app.routers import (
     categories,
     comments,
     favorites,
+    login_stats,
     market,
     market_favorites,
     reviews,
@@ -128,6 +129,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
 
 app.include_router(users.router)
 app.include_router(auth.router)
+app.include_router(login_stats.router)
 app.include_router(favorites.router)
 app.include_router(market_favorites.router)
 app.include_router(skills.router)

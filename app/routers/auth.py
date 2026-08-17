@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.models.login_event import RpAiLoginEvent
 from app.models.user import RpAiPortal
 from app.services import ldap_auth
 from app.services.auth_tokens import create_token
@@ -63,6 +64,21 @@ def _upsert_user(db: Session, user: ldap_auth.LdapUser) -> None:
     db.commit()
 
 
+def _record_login(db: Session, eid: str) -> None:
+    """Append a sign-in event, for the active-user counts on the Dashboard.
+
+    Best-effort on purpose: statistics must never be the reason someone cannot
+    sign in, so a failure here is logged and swallowed rather than turned into a
+    500 on a login that actually succeeded.
+    """
+    try:
+        db.add(RpAiLoginEvent(eid=eid))
+        db.commit()
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("Failed to record login event for %s", eid)
+        db.rollback()
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(
     payload: LoginRequest, request: Request, db: Session = Depends(get_db)
@@ -95,6 +111,10 @@ def login(
             dn="",
         )
         _upsert_user(db, admin)
+        # Counted like any other sign-in. It is a shared break-glass account, so
+        # it shows up as one active "user" — visible in the Dashboard's EID list
+        # rather than silently folded into the total.
+        _record_login(db, admin.eid)
         token, expires_in = create_token(admin.eid, admin.display_name)
         return LoginResponse(
             token=token, expiresIn=expires_in, eid=admin.eid, displayName=admin.display_name
@@ -118,6 +138,7 @@ def login(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
 
     _upsert_user(db, user)
+    _record_login(db, user.eid)
     token, expires_in = create_token(user.eid, user.display_name)
     return LoginResponse(
         token=token, expiresIn=expires_in, eid=user.eid, displayName=user.display_name
