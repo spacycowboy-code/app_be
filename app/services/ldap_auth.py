@@ -3,8 +3,10 @@
 Flow (validated against ericsson.se / EGAD):
 
 1. Bind as the service account (``ldap_bind_user`` / ``ldap_bind_password``).
-2. Search under ``ldap_base_dn`` for the entry whose ``sAMAccountName`` matches
-   the login name, reading the EID / display / department attributes.
+2. Search under ``ldap_base_dn`` for the user's entry, reading the EID /
+   display / department attributes. A signum matches ``sAMAccountName``; an
+   address also matches ``userPrincipalName`` / ``mail`` (see
+   ``build_search_filter``), so both ways of naming an account work.
 3. Re-bind with that entry's DN + the password the user typed. A successful
    bind proves the password; anything else is an invalid credential.
 
@@ -13,10 +15,9 @@ browser only sends the user's typed username + password over TLS.
 
 Every failure carries a ``reason`` so the caller can tell apart causes that all
 used to surface as one indistinguishable 401: the login name not resolving at
-all (very often someone typing their e-mail instead of their signum), an
-expired password, a locked or disabled account, and an LDAP outage during the
-user re-bind. Failures are logged server-side with that reason; passwords are
-never logged.
+all, an expired password, a locked or disabled account, and an LDAP outage
+during the user re-bind. Failures are logged server-side with that reason;
+passwords are never logged.
 """
 from __future__ import annotations
 
@@ -36,9 +37,8 @@ logger = logging.getLogger(__name__)
 #: What the user is told when the login name resolves to nothing, or resolves
 #: but the password is simply wrong. Deliberately identical for both so the
 #: endpoint can't be used to enumerate accounts — the distinction lives in the
-#: server log. The signum hint is here because the single most common cause is
-#: someone typing their e-mail address (which is NOT the sAMAccountName).
-BAD_CREDENTIALS_MSG = "用户名或密码错误（用户名请填公司 signum，例如 ezhgmio，不是邮箱）"
+#: server log.
+BAD_CREDENTIALS_MSG = "Incorrect username or password."
 
 #: AD packs the real reason for an invalidCredentials result into the
 #: diagnostic message as "data <hex>". Each maps to (reason, user-facing text).
@@ -48,13 +48,19 @@ BAD_CREDENTIALS_MSG = "用户名或密码错误（用户名请填公司 signum�
 AD_SUBCODES: dict[str, tuple[str, str]] = {
     "525": ("user_not_found", BAD_CREDENTIALS_MSG),
     "52e": ("bad_password", BAD_CREDENTIALS_MSG),
-    "530": ("time_restricted", "当前时间不允许登录，请联系 IT"),
-    "531": ("workstation_restricted", "当前设备不允许登录，请联系 IT"),
-    "532": ("password_expired", "公司密码已过期，请先修改密码后再登录"),
-    "533": ("account_disabled", "账号已被禁用，请联系 IT"),
-    "701": ("account_expired", "账号已过期，请联系 IT"),
-    "773": ("must_change_password", "需要先修改公司密码（首次登录或密码被重置），修改后再登录"),
-    "775": ("account_locked", "账号已被锁定（连续多次密码错误），请稍后重试或联系 IT 解锁"),
+    "530": ("time_restricted", "Sign-in is not allowed at this time. Please contact IT."),
+    "531": ("workstation_restricted",
+            "Sign-in is not allowed from this device. Please contact IT."),
+    "532": ("password_expired",
+            "Your corporate password has expired. Change it, then sign in again."),
+    "533": ("account_disabled", "This account is disabled. Please contact IT."),
+    "701": ("account_expired", "This account has expired. Please contact IT."),
+    "773": ("must_change_password",
+            "You must change your corporate password first (new account or password "
+            "reset), then sign in again."),
+    "775": ("account_locked",
+            "This account is locked after repeated failed sign-ins. Wait and retry, "
+            "or contact IT to unlock it."),
 }
 
 _SUBCODE_RE = re.compile(r"\bdata\s+([0-9a-fA-F]+)\b")
@@ -94,6 +100,61 @@ def _server() -> Server:
     return Server(settings.ldap_url, use_ssl=use_ssl, tls=tls, get_info=ALL)
 
 
+def normalize_login_name(raw: str) -> str:
+    """Reduce what a person typed to the identifier we search for.
+
+    Browsers and habit produce ``DOMAIN\\name`` (what Windows shows) and
+    ``domain/name``; neither is a directory attribute value, so strip the
+    prefix. The remainder is used as typed — AD matching is case-insensitive.
+    """
+    name = (raw or "").strip()
+    for separator in ("\\", "/"):
+        if separator in name:
+            name = name.rsplit(separator, 1)[-1].strip()
+    return name
+
+
+def build_search_filter(username: str) -> str:
+    """LDAP filter resolving a typed login name to one user entry.
+
+    A signum matches ``sAMAccountName``. An address (anything containing "@")
+    additionally matches the mail-ish attributes, because the most common way to
+    fail this login was typing one's e-mail — which is a perfectly valid way to
+    name the same account, and no reason to refuse it. The UPN and the mail
+    address are frequently unrelated to the signum (e.g. signum ``ezhgmio`` vs
+    UPN ``tracy.m.zhang@ericsson.com``), so this cannot be derived locally; it
+    has to be a directory lookup.
+    """
+    settings = get_settings()
+    escaped = escape_filter_chars(username)
+    primary = settings.ldap_user_filter.format(username=escaped)
+    if "@" not in username:
+        return primary
+    clauses = [primary] + [
+        f"({attr}={escaped})" for attr in settings.ldap_email_login_attr_list
+    ]
+    return "(|" + "".join(clauses) + ")"
+
+
+def _pick_entry(entries: list, username: str) -> object:
+    """Choose deterministically when several entries match.
+
+    Widening the filter to mail attributes makes multiple hits plausible (a
+    shared alias, a stale object). An exact ``sAMAccountName`` match is the
+    strongest claim to the name, so it wins; otherwise keep the first hit, which
+    is the previous behaviour.
+    """
+    wanted = username.lower()
+    for entry in entries:
+        try:
+            candidate = entry["sAMAccountName"].value
+        except Exception:
+            continue
+        if candidate and str(candidate).lower() == wanted:
+            return entry
+    return entries[0]
+
+
 def authenticate(username: str, password: str) -> LdapUser:
     """Verify ``username``/``password`` against AD and return the user's attrs.
 
@@ -101,9 +162,9 @@ def authenticate(username: str, password: str) -> LdapUser:
     operational LDAP failure (retryable=True).
     """
     settings = get_settings()
-    username = (username or "").strip()
+    username = normalize_login_name(username)
     if not username or not password:
-        raise LdapAuthError("用户名和密码不能为空", reason="empty_input")
+        raise LdapAuthError("Username and password are required.", reason="empty_input")
     # An empty password can produce an "unauthenticated bind" that AD may accept
     # as anonymous — guarded above, but keep the invariant explicit.
 
@@ -123,11 +184,11 @@ def authenticate(username: str, password: str) -> LdapUser:
         # firewall, or the whole directory being down.
         logger.error("LDAP service bind failed (affects all logins): %s", exc)
         raise LdapAuthError(
-            f"LDAP 服务不可用: {exc}", retryable=True, reason="service_bind_failed"
+            f"The directory service is unavailable: {exc}", retryable=True, reason="service_bind_failed"
         ) from exc
 
     try:
-        flt = settings.ldap_user_filter.format(username=escape_filter_chars(username))
+        flt = build_search_filter(username)
         attrs = [
             settings.ldap_eid_attr,
             settings.ldap_display_attr,
@@ -138,9 +199,9 @@ def authenticate(username: str, password: str) -> LdapUser:
             settings.ldap_base_dn, flt, search_scope=SUBTREE, attributes=attrs
         )
         if not ok or not svc.entries:
-            # NOT a wrong password: the login name matched no entry. Usually an
-            # e-mail address / "DOMAIN\name" typed instead of the signum, or an
-            # account outside ldap_base_dn.
+            # NOT a wrong password: the login name matched no entry — neither as
+            # a signum nor (for an address) as a UPN / mail attribute. Either a
+            # typo or an account outside ldap_base_dn.
             logger.warning(
                 "LDAP login failed: user %r not found (base=%s filter=%s referrals=%s)",
                 username,
@@ -149,17 +210,16 @@ def authenticate(username: str, password: str) -> LdapUser:
                 svc.result.get("referrals") if svc.result else None,
             )
             raise LdapAuthError(BAD_CREDENTIALS_MSG, reason="user_not_found")
+        entry = _pick_entry(list(svc.entries), username)
         if len(svc.entries) > 1:
-            # sAMAccountName is unique per domain, so this means a stale or
-            # cross-domain duplicate. We bind the first hit, which may be the
-            # wrong object — worth knowing about rather than silently guessing.
+            # Plausible now that an address also matches mail attributes: a
+            # shared alias, or a stale duplicate object.
             logger.warning(
-                "LDAP login: %d entries matched user %r, using the first (%s)",
+                "LDAP login: %d entries matched user %r, using %s",
                 len(svc.entries),
                 username,
-                svc.entries[0].entry_dn,
+                entry.entry_dn,
             )
-        entry = svc.entries[0]
         user_dn = entry.entry_dn
 
         def _attr(name: str) -> str | None:
@@ -178,7 +238,7 @@ def authenticate(username: str, password: str) -> LdapUser:
                 settings.ldap_eid_attr,
                 user_dn,
             )
-            raise LdapAuthError("无法确定该账号的 EID", reason="no_eid")
+            raise LdapAuthError("Could not determine this account's EID.", reason="no_eid")
         eid = eid.strip().upper()
         display_name = _attr(settings.ldap_display_attr)
         department = _attr(settings.ldap_department_attr)
@@ -208,7 +268,7 @@ def authenticate(username: str, password: str) -> LdapUser:
             exc,
         )
         raise LdapAuthError(
-            "LDAP 服务暂时不可用，请稍后重试", retryable=True, reason="rebind_error"
+            "The directory service is temporarily unavailable. Please try again.", retryable=True, reason="rebind_error"
         ) from exc
 
     if not bound:

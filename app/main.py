@@ -94,7 +94,11 @@ async def auth_gate(request: Request, call_next):
         claims = decode_token(token)
     except TokenError:
         return JSONResponse(
-            status_code=401, content={"detail": "未登录或登录已过期，请重新登录"}
+            status_code=401,
+            content={
+                "detail": "Not signed in, or your session has expired. "
+                          "Please sign in again."
+            },
         )
     request.state.eid = claims.get("sub")
     request.state.display_name = claims.get("name") or None

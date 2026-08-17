@@ -28,9 +28,9 @@ from datetime import datetime, timedelta, timezone
 
 from ldap3 import ALL, SUBTREE, Connection, Server, Tls
 from ldap3.core.exceptions import LDAPException
-from ldap3.utils.conv import escape_filter_chars
 
 from app.config import get_settings
+from app.services import ldap_auth
 
 # userAccountControl flags that explain a refused simple bind.
 UAC_FLAGS = {
@@ -121,8 +121,10 @@ def diagnose(username: str, check_bind: bool = False) -> None:
         return
     print(f"  服务账号绑定 OK ({settings.ldap_bind_user}), 服务器={server.host}")
 
-    # 2) The exact search the login path performs.
-    flt = settings.ldap_user_filter.format(username=escape_filter_chars(username))
+    # 2) The exact search the login path performs (same filter builder, so a
+    #    signum, an e-mail/UPN and "DOMAIN\name" behave here as they do there).
+    username = ldap_auth.normalize_login_name(username)
+    flt = ldap_auth.build_search_filter(username)
     attrs = [
         settings.ldap_eid_attr,
         settings.ldap_display_attr,
@@ -141,13 +143,13 @@ def diagnose(username: str, check_bind: bool = False) -> None:
 
     if not ok or not svc.entries:
         print("  -> 搜到 0 条：登录会返回 401「用户名或密码错误」，但真实原因是**查不到这个账号**。")
-        print("     常见：用户输的不是 sAMAccountName(signum)，而是邮箱/ERICSSON\\xxx；")
-        print("     或账号在其它域，不在 DC=ericsson,DC=se 这个搜索基下。")
+        print("     signum 与邮箱/UPN 都已支持，所以这里为 0 多半是拼错，")
+        print("     或该账号不在 DC=ericsson,DC=se 这个搜索基下（其它域）。")
         svc.unbind()
         return
 
     if len(svc.entries) > 1:
-        print("  -> 命中多条！登录代码只取 entries[0]，可能绑到一个陈旧/禁用对象上。")
+        print("  -> 命中多条：登录会优先选 sAMAccountName 精确匹配的那条（见 _pick_entry）。")
 
     for entry in svc.entries:
         print(f"\n  DN: {entry.entry_dn}")
@@ -173,7 +175,7 @@ def diagnose(username: str, check_bind: bool = False) -> None:
         if not eid:
             print(f"    -> 缺少 {settings.ldap_eid_attr}，EID 会回退到 sAMAccountName")
 
-    user_dn = svc.entries[0].entry_dn
+    user_dn = ldap_auth._pick_entry(list(svc.entries), username).entry_dn
     svc.unbind()
 
     if not check_bind:

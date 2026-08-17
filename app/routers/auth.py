@@ -69,11 +69,14 @@ def login(
 ) -> LoginResponse:
     settings = get_settings()
     if not settings.auth_enabled:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "登录功能未启用")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Sign-in is disabled.")
     if not settings.auth_jwt_secret:
         # Misconfiguration: refuse rather than issue unverifiable tokens.
         logger.error("Login refused: auth_jwt_secret is not configured")
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "认证服务未正确配置")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Authentication is not configured correctly.",
+        )
 
     # Break-glass local admin: authenticates WITHOUT LDAP. Its EID is the admin
     # EID, so the session has admin rights everywhere. Username match is
@@ -126,7 +129,7 @@ def me(request: Request) -> MeResponse:
     """Return the identity carried by the (already-validated) bearer token."""
     eid = getattr(request.state, "eid", None)
     if not eid:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
     return MeResponse(eid=eid, displayName=getattr(request.state, "display_name", None))
 
 
@@ -157,6 +160,6 @@ def verify(request: Request) -> Response:
     """
     eid = str(getattr(request.state, "eid", "") or "").strip()
     if not eid or not _EID_RE.match(eid):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
     return Response(status_code=status.HTTP_204_NO_CONTENT,
                     headers={"X-Auth-Eid": eid.upper()})

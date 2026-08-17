@@ -1,8 +1,9 @@
 """Login failures must be distinguishable.
 
 Every rejected login used to look the same from the outside AND in the log: one
-401 saying 「用户名或密码错误」. That made "some people can log in, some get
-401" undiagnosable, so these tests pin down the distinctions that were added:
+401 saying "incorrect username or password". That made "some people can log in,
+some get 401" undiagnosable, so these tests pin down the distinctions that were
+added:
 
 * the login name resolving to nothing is tagged ``user_not_found`` — separately
   from a wrong password — while still telling the user the same thing, so the
@@ -119,14 +120,12 @@ def test_unresolvable_login_name_is_tagged_but_stays_generic(fake_ldap):
     fake_ldap([], _UserConn())
 
     with pytest.raises(ldap_auth.LdapAuthError) as excinfo:
-        ldap_auth.authenticate("someone@ericsson.com", "pw")
+        ldap_auth.authenticate("nobody@ericsson.com", "pw")
 
     assert excinfo.value.reason == "user_not_found"
     assert excinfo.value.retryable is False
-    # Same text as a wrong password (no account enumeration), and it names the
-    # single most common cause: an e-mail address typed instead of the signum.
+    # Same text as a wrong password: no account enumeration.
     assert str(excinfo.value) == ldap_auth.BAD_CREDENTIALS_MSG
-    assert "signum" in str(excinfo.value)
 
 
 def test_wrong_password_is_tagged_bad_password(fake_ldap):
@@ -142,11 +141,11 @@ def test_wrong_password_is_tagged_bad_password(fake_ldap):
 @pytest.mark.parametrize(
     ("subcode", "reason", "expected_in_message"),
     [
-        ("532", "password_expired", "密码已过期"),
-        ("773", "must_change_password", "修改公司密码"),
-        ("775", "account_locked", "锁定"),
-        ("533", "account_disabled", "禁用"),
-        ("701", "account_expired", "过期"),
+        ("532", "password_expired", "expired"),
+        ("773", "must_change_password", "must change"),
+        ("775", "account_locked", "locked"),
+        ("533", "account_disabled", "disabled"),
+        ("701", "account_expired", "expired"),
     ],
 )
 def test_account_state_is_reported_instead_of_blaming_the_password(
@@ -193,7 +192,9 @@ def test_rebind_outage_is_retryable_not_a_credential_error(fake_ldap):
 
     assert excinfo.value.reason == "rebind_error"
     assert excinfo.value.retryable is True
-    assert "密码" not in str(excinfo.value)
+    # Must not blame the credentials — that is what sent people off resetting
+    # passwords that were fine.
+    assert "password" not in str(excinfo.value).lower()
 
 
 def test_empty_input_is_rejected_before_any_bind(fake_ldap):
@@ -229,8 +230,9 @@ def test_credential_failure_is_401_carrying_the_message(login_client, monkeypatc
     monkeypatch.setattr(
         ldap_auth,
         "authenticate",
-        _raise(ldap_auth.LdapAuthError("公司密码已过期，请先修改密码后再登录",
-                                      reason="password_expired")),
+        _raise(ldap_auth.LdapAuthError(
+            "Your corporate password has expired. Change it, then sign in again.",
+            reason="password_expired")),
     )
 
     resp = login_client.post(
@@ -239,15 +241,18 @@ def test_credential_failure_is_401_carrying_the_message(login_client, monkeypatc
 
     assert resp.status_code == 401
     # The frontend renders this detail, so the actionable text must survive.
-    assert resp.json()["detail"] == "公司密码已过期，请先修改密码后再登录"
+    assert resp.json()["detail"] == (
+        "Your corporate password has expired. Change it, then sign in again."
+    )
 
 
 def test_ldap_outage_is_503(login_client, monkeypatch):
     monkeypatch.setattr(
         ldap_auth,
         "authenticate",
-        _raise(ldap_auth.LdapAuthError("LDAP 服务暂时不可用，请稍后重试",
-                                      retryable=True, reason="rebind_error")),
+        _raise(ldap_auth.LdapAuthError(
+            "The directory service is temporarily unavailable. Please try again.",
+            retryable=True, reason="rebind_error")),
     )
 
     resp = login_client.post(

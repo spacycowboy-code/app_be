@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     ldap_bind_password: str = ""
     # Filter to resolve the login name to a user entry ({username} is escaped).
     ldap_user_filter: str = "(sAMAccountName={username})"
+    # Additional attributes tried when the typed name looks like an address
+    # (contains "@"). People routinely type their e-mail instead of their
+    # signum; both resolve to the same account, so accept both rather than
+    # refusing the login. Comma-separated.
+    ldap_email_login_attrs: str = "userPrincipalName,mail,proxyAddresses"
     # Attribute whose value becomes the portal EID (AD `uid` is already upper).
     ldap_eid_attr: str = "uid"
     # Attributes copied onto the user row for display.
@@ -142,6 +147,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def ldap_email_login_attr_list(self) -> list[str]:
+        return [a.strip() for a in self.ldap_email_login_attrs.split(",") if a.strip()]
 
 
 @lru_cache
