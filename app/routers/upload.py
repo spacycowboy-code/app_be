@@ -182,7 +182,7 @@ async def evaluate_skill(
         )
         db.commit()
     return SkillEvaluateResult(
-        state=audit.state, reference=reference,
+        state=audit.state, reference=reference, reason=audit.reason,
         checks=_checks_out(audit), findings=_findings_out(audit),
     )
 

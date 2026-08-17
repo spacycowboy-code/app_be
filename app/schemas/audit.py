@@ -58,5 +58,8 @@ class SkillEvaluateResult(CamelModel):
 
     state: str             # pass | suspect | danger
     reference: str
+    # Why this outcome, in one line. Without it the wizard can only say "needs review"
+    # and the author has to infer which finding caused it.
+    reason: str = ""
     checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []   # flat list, kept for the audit trail

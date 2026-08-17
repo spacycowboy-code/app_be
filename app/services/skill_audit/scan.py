@@ -123,9 +123,14 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
         return ScanReport(ran=False, error=str(exc))
 
     if not (proc.stdout or "").strip():
-        tail = (proc.stderr or "").strip()[-300:]
-        log.warning("scanner produced no report (rc=%s): %s", proc.returncode, tail)
-        return ScanReport(ran=False, error=tail or f"no output (rc={proc.returncode})")
+        # The scanner says why in one line when it refuses to load a skill at all (a
+        # malformed frontmatter, for instance). That line is what the author can act on,
+        # so prefer it over the tail of the log.
+        stderr = (proc.stderr or "").strip()
+        reason = next((ln.strip() for ln in reversed(stderr.splitlines())
+                       if ln.strip().startswith("Error")), stderr[-300:])
+        log.warning("scanner produced no report (rc=%s): %s", proc.returncode, reason)
+        return ScanReport(ran=False, error=reason or f"no output (rc={proc.returncode})")
     # stdout is not a clean channel: when an LLM call fails, litellm prints its own
     # banner there, ahead of the report. Taking the JSON object out of the stream rather
     # than assuming the stream *is* JSON keeps a noisy dependency from turning a completed

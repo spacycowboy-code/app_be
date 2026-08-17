@@ -269,3 +269,29 @@ class TestReportParsingIsRobust:
 
         monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: Done())
         assert scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=1).ran is False
+
+
+class TestTheReasonIsActionable:
+    def test_a_load_error_is_reported_as_the_scanner_stated_it(self, monkeypatch):
+        """'SKILL.md missing required field: name' is something the author can fix;
+        the tail of a log is not."""
+        class Done:
+            returncode = 1
+            stdout = ""
+            stderr = ("Using Meta-Analyzer for false positive filtering\n"
+                      "Error loading skill: SKILL.md missing required field: name\n")
+
+        monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: Done())
+        r = scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=1)
+        assert r.ran is False
+        assert r.error == "Error loading skill: SKILL.md missing required field: name"
+
+    def test_the_decision_reason_reaches_the_result(self, monkeypatch):
+        from app.services.skill_audit.scan import ScanReport
+        pipeline._verdict_cache.clear()
+        monkeypatch.setattr(scan, "scan", lambda **kw: ScanReport(
+            ran=True, analyzers_used=["static_analyzer"],
+            findings=[Finding(source="llm", category="prompt_injection", severity="high",
+                              rule_id="LLM_PROMPT_INJECTION")]))
+        r = pipeline.audit_skill(name="t", skill_md="---\nname: t\n---\nx\n")
+        assert r.state == "suspect" and "prompt_injection" in r.reason
