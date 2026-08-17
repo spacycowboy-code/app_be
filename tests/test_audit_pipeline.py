@@ -295,3 +295,16 @@ class TestTheReasonIsActionable:
                               rule_id="LLM_PROMPT_INJECTION")]))
         r = pipeline.audit_skill(name="t", skill_md="---\nname: t\n---\nx\n")
         assert r.state == "suspect" and "prompt_injection" in r.reason
+
+
+class TestPolicyFingerprint:
+    def test_the_policy_file_is_hashed(self, tmp_path):
+        f = tmp_path / "policy.yaml"
+        f.write_text("preset_base: permissive\n")
+        first = scan.policy_fingerprint(str(f))
+        assert first and len(first) == 16
+        f.write_text("preset_base: strict\n")
+        assert scan.policy_fingerprint(str(f)) != first, "a changed policy must change the record"
+
+    def test_a_missing_policy_is_reported_as_unknown_not_faked(self, tmp_path):
+        assert scan.policy_fingerprint(str(tmp_path / "nope.yaml")) is None

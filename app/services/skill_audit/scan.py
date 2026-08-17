@@ -11,9 +11,11 @@ acts on or a real class it never sees.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import pathlib
 import subprocess
 from dataclasses import dataclass, field
 
@@ -49,6 +51,20 @@ class ScanReport:
         """Rules by which the scanner said a layer of itself did not finish."""
         return sorted({f.rule_id for f in self.findings
                        if f.rule_id in INCOMPLETE_RULES})
+
+
+def policy_fingerprint(policy_path: str) -> str | None:
+    """Hash of the policy we scanned with.
+
+    The scanner can attach its own fingerprint, but only in some output modes, so this is
+    computed here: the policy is one of the three inputs that decide a verdict, and a
+    record that cannot name it cannot be explained later.
+    """
+    try:
+        data = pathlib.Path(policy_path).read_bytes()
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest()[:16]
 
 
 def scanner_version(bin_path: str, timeout: int = 30) -> str | None:
@@ -141,9 +157,6 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
         return ScanReport(ran=False, error=f"unparseable report: {exc}")
 
     findings = [_finding(f) for f in report.get("findings") or []]
-    fingerprints = {(f.get("metadata") or {}).get("policy_fingerprint")
-                    for f in report.get("findings") or []}
-    fingerprints.discard(None)
     return ScanReport(
         ran=True,
         findings=findings,
@@ -151,5 +164,5 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
         max_severity=(report.get("max_severity") or None),
         is_safe=report.get("is_safe"),
         scanner_version=scanner_version(bin_path),
-        policy_fingerprint=next(iter(sorted(fingerprints)), None),
+        policy_fingerprint=policy_fingerprint(policy_path),
     )
