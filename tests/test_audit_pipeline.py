@@ -308,3 +308,53 @@ class TestPolicyFingerprint:
 
     def test_a_missing_policy_is_reported_as_unknown_not_faked(self, tmp_path):
         assert scan.policy_fingerprint(str(tmp_path / "nope.yaml")) is None
+
+
+class TestVerdictReuseIsShared:
+    """evaluate and publish must not pay twice, and must not disagree."""
+
+    def test_a_fresh_record_for_the_same_content_is_reused(self):
+        from app.database import SessionLocal
+        from app.services.skill_audit import gate
+        from app.services.skill_audit.types import AuditResult
+
+        sha = "sha-" + "a" * 8
+        audit = AuditResult(state="suspect", reason="high resource_abuse(X)", content_sha=sha,
+                            findings=[Finding(source="static", category="resource_abuse",
+                                              severity="high", rule_id="X", detail="loop")],
+                            judge_model="claude-sonnet-5", scanner_version="skill-scanner 2.0.12",
+                            policy_fingerprint="deadbeef", analyzers_used=["static_analyzer"])
+        with SessionLocal() as db:
+            gate.record(db, "ref-reuse-1", audit, skill_id=None, skill_name="s", uploader_eid="E")
+            db.commit()
+            got = gate.recent_audit(db, sha)
+        assert got is not None
+        assert got.state == "suspect" and got.reason == "high resource_abuse(X)"
+        assert [f.rule_id for f in got.findings] == ["X"]
+        assert got.scanner_version == "skill-scanner 2.0.12"
+        assert got.analyzers_used == ["static_analyzer"]
+
+    def test_a_different_content_hash_is_not_reused(self):
+        from app.database import SessionLocal
+        from app.services.skill_audit import gate
+        with SessionLocal() as db:
+            assert gate.recent_audit(db, "sha-nothing-like-this") is None
+
+    def test_an_expired_record_is_not_reused(self):
+        """A rules or scanner update has to take effect without waiting for a restart."""
+        from app.database import SessionLocal
+        from app.services.skill_audit import gate
+        from app.services.skill_audit.types import AuditResult
+
+        sha = "sha-" + "b" * 8
+        with SessionLocal() as db:
+            gate.record(db, "ref-reuse-2", AuditResult(state="pass", content_sha=sha),
+                        skill_id=None, skill_name="s", uploader_eid="E")
+            db.commit()
+            assert gate.recent_audit(db, sha, ttl=0) is None
+
+    def test_no_content_hash_means_no_reuse(self):
+        from app.database import SessionLocal
+        from app.services.skill_audit import gate
+        with SessionLocal() as db:
+            assert gate.recent_audit(db, "") is None
