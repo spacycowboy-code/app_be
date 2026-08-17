@@ -1,0 +1,26 @@
+# RP-AI 内部技能市场的扫描策略
+# 只写覆盖项,其余继承 permissive 预设。自定义策略与默认值合并时列表是替换而非追加。
+policy_name: rp-ai-internal
+policy_version: "1.0"
+preset_base: permissive
+
+# 送给语义层的量。默认值会截断真实技能(实测:SKILL.md 11%、代码文件 21%、其他文本 19% 超过默认上限),
+# 而被截断的部分在报告里仍算"已审"。
+#
+# 取值起点是**模型的上下文窗口**,不是今天语料的最大值——绑在语料上的常量会随技能长大再次被突破,
+# 而突破之后系统会滑向"全部转复核"。claude-sonnet-5 窗口 100 万 token,按语料实测约 3.5 字符/token
+# 折算 ≈ 350 万字符;取三分之一留给 SOP、已有 findings、输出与余量。
+# 参照:当前最大观测提示词 333,641 字符,占该预算 30%,还有 3 倍余量。
+llm_analysis:
+  max_total_prompt_chars: 1100000
+  max_instruction_body_chars: 220000
+  max_code_file_chars: 330000
+  max_referenced_file_chars: 220000
+  # 输出不动:269 次调用最大回包 13,228 字符 ≈ 3,779 token,默认 8192 从未成为约束。
+
+# 隐写阈值。permissive 预设要 500 个零宽字符(独立)或 100 个(有解码上下文)才触发,而 OASB 的隐写样本
+# 只有 4–50 个,于是静态层完全不响。实测正常内容里零宽字符几乎不存在:OASB 的 85 个正常样本最大 0 个,
+# 内部语料 179 个可读文件里只有 1 个文件含 1 个。取 3 仍留余量。
+analysis_thresholds:
+  zerowidth_threshold_alone: 3
+  zerowidth_threshold_with_decode: 2

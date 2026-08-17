@@ -15,14 +15,16 @@ class Finding:
     point at a location instead of only naming a category.
     """
 
-    source: str          # detect-secrets | cisco | judge | pipeline
-    category: str        # secret | dangerous_instruction | ... | unclassified
-    severity: str        # critical | high | medium | low
+    source: str          # the analyzer that produced it, verbatim from the scanner
+    category: str        # the scanner's category, never renamed by us
+    severity: str        # critical | high | medium | low | info (the scanner's scale)
     evidence: str | None = None   # verbatim snippet (secrets already redacted)
     detail: str | None = None     # one sentence: what it means
     file: str | None = None       # where, relative to the upload
     line: int | None = None       # 1-based line in that file
     remediation: str | None = None  # what to change
+    rule_id: str = ""               # the scanner's rule id, so a finding is traceable
+    aitech: str | None = None       # AITech taxonomy code, when the scanner supplies one
 
 
 @dataclass
@@ -43,10 +45,17 @@ class AuditResult:
     # Checks whose layer could not run, so "no finding" must not be read as
     # "clean" (the verdict itself already fails closed to review).
     degraded: list[str] = field(default_factory=list)
-    # What produced the verdict. Without these the record cannot be reproduced:
-    # the model and the rules text are both inputs to the decision.
+    # Why this outcome, in one line, for the record and the reviewer.
+    reason: str = ""
+    # What produced the verdict. Without these the record cannot be reproduced: a later
+    # change of model, scanner or policy is indistinguishable from a change of content.
     judge_model: str | None = None
-    rules_hash: str | None = None
+    scanner_version: str | None = None
+    policy_fingerprint: str | None = None
+    # Which analyzers ran, and which reported that they could not finish. Recorded so a
+    # systemic slide shows up as a rate rather than as one review at a time.
+    analyzers_used: list[str] = field(default_factory=list)
+    incomplete: list[str] = field(default_factory=list)
 
     @property
     def is_danger(self) -> bool:

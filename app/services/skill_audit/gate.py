@@ -100,7 +100,10 @@ def record(
         judge_verdict=audit.verdict,
         judge_raw=audit.raw,
         judge_model=audit.judge_model,
-        rules_hash=audit.rules_hash,
+        scanner_version=audit.scanner_version,
+        policy_fingerprint=audit.policy_fingerprint,
+        analyzers_used=",".join(audit.analyzers_used) or None,
+        incomplete=",".join(audit.incomplete) or None,
         mr_url=mr_url,
     )
     for f in audit.findings:

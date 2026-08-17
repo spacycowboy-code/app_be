@@ -18,18 +18,25 @@ class AuditFinding(CamelModel):
     triggered it, with secret values already redacted upstream.
     """
 
-    source: str            # detect-secrets | cisco | judge | pipeline
-    category: str          # secret | dangerous_instruction | ... | unclassified
-    severity: str          # critical | high | medium | low
+    source: str            # the analyzer that produced it, as the scanner named it
+    category: str          # the scanner's category, never renamed on our side
+    severity: str          # critical | high | medium | low | info
     evidence: str | None = None
     detail: str | None = None
     file: str | None = None
     line: int | None = None
+    # The scanner's rule id and AITech code. Sent so a reader can look up exactly what
+    # fired instead of relying on our wording for it.
+    rule_id: str | None = None
+    aitech: str | None = None
     remediation: str | None = None
 
 
 class AuditCheck(CamelModel):
     """One fixed check in the report, with its own findings as evidence.
+    # False = 只作上下文,不影响结论(例如打包规范类)。
+    gating: bool = True
+
 
     The check list is closed and comes from the policy, so a clear check is
     reported too: the uploader sees what was examined, not only what failed.
@@ -51,5 +58,8 @@ class SkillEvaluateResult(CamelModel):
 
     state: str             # pass | suspect | danger
     reference: str
+    # Why this outcome, in one line. Without it the wizard can only say "needs review"
+    # and the author has to infer which finding caused it.
+    reason: str = ""
     checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []   # flat list, kept for the audit trail

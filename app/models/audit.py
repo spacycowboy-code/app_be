@@ -46,7 +46,17 @@ class RpAiSkillAuditRecord(TimestampMixin, Base):
     # Which model(s) judged it, and the rules text they were given: both are
     # inputs to the verdict, so the record is only reproducible with them.
     judge_model: Mapped[str | None] = mapped_column(String(120))
+    # Kept for records written before the scanner owned the pipeline.
     rules_hash: Mapped[str | None] = mapped_column(String(64))
+    # A verdict can only be explained later if the three inputs are known: which model,
+    # which scanner build, which policy. Without them a change of rules is
+    # indistinguishable from a change of content.
+    scanner_version: Mapped[str | None] = mapped_column(String(120))
+    policy_fingerprint: Mapped[str | None] = mapped_column(String(120))
+    # Which analyzers ran, and which reported they could not finish. Recorded so that a
+    # systemic slide into "everything goes to review" is visible as a rate.
+    analyzers_used: Mapped[str | None] = mapped_column(Text)
+    incomplete: Mapped[str | None] = mapped_column(Text)
     # Draft MR url for suspect uploads (null otherwise / until created).
     mr_url: Mapped[str | None] = mapped_column(String(512))
 
