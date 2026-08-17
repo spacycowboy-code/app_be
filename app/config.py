@@ -112,7 +112,6 @@ class Settings(BaseSettings):
     # Second opinion, asked only when the primary judge wants to reject. A
     # disagreement routes to human review instead of blocking the author.
     # Note: claude-opus-5 is an experimental preview; switch when it goes GA.
-    audit_kiro_model_confirm: str = "claude-opus-5"
     # Seconds to wait for the judge; on timeout the audit fails closed.
     audit_judge_timeout: int = 200
     # Agent definition the ACP adapter starts kiro with. It must declare no tools
@@ -125,7 +124,6 @@ class Settings(BaseSettings):
     # Optional shared secret required by the judge service (X-Judge-Token).
     audit_judge_token: str = ""
     # Red-line rules / criteria injected into the judge prompt.
-    audit_rules_path: str = "skill_audit/rules.md"
     # Deterministic secret detection (detect-secrets, in-process, 27 detectors).
     # Broad matches route to review; the regex layer catches live-format keys
     # as red-line.
@@ -134,6 +132,17 @@ class Settings(BaseSettings):
     # blind spots — bundled scripts / .pyc bytecode / unicode-hidden instructions.
     audit_cisco_enabled: bool = True
     audit_cisco_bin: str = "skill-scanner"
+    # Our policy file: a permissive base with the overrides the measurements
+    # required. Ships with the repo so the audit is reproducible.
+    audit_policy_path: str = "skill_audit/policy.yaml"
+    # One scan runs the deterministic analyzers plus two model calls; measured
+    # median 41s and max 85s over 46 real skills. The ceiling is generous on
+    # purpose: a timeout is recorded as "not checked", which costs a review.
+    audit_scan_timeout: int = 900
+    # Behavioral analysis is off by default: measured 29s on a 26-file bundle but
+    # 228s on a 10-file one (a single large file makes the taint analysis diverge),
+    # for one extra finding. Enable it with a budget, not unconditionally.
+    audit_behavioral_enabled: bool = False
     # Working dir for the judge subprocess (kiro-cli writes a small state db).
     audit_work_dir: str = "/tmp/skill-audit"
     # EID allowed to see 可疑(suspect) skills while browsing (internal-only).

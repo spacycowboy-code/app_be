@@ -124,7 +124,7 @@ def _checks_out(audit: AuditResult) -> list[AuditCheck]:
     return [
         AuditCheck(
             id=c.id, label=c.label, status=c.status, description=c.description,
-            severity=c.severity, note=c.note,
+            severity=c.severity, note=c.note, gating=c.gating,
             findings=[_finding_out(f) for f in c.findings],
         )
         for c in build_checks(audit)
@@ -137,6 +137,9 @@ def _finding_out(f) -> AuditFinding:
         source=f.source, category=f.category, severity=f.severity,
         evidence=f.evidence, detail=f.detail,
         file=f.file, line=f.line, remediation=f.remediation,
+        # The scanner's rule id and taxonomy code travel with the finding: without them
+        # a reader cannot look up what fired, and the report would only have our wording.
+        rule_id=f.rule_id or None, aitech=f.aitech,
     )
 
 
