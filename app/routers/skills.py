@@ -35,6 +35,7 @@ from app.services.skill_manifest import (
     parse_frontmatter,
     render_skill_md,
 )
+from app.services.archives import common_top_dir
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
 from app.services.skill_audit import audit_skill, AuditResult, gate
@@ -177,14 +178,12 @@ def _artifact_archive(folder: "Path | None") -> "Path | None":
 def _common_top_dir(members: list[zipfile.ZipInfo]) -> "str | None":
     """The single top-level directory shared by every archive member, else
     ``None``. Used to strip a redundant wrapper folder (e.g.
-    ``tavily-web-search/``) so the download isn't double-nested."""
-    tops: set[str] = set()
-    for m in members:
-        head, sep, _ = m.filename.partition("/")
-        if not sep:  # a file at the archive root -> no shared wrapper
-            return None
-        tops.add(head)
-    return next(iter(tops)) if len(tops) == 1 else None
+    ``tavily-web-search/``) so the download isn't double-nested.
+
+    Delegates to ``services.archives`` so this rule has one implementation: the
+    market download endpoint applies the same rule to GitLab's
+    ``<project>-<ref>-<sha>`` wrapper, and two copies would drift."""
+    return common_top_dir(members)
 
 
 def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
