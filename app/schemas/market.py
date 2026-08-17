@@ -24,6 +24,8 @@ class MarketItemCreate(CamelModel):
     tags: list[str] = Field(default_factory=list)
     author: str | None = None
     version: str | None = "1.0"
+    public_download: bool | None = None
+    """免登录下载开关。``None`` = 不改动；**只有管理员的改动会被接受**（见 update_item）。"""
 
     @field_validator("tags", mode="before")
     @classmethod
@@ -53,6 +55,8 @@ class MarketItemRead(CamelModel):
     last_activity: str | None = None
     is_trending: bool = False
     verified: bool = False
+    public_download: bool = False
+    """免登录下载是否对该项目开启（见模型上的说明）。仅管理员可修改。"""
     creator: str | None = None
     # Deduplicated-by-EID stats shown on the card.
     favorite_count: int = 0

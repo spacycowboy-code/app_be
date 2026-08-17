@@ -13,6 +13,7 @@ from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResult
 from app.services.archives import rewrap_single_top_dir
+from app.services.auth_tokens import TokenError, decode_token
 from app.services.eids import normalize_eid
 from app.services.gitlab_sync import (
     GitLabError,
@@ -105,6 +106,41 @@ def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
         it.download_count = int(dls.get(it.id, 0))
 
 
+def _authorize_download(
+    request: Request, item: RpAiMarketItem, eid_param: str | None
+) -> str | None:
+    """Authorize a download and return the downloader's EID (may be ``None``).
+
+    The download path is listed in ``main.AUTH_DEFERRED_PATTERNS``, so the
+    site-wide middleware did **not** check the caller. Whether a login is required
+    depends on the item, which is why the decision lives here.
+
+    - ``public_download`` off (the default): behave exactly like every other
+      endpoint — a valid bearer token or 401. The identity comes from the token,
+      never from the query string.
+    - ``public_download`` on: no login required. A token is still honoured when
+      present, so a logged-in user's download stays correctly attributed; without
+      one we fall back to the self-reported ``eid``, which is the price of
+      anonymity and the reason the flag is per item rather than global.
+    """
+    authorization = request.headers.get("Authorization", "")
+    raw = authorization[7:].strip() if authorization[:7].lower() == "bearer " else ""
+    if raw:
+        try:
+            return decode_token(raw).get("sub")
+        except TokenError:
+            # An expired token on a public item must not read as "anonymous":
+            # the caller believes they are signed in, and silently downgrading
+            # them would also silently mis-attribute the download.
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED, "登录已过期，请重新登录"
+            ) from None
+
+    if not item.public_download and get_settings().auth_enabled:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录或登录已过期，请重新登录")
+    return eid_param
+
+
 @router.post("/{item_id}/download")
 def record_download(
     item_id: str,
@@ -138,10 +174,11 @@ def record_download(
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
 
-    # Identity comes from the JWT (set by the auth middleware), falling back to
-    # the query param only when auth is off in dev. The middleware's whole point
-    # is that handlers stop trusting a client-supplied eid.
-    caller_eid = getattr(request.state, "eid", None) or eid
+    # This path is in main.AUTH_DEFERRED_PATTERNS, i.e. the site-wide middleware
+    # let it through **without** checking anything. Enforcing it here is therefore
+    # not defence in depth — it is the only check there is.
+    caller_eid = _authorize_download(request, item, eid)
+
     db.add(
         RpAiMarketDownload(item_id=item_id, eid=normalize_eid(caller_eid) or None)
     )
@@ -280,6 +317,18 @@ def update_item(
     item.tags = payload.tags or []
     item.author = payload.author
     item.version = payload.version
+
+    # 免登录下载：只有管理员能改，且只在显式给出时才动。
+    #
+    # 不让创建者自己开:打开它的含义是「任何能访问门户的人都能拿到这个仓库的全部代码」。
+    # 那是一个关于内网代码可见性的决定,不该由上传者单方面做出 —— 他清楚自己的工具,
+    # 但不一定清楚仓库里还躺着什么。
+    if payload.public_download is not None:
+        if not is_admin:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "只有管理员可以开启 / 关闭免登录下载"
+            )
+        item.public_download = bool(payload.public_download)
 
     db.commit()
     db.refresh(item)
