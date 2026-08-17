@@ -54,22 +54,5 @@ class RpAiMarketItem(TimestampMixin, Base):
     last_activity: Mapped[str | None] = mapped_column(String(40))
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    public_download: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
-    """是否允许**免登录**下载该项目的代码包。
-
-    存在的理由:有些工具要让 agent 在使用者机器上自动装好,而 agent 手里没有门户
-    登录态。让它去问使用者的域账号密码是不可接受的(那是公司域口令,且门户还没有
-    TLS),所以只剩「这个接口对该项目免鉴权」这一条路。
-
-    **默认 False,且必须逐项目手动打开。** 做成 opt-in 而不是 opt-out:同步进来的
-    新项目自动受保护,不会因为谁忘了配置就把内网仓库的源码裸露出去。打开一项的
-    含义是「任何能访问门户的人都能拿到这个仓库的全部代码」,这个判断只能由人逐个做。
-
-    打开之后有两个后果,决定前要知道:该项目的下载不再有可信的下载者身份(``eid``
-    只能由调用方自报),门户也还没有 TLS,代码在内网中明文传输。
-    """
     # EID of the user who manually created this item (None for GitLab-synced).
     creator: Mapped[str | None] = mapped_column(String(64))
