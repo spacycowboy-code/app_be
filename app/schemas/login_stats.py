@@ -31,6 +31,9 @@ class ActiveWindow(CamelModel):
     ``count`` is the number of distinct EIDs, i.e. what "日活 / 周活" means; it is
     always ``len(users)`` and is returned explicitly so a caller that only wants
     the number does not have to count the list.
+
+    ``since`` is what tells the two windows apart on the client: midnight today
+    for the daily one, Monday 00:00 for the weekly one.
     """
 
     since: datetime

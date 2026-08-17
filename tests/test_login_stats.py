@@ -127,12 +127,17 @@ def test_distinct_people_are_counted_once_but_their_logins_add_up(client, db):
     assert body["totalLogins"] == 3
 
 
-def test_yesterday_counts_weekly_but_not_daily(client, db):
+def test_yesterday_is_not_daily_active(client, db):
     """The day boundary is midnight, not a rolling 24 hours.
 
     Times are built in the reporting zone, since that is the zone whose midnight
     divides the days — building them on the DB clock would put "yesterday 23:00"
     on the wrong side of the boundary when the two zones differ.
+
+    Whether yesterday is also *weekly* active depends on the weekday: on a
+    Monday, yesterday was Sunday and therefore last week. That is the ISO-week
+    definition doing its job, so the assertion follows the same rule instead of
+    assuming a rolling window.
     """
     now_local = datetime.now(_reporting_tz())
     yesterday_local = (now_local - timedelta(days=1)).replace(
@@ -144,7 +149,11 @@ def test_yesterday_counts_weekly_but_not_daily(client, db):
     body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
 
     assert [u["eid"] for u in body["daily"]["users"]] == ["ETODAY"]
-    assert {u["eid"] for u in body["weekly"]["users"]} == {"ETODAY", "EYESTERDAY"}
+
+    weekly = {u["eid"] for u in body["weekly"]["users"]}
+    assert "ETODAY" in weekly
+    yesterday_is_same_week = now_local.weekday() != 0  # Monday -> yesterday was last week
+    assert ("EYESTERDAY" in weekly) is yesterday_is_same_week
 
 
 def test_a_login_just_after_midnight_today_is_daily_active(client, db):
@@ -195,18 +204,63 @@ def test_an_unknown_time_zone_does_not_break_the_page(client, db, monkeypatch):
     assert resp.json()["daily"]["count"] == 1
 
 
-def test_eight_days_ago_is_outside_the_rolling_week(client, db):
-    now = _db_now()
-    _login(db, "EOLD", now - timedelta(days=8))
-    _login(db, "ESIXDAYS", now - timedelta(days=5))
+def test_eight_days_ago_is_outside_this_week(client, db):
+    """Anything before this Monday is out, however recent it feels."""
+    now_local = datetime.now(_reporting_tz())
+    monday = (now_local - timedelta(days=now_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    _login(db, "ELASTWEEK", _to_db_naive(monday - timedelta(minutes=1)))
+    _login(db, "ETHISWEEK", _to_db_naive(monday + timedelta(minutes=1)))
 
     body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
 
     weekly = {u["eid"] for u in body["weekly"]["users"]}
-    assert "ESIXDAYS" in weekly
-    assert "EOLD" not in weekly
+    assert "ETHISWEEK" in weekly
+    assert "ELASTWEEK" not in weekly
     # Still counted in the all-time total: the event was not discarded.
     assert body["totalLogins"] == 2
+
+
+def test_the_week_starts_on_monday(client, db):
+    """Monday–Sunday, not a rolling 7 days and not Sunday-first.
+
+    Pinned because the difference is invisible in the number itself: only the
+    reported ``since`` says which convention produced it.
+    """
+    now_local = datetime.now(_reporting_tz())
+    expected_monday = (now_local - timedelta(days=now_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
+
+    since = datetime.fromisoformat(body["weekly"]["since"])
+    assert since == expected_monday
+    # 0 == Monday. A rolling window would land on today's weekday instead.
+    assert since.astimezone(_reporting_tz()).weekday() == 0
+    assert since.astimezone(_reporting_tz()).hour == 0
+
+
+def test_last_sunday_belongs_to_the_previous_week(client, db):
+    """The boundary case that a rolling window would get wrong.
+
+    Sunday is the *last* day of an ISO week, so the Sunday before this Monday is
+    last week — even though it is at most six days ago and a rolling 7-day
+    window would include it.
+    """
+    now_local = datetime.now(_reporting_tz())
+    monday = (now_local - timedelta(days=now_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    last_sunday_evening = monday - timedelta(hours=1)  # Sunday 23:00
+    _login(db, "ESUNDAY", _to_db_naive(last_sunday_evening))
+
+    body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
+
+    assert body["weekly"]["count"] == 0
+    assert body["daily"]["count"] == 0
+    assert body["totalLogins"] == 1
 
 
 def test_no_activity_yields_zeroes_not_an_error(client):

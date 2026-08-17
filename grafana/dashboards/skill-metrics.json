@@ -4,6 +4,7 @@
   "title": "Skill Metrics",
   "tags": ["skills"],
   "timezone": "",
+  "weekStart": "monday",
   "editable": true,
   "schemaVersion": 39,
   "version": 1,
@@ -27,7 +28,7 @@
           "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(created_at, '1w') AS time, COUNT(*) AS downloads FROM rp_ai_skill_download WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1;"
+          "rawSql": "SELECT TIMESTAMP(DATE_SUB(DATE(created_at), INTERVAL WEEKDAY(created_at) DAY)) AS time, COUNT(*) AS downloads FROM rp_ai_skill_download WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1;"
         }
       ]
     },
@@ -47,7 +48,7 @@
           "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(created_at, '1w') AS time, COUNT(*) AS uploads FROM rp_ai_skill WHERE $__timeFilter(created_at) AND category_id <> 'official' GROUP BY 1 ORDER BY 1;"
+          "rawSql": "SELECT TIMESTAMP(DATE_SUB(DATE(created_at), INTERVAL WEEKDAY(created_at) DAY)) AS time, COUNT(*) AS uploads FROM rp_ai_skill WHERE $__timeFilter(created_at) AND category_id <> 'official' GROUP BY 1 ORDER BY 1;"
         }
       ]
     },
@@ -67,7 +68,7 @@
           "datasource": { "type": "mysql", "uid": "skilldb-mysql" },
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT $__timeGroup(v.created_at, '1w') AS time, COUNT(*) AS updates FROM rp_ai_skill_version v WHERE $__timeFilter(v.created_at) AND v.id <> (SELECT MIN(v2.id) FROM rp_ai_skill_version v2 WHERE v2.skill_id = v.skill_id) GROUP BY 1 ORDER BY 1;"
+          "rawSql": "SELECT TIMESTAMP(DATE_SUB(DATE(v.created_at), INTERVAL WEEKDAY(v.created_at) DAY)) AS time, COUNT(*) AS updates FROM rp_ai_skill_version v WHERE $__timeFilter(v.created_at) AND v.id <> (SELECT MIN(v2.id) FROM rp_ai_skill_version v2 WHERE v2.skill_id = v.skill_id) GROUP BY 1 ORDER BY 1;"
         }
       ]
     },

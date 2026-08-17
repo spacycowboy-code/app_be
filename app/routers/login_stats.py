@@ -9,9 +9,11 @@ Window definitions (documented because "日活/周活" can mean several things):
 * **daily** — from midnight *today* to now, in ``stats_timezone`` (the users'
   zone, not the DB server's). A calendar day, not a rolling 24 hours, so it
   matches what people mean by "today" and resets at midnight.
-* **weekly** — a rolling 7 calendar days ending today (today plus the previous
-  six). Rolling rather than "since Monday" so the number is comparable on any
-  day of the week instead of being near-zero every Monday morning.
+* **weekly** — from **Monday** 00:00 of the current week to now (an ISO week,
+  Monday–Sunday). A calendar week, not a rolling 7 days: it answers "how many
+  people this week" the way a weekly report does, at the cost of being small on
+  a Monday morning and largest on Sunday night. Use ``weekly.since`` to see
+  which Monday the count starts from.
 
 Both count **distinct EIDs**, so signing in five times counts once.
 
@@ -39,8 +41,14 @@ from app.schemas.login_stats import ActiveUser, ActiveWindow, LoginStats
 
 router = APIRouter(prefix="/api/login-stats", tags=["login-stats"])
 
-#: A rolling week: today plus the previous six calendar days.
-WEEK_DAYS = 7
+
+def _week_start(day_start: datetime) -> datetime:
+    """Monday 00:00 of the week containing ``day_start``.
+
+    ``weekday()`` is 0 on Monday, so subtracting it lands on Monday and leaves a
+    Monday untouched — the week is Monday–Sunday, matching how the team reports.
+    """
+    return day_start - timedelta(days=day_start.weekday())
 
 
 def _require_dashboard_access(request: Request) -> str:
@@ -144,7 +152,7 @@ def login_stats(
     tz = _reporting_tz()
     now_local = datetime.now(tz)
     day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start_local = day_start_local - timedelta(days=WEEK_DAYS - 1)
+    week_start_local = _week_start(day_start_local)
 
     now_db = _db_now()
     total = db.scalar(select(func.count(RpAiLoginEvent.id))) or 0
