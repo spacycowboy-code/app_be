@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     audit_kiro_model_confirm: str = "claude-opus-5"
     # Seconds to wait for the judge; on timeout the audit fails closed.
     audit_judge_timeout: int = 200
+    # Agent definition the ACP adapter starts kiro with. It must declare no tools
+    # and demand JSON-only output: an interactive agent otherwise answers a JSON
+    # request with a markdown report, which the scanner reads as "analysis failed".
+    audit_acp_agent: str = "json-endpoint"
     # Remote judge-service URL. Empty => run kiro-cli in-process (host only).
     # Set this in the (cred-less) backend container to call the host judge service.
     audit_judge_url: str = ""
