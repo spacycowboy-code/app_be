@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 import logging
+import re
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,6 +71,27 @@ AUTH_WHITELIST = {
 }
 
 
+# Paths the middleware lets through **without deciding anything**: the handler
+# performs the auth check itself, because the answer depends on data rather than
+# on the path. Today that is only the market download endpoint, where a per-item
+# flag says whether that one project may be fetched without logging in — an agent
+# installing a tool on someone's machine has no session, and having it collect the
+# user's domain password is not an acceptable alternative.
+#
+# Anything listed here MUST enforce auth itself for the non-public case. A path
+# added here and then left unchecked is an open endpoint, and it will not look
+# like one from either side: the middleware sees a deliberate entry, and the
+# handler looks like every other handler.
+AUTH_DEFERRED_PATTERNS = (
+    re.compile(r"^/api/market/[^/]+/download$"),
+)
+
+
+def _auth_deferred(path: str) -> bool:
+    """Whether ``path`` decides its own auth (see :data:`AUTH_DEFERRED_PATTERNS`)."""
+    return any(pattern.match(path) for pattern in AUTH_DEFERRED_PATTERNS)
+
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     """Site-wide auth: any /api request (bar the whitelist) needs a valid JWT.
@@ -85,6 +107,7 @@ async def auth_gate(request: Request, call_next):
         or request.method == "OPTIONS"
         or not path.startswith("/api/")
         or path in AUTH_WHITELIST
+        or _auth_deferred(path)
     ):
         return await call_next(request)
 

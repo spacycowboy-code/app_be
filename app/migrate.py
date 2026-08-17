@@ -32,6 +32,7 @@ COLUMNS = [
     ("rp_ai_skill_finding", "file", "VARCHAR(512) NULL"),
     ("rp_ai_skill_finding", "line", "INT NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),
+    ("rp_ai_market_item", "public_download", "BOOLEAN NOT NULL DEFAULT 0"),
     ("rp_ai_market_item", "creator", "VARCHAR(64) NULL"),
     ("rp_ai_skill_download", "eid", "VARCHAR(64) NULL"),
 ]
