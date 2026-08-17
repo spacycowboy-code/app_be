@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.version import __version__
-from app.services.auth_tokens import TokenError, decode_token
+from app.services.auth_tokens import TokenError, check_token_scope, decode_token
 from app.services.skill_audit.types import BundleTooLarge
 from app.routers import (
     audit,
@@ -77,6 +77,17 @@ async def auth_gate(request: Request, call_next):
     Sets ``request.state.eid`` / ``request.state.display_name`` from the token
     so handlers can trust the caller's identity instead of a client-supplied
     field. CORS preflight (OPTIONS) and non-/api paths pass through.
+
+    Two checks, and the second one is easy to overlook: a valid signature only
+    proves *we* issued the token and it has not expired. It does not say the
+    token may be used **here**. ``check_token_scope`` answers that, because some
+    tokens are deliberately restricted to a single endpoint (see
+    ``create_scoped_token``). Skipping it would silently promote a token meant
+    for one download into a full session.
+
+    Doing it in the gate rather than per handler is the point: the restriction
+    holds for every route, including ones added later by someone who has never
+    read this file.
     """
     cfg = get_settings()
     path = request.url.path
@@ -92,6 +103,7 @@ async def auth_gate(request: Request, call_next):
     token = authz[7:].strip() if authz[:7].lower() == "bearer " else ""
     try:
         claims = decode_token(token)
+        check_token_scope(claims, path, request.method)
     except TokenError:
         return JSONResponse(
             status_code=401,

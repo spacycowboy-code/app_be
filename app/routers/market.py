@@ -13,6 +13,7 @@ from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResult
 from app.services.archives import rewrap_single_top_dir
+from app.services.auth_tokens import create_scoped_token
 from app.services.eids import normalize_eid
 from app.services.gitlab_sync import (
     GitLabError,
@@ -178,6 +179,57 @@ def record_download(
             "Content-Length": str(len(blob)),
         },
     )
+
+
+@router.post("/{item_id}/install-token")
+def create_install_token(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Mint a short-lived token that can fetch **this one** archive and nothing else.
+
+    Why this exists: installing one of these tools means an agent on the user's
+    machine has to fetch the archive, and that agent holds no portal session.
+    The alternatives were worse — dropping auth on the download endpoint makes
+    every synced repository world-readable to anyone who can reach the portal,
+    and having the agent collect the user's domain password both trains people to
+    type corporate credentials into agent prompts and sends them over a portal
+    that has no TLS yet.
+
+    So the human authenticates in the browser (where they already are) and the
+    portal hands out a credential narrow enough to paste into a terminal: one
+    path, one method, a few minutes.
+
+    Requires a normal session — this route is behind the site-wide gate, and a
+    scoped token cannot reach it (its own scope is the download path), so these
+    tokens cannot be used to mint more of themselves.
+    """
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    if not item.id.startswith("gl-"):
+        # Same rule as the download endpoint: nothing to fetch for manual items.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "该项目不是从 GitLab 同步来的，没有可下载的代码包；请改用它的仓库地址",
+        )
+
+    eid = getattr(request.state, "eid", None)
+
+    # The path is built here, from the item we just loaded — it is never taken
+    # from the caller. Accepting a caller-supplied path would turn this into
+    # "sign me a token for any endpoint I name", which is strictly worse than
+    # the session the caller already has, because a scoped token is meant to
+    # leave the browser and live in shell history and agent transcripts.
+    path = f"{router.prefix}/{item.id}/download"
+    token, expires_in = create_scoped_token(eid or "", path, method="POST")
+    return {
+        "token": token,
+        "expiresIn": expires_in,
+        "path": path,
+        "filename": f"{_slugify(item.name) or item.id}.zip",
+    }
 
 
 @router.post("", response_model=MarketItemRead, status_code=status.HTTP_201_CREATED)
