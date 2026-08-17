@@ -36,7 +36,7 @@ from app.services.skill_manifest import (
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import normalize_eid
-from app.services.skill_audit import audit_skill, AuditResult
+from app.services.skill_audit import audit_skill, content_key, AuditResult
 from app.services.skill_audit import gate
 from app.services.skill_audit.report import build_checks
 from app.services import gitlab_mr
@@ -119,6 +119,32 @@ async def _read_upload(
     return definition, artifact_bytes, artifact_filename
 
 
+async def _audit_reusing_record(
+    db: Session, *, name: str, definition: str, artifact_bytes: bytes | None,
+    artifact_filename: str | None, eid: str,
+) -> AuditResult:
+    """Audit this content, reusing a fresh verdict for identical bytes if one exists.
+
+    evaluate and publish audit the same bytes moments apart and a scan costs tens of
+    seconds. The audit record is the shared fact, so the reuse goes through it rather than
+    through process memory — with more than one API replica the two calls can land on
+    different ones, and a process-local cache would silently pay twice.
+    """
+    key = content_key(name, definition, artifact_bytes)
+    cached = gate.recent_audit(db, key)
+    if cached is not None:
+        return cached
+    return await run_in_threadpool(
+        lambda: audit_skill(
+            name=name,
+            skill_md=definition,
+            artifact_bytes=artifact_bytes,
+            artifact_filename=artifact_filename,
+            uploader_eid=eid or None,
+        )
+    )
+
+
 def _checks_out(audit: AuditResult) -> list[AuditCheck]:
     """The report the wizard renders: fixed checks, evidence grouped under them."""
     return [
@@ -164,14 +190,9 @@ async def evaluate_skill(
     """
     eid = normalize_eid(eid)
     definition, artifact_bytes, artifact_filename = await _read_upload(file, instructions)
-    audit: AuditResult = await run_in_threadpool(
-        lambda: audit_skill(
-            name=name,
-            skill_md=definition,
-            artifact_bytes=artifact_bytes,
-            artifact_filename=artifact_filename,
-            uploader_eid=eid or None,
-        )
+    audit: AuditResult = await _audit_reusing_record(
+        db, name=name, definition=definition, artifact_bytes=artifact_bytes,
+        artifact_filename=artifact_filename, eid=eid,
     )
     reference = uuid.uuid4().hex
     # Danger is blocked in the UI (no publish button) so it never reaches
@@ -217,14 +238,9 @@ async def upload_skill(
     # danger  -> reject, never stored (only the audit record is kept).
     # suspect -> stored on a review branch + Draft MR (hidden from browse).
     # pass    -> stored live as usual.
-    audit: AuditResult = await run_in_threadpool(
-        lambda: audit_skill(
-            name=name,
-            skill_md=definition,
-            artifact_bytes=artifact_bytes,
-            artifact_filename=artifact_filename,
-            uploader_eid=eid,
-        )
+    audit: AuditResult = await _audit_reusing_record(
+        db, name=name, definition=definition, artifact_bytes=artifact_bytes,
+        artifact_filename=artifact_filename, eid=eid,
     )
     audit_ref = uuid.uuid4().hex
     if audit.is_danger:

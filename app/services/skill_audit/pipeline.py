@@ -25,14 +25,15 @@ from app.services.skill_audit.types import AuditResult, BundleTooLarge, Finding
 log = logging.getLogger("skill_audit")
 
 # Verdict cache keyed by content hash. The verdict is a pure function of the
-# skill content, so evaluate() and the authoritative re-audit in publish() can
-# share one result for identical bytes instead of running the judge twice.
-# In-process + TTL-bounded; a miss simply re-audits (correct, just slower).
+# Process-local first level only. The shared one is the audit record, keyed by the same
+# content hash (see gate.recent_audit): with more than one API replica, evaluate and
+# publish can land on different processes, and a cache that only lives in memory would
+# quietly pay for the same scan twice. A miss here simply re-audits.
 _CACHE_TTL = 600.0
 _verdict_cache: dict[str, tuple[float, AuditResult]] = {}
 
 
-def _content_key(name: str, skill_md: str, artifact_bytes: bytes | None) -> str:
+def content_key(name: str, skill_md: str, artifact_bytes: bytes | None) -> str:
     h = hashlib.sha256()
     h.update((name or "").encode("utf-8"))
     h.update(b"\0")
@@ -174,7 +175,7 @@ def audit_skill(
     if not settings.audit_enabled:
         return AuditResult(state="pass")
 
-    key = _content_key(name, skill_md, artifact_bytes)
+    key = content_key(name, skill_md, artifact_bytes)
     if use_cache:
         cached = _cache_get(key)
         if cached is not None:
@@ -187,7 +188,7 @@ def audit_skill(
     precheck = scanners.precheck_secrets(skill_md)
     if precheck:
         result = AuditResult(
-            state="danger", findings=precheck,
+            state="danger", findings=precheck, content_sha=key,
             reason=f"明文凭据:{precheck[0].file}:{precheck[0].line}",
             judge_model=settings.audit_kiro_model,
         )
@@ -214,6 +215,7 @@ def audit_skill(
     result = AuditResult(
         state=decision.state,
         reason=decision.reason,
+        content_sha=key,
         findings=report.findings,
         incomplete=decision.incomplete or [],
         analyzers_used=report.analyzers_used,

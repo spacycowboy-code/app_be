@@ -46,6 +46,13 @@ class RpAiSkillAuditRecord(TimestampMixin, Base):
     # Which model(s) judged it, and the rules text they were given: both are
     # inputs to the verdict, so the record is only reproducible with them.
     judge_model: Mapped[str | None] = mapped_column(String(120))
+    # Hash of exactly what was audited (name + SKILL.md + bundle bytes). Two purposes:
+    # it says whether two audits saw the same content, and it lets a second replica reuse
+    # a fresh verdict instead of paying for the same scan again — an in-process cache
+    # cannot, because evaluate and publish may land on different replicas.
+    content_sha: Mapped[str | None] = mapped_column(String(64), index=True)
+    # One line saying why this outcome, so the record explains itself.
+    reason: Mapped[str | None] = mapped_column(String(300))
     # Kept for records written before the scanner owned the pipeline.
     rules_hash: Mapped[str | None] = mapped_column(String(64))
     # A verdict can only be explained later if the three inputs are known: which model,
@@ -85,6 +92,12 @@ class RpAiSkillFinding(Base):
     # Where it is, so the record and the review comment can point at it. The path
     # may address a file inside the uploaded bundle (bundle.zip!/scripts/x.py).
     file: Mapped[str | None] = mapped_column(String(512))
+    # The scanner's rule id and taxonomy code, and what to change. Persisted because the
+    # record is the durable form of the finding: without them it can name a category but
+    # not what fired or what the author should do, and neither can be reconstructed.
+    rule_id: Mapped[str | None] = mapped_column(String(120))
+    aitech: Mapped[str | None] = mapped_column(String(32))
+    remediation: Mapped[str | None] = mapped_column(Text)
     line: Mapped[int | None] = mapped_column(Integer)
 
     record: Mapped["RpAiSkillAuditRecord"] = relationship(back_populates="findings")

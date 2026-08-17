@@ -47,6 +47,8 @@ class AuditResult:
     degraded: list[str] = field(default_factory=list)
     # Why this outcome, in one line, for the record and the reviewer.
     reason: str = ""
+    # Hash of what was audited, so a record can say whether it saw the same bytes.
+    content_sha: str | None = None
     # What produced the verdict. Without these the record cannot be reproduced: a later
     # change of model, scanner or policy is indistinguishable from a change of content.
     judge_model: str | None = None
