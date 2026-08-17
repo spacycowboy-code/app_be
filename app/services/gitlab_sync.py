@@ -91,6 +91,49 @@ def _api_get_raw(path: str, params: dict | None = None) -> str | None:
         return None
 
 
+def fetch_repo_archive(project_id: int | str, ref: str | None = None) -> bytes:
+    """Download a project's repository as a zip archive (bytes).
+
+    Exists so the portal can hand a market item's code to a user who has **no
+    GitLab account**: most colleagues never get access to the internal GitLab
+    and do not want to request it, so "go clone the repo" is not a usable
+    distribution channel. The portal's own read token fetches the archive and
+    the caller only ever needs a portal login.
+
+    **Only ever call this with an id/path that came out of our own database.**
+    The portal's token can read every repo it has been granted, so passing a
+    caller-supplied path would turn this into a way to read arbitrary internal
+    repositories through the portal's credentials.
+
+    Errors are raised (not swallowed like :func:`_api_get_raw`): a failed
+    archive fetch must surface to the user as "download failed", never as an
+    empty or truncated zip that looks like a successful download.
+    """
+    settings = get_settings()
+    if not settings.gitlab_token:
+        raise GitLabError(
+            "未配置 GitLab token（在 .env 设置 GITLAB_TOKEN，scope: read_api）"
+        )
+    quoted = urllib.parse.quote(str(project_id), safe="")
+    url = (
+        f"{settings.gitlab_url.rstrip('/')}/api/v4/projects/{quoted}"
+        "/repository/archive.zip"
+    )
+    if ref:
+        url += "?" + urllib.parse.urlencode({"sha": ref})
+    req = urllib.request.Request(url, headers={"PRIVATE-TOKEN": settings.gitlab_token})
+    try:
+        # 60s rather than the 20s used for JSON calls: this transfers a whole
+        # repository, and a timeout here shows up as a failed download.
+        with _opener().open(req, timeout=60) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")[:200]
+        raise GitLabError(f"GitLab archive {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise GitLabError(f"无法连接 GitLab: {exc.reason}") from exc
+
+
 def _clean_desc(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"[*_`#]+", "", text)

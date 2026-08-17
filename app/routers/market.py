@@ -1,5 +1,8 @@
-"""Agent市场 endpoints: list, manual create, GitLab sync, delete."""
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+"""Agent市场 endpoints: list, manual create, GitLab sync, download, delete."""
+import io
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -9,11 +12,13 @@ from app.models.market import RpAiMarketItem
 from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResult
+from app.services.archives import rewrap_single_top_dir
 from app.services.eids import normalize_eid
 from app.services.gitlab_sync import (
     GitLabError,
     GitLabProject,
     fetch_readme_description,
+    fetch_repo_archive,
     list_group_projects,
 )
 
@@ -100,21 +105,79 @@ def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
         it.download_count = int(dls.get(it.id, 0))
 
 
-@router.post("/{item_id}/download", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/{item_id}/download")
 def record_download(
     item_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     eid: str | None = Query(default=None),
-) -> None:
-    """Record a download event for a market item (for unique-downloader counts).
+):
+    """Serve a market item's repository as a .zip **and** record the download.
 
-    The archive itself is served by GitLab; the frontend calls this so the
-    download is attributed to the user's EID (deduplicated at read time).
+    **Why the portal serves the archive instead of pointing at GitLab.** Most
+    colleagues have no access to the internal GitLab and do not want to request
+    it, so "clone this repo" excludes almost everyone this market exists for.
+    The portal already holds a read token (used by the subgroup sync), so it can
+    hand over the code while the user only needs a portal login.
+
+    The project id comes from our own row, never from the caller: synced items
+    are keyed ``gl-<gitlab project id>``, which is exactly what the archive API
+    wants. Letting a caller name the project would turn this endpoint into a way
+    to read arbitrary internal repos through the portal's credentials.
+
+    Only **synced** items can be served: a manual item has no GitLab project
+    behind it, just a link someone typed. Serving those would mean trusting a
+    user-supplied URL, which is the same hole in a different shape.
+
+    The download event is recorded **before** the transfer, and a failed fetch
+    raises. Recording after a successful transfer would look tidier but loses
+    every attempt that failed — and "nobody can download it" is precisely the
+    thing the counter should make visible.
     """
-    if db.get(RpAiMarketItem, item_id) is None:
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
-    db.add(RpAiMarketDownload(item_id=item_id, eid=normalize_eid(eid) or None))
+
+    # Identity comes from the JWT (set by the auth middleware), falling back to
+    # the query param only when auth is off in dev. The middleware's whole point
+    # is that handlers stop trusting a client-supplied eid.
+    caller_eid = getattr(request.state, "eid", None) or eid
+    db.add(
+        RpAiMarketDownload(item_id=item_id, eid=normalize_eid(caller_eid) or None)
+    )
     db.commit()
+
+    if not item.id.startswith("gl-"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "该项目不是从 GitLab 同步来的，没有可下载的代码包；请改用它的仓库地址",
+        )
+    project_id = item.id[3:]
+    try:
+        blob = fetch_repo_archive(project_id)
+    except GitLabError as exc:
+        # 502, not 500: the portal is fine, the upstream it depends on is not.
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"从 GitLab 取代码包失败：{exc}"
+        ) from exc
+
+    filename = f"{_slugify(item.name) or item.id}.zip"
+    # Re-pack so extracting gives exactly one folder, named the same as the zip.
+    #
+    # GitLab wraps its archive in ``<project>-<ref>-<sha>/``, so a raw pass-through
+    # extracts to e.g. ``report-manhour-main-3f8a9c2e/`` — a level deeper than
+    # people expect, under a name that changes every commit. Every instruction
+    # that says ``cd report-manhour`` would be wrong, and wrong-by-default
+    # instructions are worse than missing ones.
+    blob = rewrap_single_top_dir(blob, filename[:-4])
+    return StreamingResponse(
+        io.BytesIO(blob),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(blob)),
+        },
+    )
 
 
 @router.post("", response_model=MarketItemRead, status_code=status.HTTP_201_CREATED)
