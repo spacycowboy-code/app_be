@@ -120,7 +120,9 @@ class Settings(BaseSettings):
     audit_acp_agent: str = "json-endpoint"
     # Remote judge-service URL. Empty => run kiro-cli in-process (host only).
     # Set this in the (cred-less) backend container to call the host judge service.
-    audit_judge_url: str = ""
+    # Where the scanner reaches the model: our ACP adapter. Empty disables the
+    # semantic and meta layers, which the gate then reports as not checked.
+    audit_llm_base_url: str = "http://audit-judge:8790/v1"
     # Optional shared secret required by the judge service (X-Judge-Token).
     audit_judge_token: str = ""
     # Red-line rules / criteria injected into the judge prompt.

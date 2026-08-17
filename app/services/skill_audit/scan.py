@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 
@@ -78,7 +79,24 @@ def _finding(raw: dict) -> Finding:
     )
 
 
+def llm_env(*, base_url: str, api_key: str, model: str) -> dict[str, str]:
+    """How the scanner is told to reach the model.
+
+    ``SKILL_SCANNER_LLM_MODEL`` must carry the ``openai/`` prefix: without it the
+    meta-analysis path fails inside litellm with "LLM Provider NOT provided" while the
+    main analysis path still works, so a misconfiguration shows up as a partial audit
+    rather than an error.
+    """
+    return {
+        "SKILL_SCANNER_LLM_PROVIDER": "openai",
+        "SKILL_SCANNER_LLM_BASE_URL": base_url.rstrip("/"),
+        "SKILL_SCANNER_LLM_API_KEY": api_key or "local",
+        "SKILL_SCANNER_LLM_MODEL": model if model.startswith("openai/") else f"openai/{model}",
+    }
+
+
 def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
+         env: dict[str, str] | None = None,
          use_llm: bool = True, enable_meta: bool = True,
          use_behavioral: bool = False) -> ScanReport:
     """Scan a materialised skill directory.
@@ -94,7 +112,8 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
     if use_behavioral:
         cmd.append("--use-behavioral")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              env={**os.environ, **(env or {})})
     except subprocess.TimeoutExpired:
         log.warning("scanner timed out after %ss on %s", timeout, target_dir)
         return ScanReport(ran=False, error=f"timed out after {timeout}s")

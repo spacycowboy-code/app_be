@@ -112,3 +112,64 @@ class TestCompleteJson:
         out = acp.complete_json(bin_path="k", model="m", agent="a", cwd="/tmp",
                                 timeout=1, prompt="P")
         assert not out.startswith("{")
+
+
+class TestLlmEnv:
+    """How the scanner is told to reach the model."""
+
+    def test_the_model_gets_the_provider_prefix(self):
+        from app.services.skill_audit.scan import llm_env
+        env = llm_env(base_url="http://x/v1/", api_key="k", model="claude-sonnet-5")
+        assert env["SKILL_SCANNER_LLM_MODEL"] == "openai/claude-sonnet-5"
+        assert env["SKILL_SCANNER_LLM_BASE_URL"] == "http://x/v1"
+        assert env["SKILL_SCANNER_LLM_PROVIDER"] == "openai"
+
+    def test_an_already_prefixed_model_is_not_doubled(self):
+        from app.services.skill_audit.scan import llm_env
+        env = llm_env(base_url="http://x/v1", api_key="k", model="openai/claude-sonnet-5")
+        assert env["SKILL_SCANNER_LLM_MODEL"] == "openai/claude-sonnet-5"
+
+    def test_an_empty_key_still_sends_something(self):
+        """The endpoint requires a bearer value; an empty one would fail the check."""
+        from app.services.skill_audit.scan import llm_env
+        assert llm_env(base_url="http://x/v1", api_key="", model="m")["SKILL_SCANNER_LLM_API_KEY"]
+
+
+class TestAdapterAuth:
+    """The endpoint is model access on the network."""
+
+    def _client(self, monkeypatch, token):
+        from fastapi.testclient import TestClient
+        from app import acp_openai_service as svc
+
+        class S:
+            audit_judge_token = token
+            audit_kiro_bin = "kiro-cli"
+            audit_kiro_model = "claude-sonnet-5"
+            audit_acp_agent = "json-endpoint"
+            audit_work_dir = "/tmp"
+            audit_judge_timeout = 5
+
+        monkeypatch.setattr(svc, "get_settings", lambda: S())
+        monkeypatch.setattr(svc, "complete_json", lambda **kw: '{"findings": []}')
+        client = TestClient(svc.app)
+        return client
+
+    def test_a_request_without_the_key_is_rejected(self, monkeypatch):
+        client = self._client(monkeypatch, "secret")
+        r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "x"}]})
+        assert r.status_code == 401
+
+    def test_the_configured_key_is_accepted(self, monkeypatch):
+        client = self._client(monkeypatch, "secret")
+        r = client.post("/v1/chat/completions",
+                        json={"messages": [{"role": "user", "content": "x"}]},
+                        headers={"Authorization": "Bearer secret"})
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == '{"findings": []}'
+
+    def test_no_token_configured_leaves_it_open(self, monkeypatch):
+        """Staging runs without one; production sets it. Stated so it is a choice."""
+        client = self._client(monkeypatch, "")
+        r = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "x"}]})
+        assert r.status_code == 200

@@ -203,6 +203,9 @@ def audit_skill(
             policy_path=settings.audit_policy_path,
             timeout=settings.audit_scan_timeout,
             use_behavioral=settings.audit_behavioral_enabled,
+            env=scan.llm_env(base_url=settings.audit_llm_base_url,
+                             api_key=settings.audit_judge_token,
+                             model=settings.audit_kiro_model),
         )
     finally:
         shutil.rmtree(work, ignore_errors=True)

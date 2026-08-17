@@ -1,10 +1,15 @@
-# Skill-audit judge service: kiro-cli semantic judge behind a tiny HTTP API.
+# Skill-audit model endpoint: kiro-cli behind an OpenAI-compatible HTTP API.
+#
+# The skill scanner is the audit engine and calls its semantic and meta analyzers through
+# an OpenAI-compatible endpoint. There is no hosted-provider key in this environment, so
+# this image serves that endpoint from kiro-cli over ACP.
 #
 # This image holds the model-access capability (kiro-cli). The SSO login is NOT
 # baked in — it lives in a mounted volume (/root/.aws) and is created once with:
 #   docker compose exec judge kiro-cli login --use-device-flow \
 #     --license pro --identity-provider <startUrl> --region <region>
-# The (credential-less) backend container calls this service over the network.
+# The (credential-less) backend container points the scanner at this service with
+# SKILL_SCANNER_LLM_BASE_URL. The model itself holds no tools.
 FROM python:3.11-slim
 
 RUN apt-get update \
@@ -23,7 +28,11 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
-COPY skill_audit/rules.md ./skill_audit/rules.md
+# The JSON-only agent definition. Without it an interactive agent answers a JSON request
+# with a markdown report, the scanner reports "analysis failed", and the gate reads that
+# as "this layer did not run".
+COPY .kiro/agents ./.kiro/agents
+ENV KIRO_AGENT_DIR=/app/.kiro/agents
 
 EXPOSE 8790
-CMD ["uvicorn", "app.skill_audit_judge_service:app", "--host", "0.0.0.0", "--port", "8790"]
+CMD ["uvicorn", "app.acp_openai_service:app", "--host", "0.0.0.0", "--port", "8790"]

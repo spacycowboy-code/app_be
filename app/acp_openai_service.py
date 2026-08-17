@@ -19,7 +19,7 @@ import logging
 import time
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
 from app.config import get_settings
 from app.services.skill_audit.acp import (
@@ -64,8 +64,18 @@ def models() -> dict:
 # Deliberately sync: the ACP exchange is blocking subprocess I/O, and a sync handler runs
 # in uvicorn's worker threadpool instead of stalling the event loop.
 @app.post("/v1/chat/completions")
-def chat_completions(body: dict) -> dict:
+def chat_completions(body: dict, authorization: str | None = Header(default=None)) -> dict:
+    """Complete one request through the local agent.
+
+    Authenticated with the same value the scanner is configured to send as its API key.
+    This endpoint is model access on the network: without the check, anything that can
+    reach it can spend our quota and run arbitrary prompts.
+    """
     s = get_settings()
+    if s.audit_judge_token:
+        presented = (authorization or "").removeprefix("Bearer ").strip()
+        if presented != s.audit_judge_token:
+            raise HTTPException(status_code=401, detail="invalid api key")
     prompt = render_prompt(body.get("messages") or [])
     if not prompt:
         raise HTTPException(status_code=400, detail="no message content")
