@@ -157,10 +157,16 @@ def test_yesterday_is_not_daily_active(client, db):
 
 
 def test_a_login_just_after_midnight_today_is_daily_active(client, db):
-    """The inclusive edge of the window — the easiest place to be off by one."""
-    now = _db_now()
-    just_after_midnight = now.replace(hour=0, minute=0, second=1, microsecond=0)
-    _login(db, "EEARLY", just_after_midnight)
+    """The inclusive edge of the window — the easiest place to be off by one.
+
+    Midnight has to be the *reporting* zone's midnight. Taking the DB server's
+    instead (it runs at UTC+2, the team reads at UTC+8) put this event six hours
+    on the wrong side of the boundary, which passed all afternoon and failed
+    every night between 00:00 and 06:00 Beijing.
+    """
+    now_local = datetime.now(_reporting_tz())
+    just_after_midnight = now_local.replace(hour=0, minute=0, second=1, microsecond=0)
+    _login(db, "EEARLY", _to_db_naive(just_after_midnight))
 
     body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
 
@@ -299,10 +305,15 @@ def test_someone_without_a_user_row_still_counts(client, db):
 
 
 def test_users_are_ordered_by_most_recent_login(client, db):
-    now = _db_now()
-    _login(db, "EOLDEST", now - timedelta(hours=3))
-    _login(db, "ENEWEST", now - timedelta(minutes=1))
-    _login(db, "EMIDDLE", now - timedelta(hours=1))
+    # Spread across today *in the reporting zone*, as fractions of the time since
+    # its midnight. Fixed offsets like "three hours ago" fall out of the window
+    # in the small hours, when today is only minutes old.
+    now_local = datetime.now(_reporting_tz())
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed = now_local - day_start
+    _login(db, "EOLDEST", _to_db_naive(day_start + elapsed * 0.25))
+    _login(db, "EMIDDLE", _to_db_naive(day_start + elapsed * 0.5))
+    _login(db, "ENEWEST", _to_db_naive(day_start + elapsed * 0.75))
 
     body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
 

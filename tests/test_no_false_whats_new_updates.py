@@ -17,6 +17,7 @@ assertions hold even where the clock has one-second granularity (sqlite's
 """
 import json
 import subprocess
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -59,6 +60,23 @@ def _seed(downloads: str = "0", *, skill_id: str = SKILL_ID) -> datetime:
         )
         db.commit()
     return stamp
+
+
+def _tick() -> None:
+    """Wait until a second-resolution clock will report a different value.
+
+    sqlite's ``CURRENT_TIMESTAMP`` (and MySQL's ``DATETIME`` here, precision 0)
+    keeps whole seconds, so two writes inside the same second are
+    indistinguishable. That cuts both ways: "a real edit still counts" fails on
+    two identical stamps, and "an unrelated commit changes nothing" passes even
+    when a stray ``onupdate`` did fire, because the jump is invisible.
+
+    Waiting is deliberately used instead of back-dating the row: back-dating has
+    to pick a clock, and the two here disagree — ``datetime.now()`` is local
+    (UTC+8) while sqlite writes UTC, so an hour "ago" in Python is seven hours
+    ahead of anything the database generates.
+    """
+    time.sleep(1.05)
 
 
 def _row(skill_id: str = SKILL_ID):
@@ -263,6 +281,7 @@ def test_an_unrelated_commit_does_not_mark_official_skills_as_updated(official_r
     _git(official_repo, "add", "-A")
     _git(official_repo, "commit", "-m", "an unrelated user-skill upload")
 
+    _tick()
     _import(official_repo)
 
     for sid in ("alpha", "beta"):
@@ -287,6 +306,7 @@ def test_editing_a_skill_does_move_its_own_commit_and_timestamp(official_repo):
     _git(official_repo, "add", "-A")
     _git(official_repo, "commit", "-m", "bump alpha to 1.1.0")
 
+    _tick()
     _import(official_repo)
 
     after = _row("alpha")
