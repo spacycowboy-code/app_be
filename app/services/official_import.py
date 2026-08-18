@@ -95,6 +95,29 @@ def _ensure_official_category(db: Session) -> None:
         db.add(RpAiCategory(id=OFFICIAL_CATEGORY_ID, label=OFFICIAL_CATEGORY_LABEL, count=0))
 
 
+def _folder_sha(rel_path: str, repo_sha: str | None) -> str | None:
+    """The last commit that touched ``rel_path``, or ``repo_sha`` when unknown.
+
+    ``repo_commit`` documents "the commit that last stored THIS skill", so it has
+    to be resolved per skill folder. Writing the repo-wide HEAD here instead made
+    every official skill's row change on any commit to the skill repo — including
+    the backend's own upload commits for unrelated user skills — which bumped
+    ``updated_at`` (``onupdate=func.now()``) and made all official skills appear
+    on the Home page's "What's New" feed as freshly updated, with their versions
+    untouched. A per-folder sha only moves when that skill's files actually move.
+    """
+    try:
+        out = skill_storage._git(
+            "log", "-1", "--format=%H", "--", rel_path, check=False
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        print(f"[official-import] folder sha lookup failed for {rel_path}: {exc}")
+        return repo_sha
+    if out.returncode != 0:
+        return repo_sha
+    return out.stdout.strip() or repo_sha
+
+
 def _apply_manifest(skill: RpAiSkill, manifest: dict, instructions: str | None, sha: str | None) -> None:
     """Overwrite the sync-owned fields on ``skill`` from the manifest."""
     skill.name = manifest.get("name") or skill.id
@@ -179,7 +202,8 @@ def import_official_skills(db: Session, *, refresh: bool = True) -> dict:
             )
             # Relative storage path within the repo (for downloads/artifacts),
             # e.g. "official/anthropics/xlsx".
-            manifest["_storagePath"] = str(folder.relative_to(repo))
+            rel_path = str(folder.relative_to(repo))
+            manifest["_storagePath"] = rel_path
 
             existing = db.get(RpAiSkill, skill_id)
             is_new = existing is None
@@ -194,7 +218,7 @@ def import_official_skills(db: Session, *, refresh: bool = True) -> dict:
                 skill.is_trending = bool(manifest.get("isTrending") or False)
             # else: preserve the existing runtime fields (do not touch them).
 
-            _apply_manifest(skill, manifest, instructions, sha)
+            _apply_manifest(skill, manifest, instructions, _folder_sha(rel_path, sha))
 
             seen.append(skill_id)
             if is_new:
