@@ -14,6 +14,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     status,
 )
@@ -35,7 +36,7 @@ from app.services.skill_manifest import (
 )
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
-from app.services.eids import normalize_eid
+from app.services.eids import acting_eid, normalize_eid
 from app.services.skill_audit import audit_skill, content_key, AuditResult
 from app.services.skill_audit import gate
 from app.services.skill_audit.report import build_checks
@@ -176,8 +177,9 @@ def _findings_out(audit: AuditResult) -> list[AuditFinding]:
 
 @router.post("/evaluate", response_model=SkillEvaluateResult)
 async def evaluate_skill(
+    request: Request,
     db: Session = Depends(get_db),
-    eid: str = Form("", description="Uploader EID (optional for preview)"),
+    eid: str = Form("", description="Uploader EID (ignored when signed in)"),
     name: str = Form(...),
     instructions: str | None = Form(None),
     file: UploadFile | None = File(None),
@@ -188,7 +190,7 @@ async def evaluate_skill(
     shows the real state + findings (no score) before the user commits. publish
     re-runs the same audit as the authoritative, non-bypassable gate.
     """
-    eid = normalize_eid(eid)
+    eid = acting_eid(request, eid)
     definition, artifact_bytes, artifact_filename = await _read_upload(file, instructions)
     audit: AuditResult = await _audit_reusing_record(
         db, name=name, definition=definition, artifact_bytes=artifact_bytes,
@@ -212,8 +214,9 @@ async def evaluate_skill(
     "/upload", response_model=SkillUploadResult, status_code=status.HTTP_201_CREATED
 )
 async def upload_skill(
+    request: Request,
     db: Session = Depends(get_db),
-    eid: str = Form(..., description="Uploader EID"),
+    eid: str = Form(..., description="Uploader EID (ignored when signed in)"),
     name: str = Form(...),
     category_id: str = Form(..., alias="categoryId"),
     description: str | None = Form(None),
@@ -223,7 +226,7 @@ async def upload_skill(
     skill_id: str | None = Form(None, alias="id"),
     file: UploadFile | None = File(None),
 ) -> SkillUploadResult:
-    eid = normalize_eid(eid)
+    eid = acting_eid(request, eid)
     if not eid:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "eid is required")
 

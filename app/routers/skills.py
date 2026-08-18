@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -41,7 +41,7 @@ from app.services import gitlab_mr
 from app.services.skill_audit import audit_skill, AuditResult, gate
 from fastapi.concurrency import run_in_threadpool
 from app.services.notify import notify_version_update
-from app.services.eids import normalize_eid
+from app.services.eids import acting_eid, normalize_eid
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
@@ -330,8 +330,10 @@ def create_skill(payload: SkillCreate, db: Session = Depends(get_db)) -> RpAiSki
 
 @router.put("/{skill_id}", response_model=SkillRead)
 async def update_skill(
-    skill_id: str, payload: SkillUpdate, db: Session = Depends(get_db)
+    skill_id: str, payload: SkillUpdate, request: Request, db: Session = Depends(get_db)
 ) -> RpAiSkill:
+    # Who is editing is the signed-in caller, not a field in the body (see acting_eid).
+    editor_eid = acting_eid(request, payload.editor_eid)
     skill = _get_skill_or_404(db, skill_id)
     scalar_data = payload.model_dump(
         exclude_unset=True,
@@ -341,7 +343,7 @@ async def update_skill(
         setattr(skill, key, val)
     # author always stores the uploader's EID (identity), never a display name;
     # the human display name is resolved from the user record at read time.
-    skill.author = skill.uploader_eid or payload.editor_eid or skill.author
+    skill.author = skill.uploader_eid or editor_eid or skill.author
     # When the group (category) is changed, refresh the denormalized label.
     if "category_id" in scalar_data and skill.category_id:
         cat = db.get(RpAiCategory, skill.category_id)
@@ -374,7 +376,7 @@ async def update_skill(
     # written. This route used to write straight to the skill repo: the audit was
     # attached to the upload route instead of to the act of writing, so editing a
     # skill was a way to put unaudited content in the repo.
-    editor = payload.editor_eid or skill.uploader_eid
+    editor = editor_eid or skill.uploader_eid
     audit: AuditResult = await run_in_threadpool(
         lambda: audit_skill(
             name=skill.name,
@@ -444,7 +446,7 @@ async def update_skill(
             version=result.version,
             commit_sha=result.commit_sha,
             tag=result.tag,
-            uploader_eid=payload.editor_eid or owner_eid,
+            uploader_eid=editor_eid or owner_eid,
             notes="Edited via portal",
         )
     )
@@ -467,7 +469,7 @@ async def update_skill(
                 skill_name=skill.name, uploader_eid=editor, mr_url=mr_url)
 
     # Notify users who favorited this skill about the new version.
-    notify_version_update(db, skill, result.version, actor_eid=payload.editor_eid)
+    notify_version_update(db, skill, result.version, actor_eid=editor_eid)
 
     db.commit()
     db.refresh(skill)

@@ -34,6 +34,30 @@ HYGIENE_RULES = frozenset({
 # adding no false review on 85 benign samples.
 CONCEALMENT_CATEGORIES = frozenset({"obfuscation", "unicode_steganography"})
 
+# Every category the installed scanner can emit. It has two vocabularies and they only
+# partly overlap: the ``ThreatCategory`` enum in its core models (17) and the ``category``
+# field its rule packs declare (17, of which 9 are not in the enum) — 26 in total.
+#
+# The list exists for the *unfamiliar* case. The high floor below encodes a per-category
+# fact: at medium these report a capability without evidence of this particular act. A
+# category a future scanner release adds carries no such knowledge — it could as easily be
+# another concealment assertion, which gates at medium. Reading an unknown category as
+# "capability only" is the one direction that fails silently, so an unfamiliar category
+# gates one level lower and lands in front of a person.
+#
+# ``test_every_scanner_category_is_listed`` reads both vocabularies out of the installed
+# scanner and fails if anything is missing here, so an upgrade forces someone to classify
+# the new category instead of discovering it as a change in behaviour.
+KNOWN_CATEGORIES = frozenset({
+    "agent_manipulation", "autonomy_abuse", "command_injection", "context_exfiltration",
+    "data_exfiltration", "data_poisoning", "excessive_autonomy", "harmful_content",
+    "hardcoded_secrets", "malware", "model_abuse", "obfuscation", "pii_exposure",
+    "policy_violation", "privilege_escalation", "prompt_injection", "resource_abuse",
+    "skill_compromise", "skill_discovery_abuse", "social_engineering",
+    "supply_chain_attack", "tool_chaining_abuse", "tool_poisoning",
+    "transitive_trust_abuse", "unauthorized_tool_use", "unicode_steganography",
+})
+
 # A file the scanner could not read is only a reason for review when it is something that
 # runs. Unreadable *data* (docx, xlsx, pdf, images) is normal in a skill bundle and was
 # the single largest source of needless review before this distinction existed.
@@ -66,6 +90,17 @@ def _side(analyzer: str) -> str:
     return "deterministic" if analyzer in _DETERMINISTIC else "semantic"
 
 
+def _floor(category: str) -> str:
+    """The severity at which this category starts gating.
+
+    ``high`` is only justified where we checked what medium means for that category.
+    Concealment categories and categories we have never seen both start at ``medium``.
+    """
+    if category in CONCEALMENT_CATEGORIES or category not in KNOWN_CATEGORIES:
+        return "medium"
+    return "high"
+
+
 def gating_findings(report: ScanReport) -> list:
     """The findings that may change the outcome, with the rest left in the report."""
     out = []
@@ -79,7 +114,7 @@ def gating_findings(report: ScanReport) -> list:
             if _is_executable(f.file):
                 out.append(f)
             continue
-        floor = "medium" if f.category in CONCEALMENT_CATEGORIES else "high"
+        floor = _floor(f.category)
         if _ORDER.get(f.severity, 0) >= _ORDER[floor]:
             out.append(f)
     return out
