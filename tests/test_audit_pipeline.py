@@ -358,3 +358,7 @@ class TestVerdictReuseIsShared:
         from app.services.skill_audit import gate
         with SessionLocal() as db:
             assert gate.recent_audit(db, "") is None
+
+# Progress and the streaming runner are covered by tests/test_scan_streaming.py, which
+# drives a real subprocess. A fake Popen cannot show either failure that mattered here: a
+# report bigger than a pipe buffer, and a timeout that has to fire while the child is silent.

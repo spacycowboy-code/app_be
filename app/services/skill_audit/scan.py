@@ -16,7 +16,11 @@ import json
 import logging
 import os
 import pathlib
+import signal
 import subprocess
+import tempfile
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.services.skill_audit.acp import extract_json
@@ -31,6 +35,16 @@ INCOMPLETE_RULES = frozenset({
     "LLM_CONTEXT_BUDGET_EXCEEDED",
     "META_ANALYSIS_FAILED",
 })
+
+
+# The scanner narrates its own progress on stderr. Three lines, and they land exactly on
+# the boundaries between the phases, so they can drive a real progress display instead of
+# a timer pretending to be one. Measured on a real skill: +3.8s, +28.2s, +79.3s of 80.7s.
+STAGE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("Using Meta-Analyzer", "semantic"),        # deterministic analyzers done
+    ("Running meta-analysis", "arbitration"),   # semantic analysis done
+    ("Meta-analysis complete", "reporting"),    # arbitration done
+)
 
 
 @dataclass
@@ -112,8 +126,83 @@ def llm_env(*, base_url: str, api_key: str, model: str) -> dict[str, str]:
     }
 
 
+@dataclass
+class _Completed:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _run(cmd: list[str], *, timeout: int, env: dict[str, str],
+         on_progress: Callable[[str], None] | None) -> _Completed:
+    """Run the scanner, reporting each phase boundary as the scanner announces it.
+
+    One implementation per caller shape, and the difference is deliberate. Without a
+    callback this stays ``subprocess.run``: that is the path publish uses on every audit
+    today, and progress reporting is not a reason to change what production already runs.
+    (It shares one weakness with any timeout on a process tree — see open-items.)
+
+    With a callback, stderr is read line by line. Three things there are not incidental:
+
+    * **stdout goes to a file, not a pipe.** The report is on stdout and runs to tens or
+      hundreds of KB. Reading stderr to EOF while stdout sits in a 64 KB pipe deadlocks as
+      soon as a report outgrows that buffer: the scanner blocks writing, we block reading.
+    * **The deadline is a watchdog, not a check inside the loop.** Checking the clock as
+      each stderr line arrives only works while the scanner is talking. A scan that hangs
+      silently would block on ``for line in proc.stderr`` forever, and the timeout is the
+      whole mechanism that turns a stuck scan into "not checked, send it to review".
+    * **The whole process group is killed, not just the child.** The scanner spawns its own
+      subprocesses and they inherit this stderr pipe, so killing only the direct child
+      leaves the pipe open and we keep waiting for the grandchild — measured: a 3 s timeout
+      returned after 60 s. ``start_new_session`` makes the child a group leader so there is
+      a group to kill.
+    """
+    if on_progress is None:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        return _Completed(done.returncode, done.stdout, done.stderr)
+
+    killed = threading.Event()
+    with tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace") as out_file:
+        proc = subprocess.Popen(cmd, stdout=out_file, stderr=subprocess.PIPE,
+                                text=True, bufsize=1, env=env, start_new_session=True)
+
+        def _expire() -> None:
+            killed.set()
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+
+        watchdog = threading.Timer(timeout, _expire)
+        watchdog.daemon = True
+        watchdog.start()
+        lines: list[str] = []
+        try:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                lines.append(line)
+                if on_progress is None:
+                    continue
+                for marker, stage in STAGE_MARKERS:
+                    if marker in line:
+                        on_progress(stage)
+                        break
+            proc.wait()
+        finally:
+            watchdog.cancel()
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+        if killed.is_set():
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        out_file.flush()
+        out_file.seek(0)
+        return _Completed(proc.returncode, out_file.read(), "".join(lines))
+
+
 def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
          env: dict[str, str] | None = None,
+         on_progress: Callable[[str], None] | None = None,
          use_llm: bool = True, enable_meta: bool = True,
          use_behavioral: bool = False) -> ScanReport:
     """Scan a materialised skill directory.
@@ -129,8 +218,8 @@ def scan(*, bin_path: str, target_dir: str, policy_path: str, timeout: int,
     if use_behavioral:
         cmd.append("--use-behavioral")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                              env={**os.environ, **(env or {})})
+        proc = _run(cmd, timeout=timeout, env={**os.environ, **(env or {})},
+                    on_progress=on_progress)
     except subprocess.TimeoutExpired:
         log.warning("scanner timed out after %ss on %s", timeout, target_dir)
         return ScanReport(ran=False, error=f"timed out after {timeout}s")
