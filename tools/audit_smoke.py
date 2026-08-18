@@ -159,12 +159,18 @@ def _stream(base: str, path: str, fields: dict[str, str], token: str,
 
 
 def _cleanup(name: str) -> str:
-    """Remove the skill and audit records this check created."""
+    """Remove everything this check created: the skill, its audit records, and the user row.
+
+    The user row is easy to forget — nothing in the audit creates it, ``_ensure_user`` does,
+    on the way past. It is listed by ``GET /api/users``, so a leftover shows up as a fake
+    colleague in the UI. (Found exactly that way after the first production run.)
+    """
     from app.database import SessionLocal
     from app.models.audit import RpAiSkillAuditRecord
     from app.models.skill import RpAiSkill
+    from app.models.user import RpAiPortal
 
-    removed = []
+    removed: list[str] = []
     with SessionLocal() as db:
         for row in db.query(RpAiSkill).filter(RpAiSkill.name == name).all():
             db.delete(row)
@@ -175,6 +181,24 @@ def _cleanup(name: str) -> str:
             removed.append("record")
         db.commit()
     return ", ".join(removed) or "nothing to remove"
+
+
+def _cleanup_actor() -> str:
+    """Remove the synthetic actor, but only when nothing references it."""
+    from app.database import SessionLocal
+    from app.models.skill import RpAiSkill
+    from app.models.user import RpAiPortal
+
+    with SessionLocal() as db:
+        still_used = db.query(RpAiSkill).filter(RpAiSkill.uploader_eid == SIGNED_IN).count()
+        if still_used:
+            return f"kept: {still_used} skill(s) still reference {SIGNED_IN}"
+        row = db.query(RpAiPortal).filter(RpAiPortal.eid == SIGNED_IN).one_or_none()
+        if row is None:
+            return "no actor row to remove"
+        db.delete(row)
+        db.commit()
+        return f"removed the {SIGNED_IN} user row"
 
 
 def main() -> int:
@@ -288,6 +312,7 @@ def main() -> int:
 
     print(f"  cleanup ({name}-danger): {_cleanup(name + '-danger')}")
     print(f"  cleanup ({name}): {_cleanup(name)}")
+    print(f"  cleanup (actor): {_cleanup_actor()}")
     print(f"  {len(checks.rows) - checks.failed}/{len(checks.rows)} checks passed")
     return 1 if checks.failed else 0
 
