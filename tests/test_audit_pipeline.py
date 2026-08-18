@@ -359,56 +359,6 @@ class TestVerdictReuseIsShared:
         with SessionLocal() as db:
             assert gate.recent_audit(db, "") is None
 
-class TestProgressIsReal:
-    """The stages come from the scanner's own narration, not from a timer."""
-
-    def _fake_popen(self, monkeypatch, stderr_lines, stdout='{"findings": []}'):
-        class FakeProc:
-            returncode = 0
-            stdout_pipe = None
-
-            def __init__(self):
-                self.stderr = iter(stderr_lines)
-
-            def communicate(self, timeout=None):
-                return stdout, ""
-
-            def kill(self):
-                pass
-
-        monkeypatch.setattr(scan.subprocess, "Popen", lambda *a, **k: FakeProc())
-        monkeypatch.setattr(scan, "extract_json", lambda t: t)
-
-    def test_each_marker_reports_its_phase(self, monkeypatch):
-        self._fake_popen(monkeypatch, [
-            "Using Meta-Analyzer for false positive filtering\n",
-            "Running meta-analysis to filter false positives...\n",
-            "Meta-analysis complete: 3 false positives removed, 9 findings retained\n",
-        ])
-        seen = []
-        r = scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=10,
-                      on_progress=seen.append)
-        assert seen == ["semantic", "arbitration", "reporting"]
-        assert r.ran is True
-
-    def test_other_stderr_lines_do_not_invent_phases(self, monkeypatch):
-        self._fake_popen(monkeypatch, ["Scanning /tmp/x\n", "warning: something\n"])
-        seen = []
-        scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=10,
-                  on_progress=seen.append)
-        assert seen == []
-
-    def test_without_a_callback_the_simple_path_is_used(self, monkeypatch):
-        """No callback, no streaming: publish has no use for progress."""
-        def boom(*a, **k):
-            raise AssertionError("must not stream when nobody is listening")
-
-        monkeypatch.setattr(scan.subprocess, "Popen", boom)
-
-        class Done:
-            returncode = 0
-            stdout = '{"findings": [], "analyzers_used": []}'
-            stderr = ""
-
-        monkeypatch.setattr(scan.subprocess, "run", lambda *a, **k: Done())
-        assert scan.scan(bin_path="s", target_dir="/t", policy_path="p", timeout=1).ran
+# Progress and the streaming runner are covered by tests/test_scan_streaming.py, which
+# drives a real subprocess. A fake Popen cannot show either failure that mattered here: a
+# report bigger than a pipe buffer, and a timeout that has to fire while the child is silent.
