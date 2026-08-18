@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -189,20 +189,36 @@ def _common_top_dir(members: list[zipfile.ZipInfo]) -> "str | None":
 def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
     """Record a download: log a timestamped event row (with the downloader's
     EID when known, for per-user leaderboards) and increment the cumulative
-    counter. Best-effort — a logging failure must never break the download."""
+    counter. Best-effort — a logging failure must never break the download.
+
+    A download is NOT a modification of the skill, so this must not move
+    ``updated_at``. That column carries ``onupdate=func.now()`` (TimestampMixin),
+    which fires on any UPDATE that does not name it — and the Home page's
+    "What's New" feed reports a skill as updated whenever
+    ``updated_at > created_at``, so bumping the counter through the ORM made
+    every download surface as a bogus "Update" card with an unchanged version.
+    Naming ``updated_at`` in the SET clause suppresses ``onupdate`` and carries
+    the existing value forward, so only real edits move it.
+    """
     downloader = (eid or "").strip() or None
     try:
-        db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
-        skill.downloads = str(int(str(skill.downloads or "0")) + 1)
-        db.commit()
+        next_count = str(int(str(skill.downloads or "0")) + 1)
     except (ValueError, TypeError):
-        # Non-numeric counter (e.g. "5.6K"): still keep the event row.
-        db.rollback()
-        try:
-            db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
-            db.commit()
-        except Exception:
-            db.rollback()
+        # Non-numeric counter (e.g. "5.6K"): keep the event row but leave the
+        # counter alone rather than guess at its numeric value.
+        next_count = None
+    try:
+        db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
+        if next_count is not None:
+            db.execute(
+                update(RpAiSkill)
+                .where(RpAiSkill.id == skill.id)
+                .values(downloads=next_count, updated_at=RpAiSkill.updated_at)
+            )
+            # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
+            # a later read in this session sees the stored values.
+            db.expire(skill, ["downloads", "updated_at"])
+        db.commit()
     except Exception:
         db.rollback()
 

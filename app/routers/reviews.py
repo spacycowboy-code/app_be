@@ -1,6 +1,6 @@
 """Review endpoints nested under a skill."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -52,10 +52,28 @@ def create_review(
     db.add(review)
 
     # Recompute the skill's aggregate rating and review count.
+    #
+    # Written as a Core UPDATE that names ``updated_at`` so the column keeps its
+    # current value: ``TimestampMixin.updated_at`` carries ``onupdate=func.now()``,
+    # which fires on any UPDATE that omits it, and the Home page's "What's New"
+    # feed treats ``updated_at > created_at`` as "this skill was updated". Someone
+    # else rating a skill is not the author shipping a new version, so it must not
+    # surface as an "Update" card (the skill's ``version`` stays put either way).
     prev_count = skill.review_count or 0
     new_count = prev_count + 1
-    skill.rating = round(((skill.rating * prev_count) + overall) / new_count, 1)
-    skill.review_count = new_count
+    new_rating = round(((skill.rating * prev_count) + overall) / new_count, 1)
+    db.execute(
+        update(RpAiSkill)
+        .where(RpAiSkill.id == skill.id)
+        .values(
+            rating=new_rating,
+            review_count=new_count,
+            updated_at=RpAiSkill.updated_at,
+        )
+    )
+    # The Core UPDATE bypassed the ORM; drop the now-stale attributes so any
+    # later read in this session sees the stored values.
+    db.expire(skill, ["rating", "review_count", "updated_at"])
 
     db.commit()
     db.refresh(review)
