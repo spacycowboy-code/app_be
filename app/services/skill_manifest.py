@@ -54,6 +54,50 @@ def extract_skill_md_from_zip(data: bytes) -> str | None:
         return None
 
 
+def frontmatter_problem(text: str) -> str | None:
+    """Why this skill's frontmatter will not be readable, or None if it is fine.
+
+    ``parse_frontmatter`` is deliberately forgiving: it falls back to a regex so a slightly
+    malformed block still yields a name for the marketplace card. Everything downstream is
+    not that forgiving. The scanner parses the block as YAML and refuses to load the skill
+    when it is not a mapping, which makes the audit end as "no report" — the gate then reads
+    that as "not checked" and sends it to a human, who is handed a skill nobody has looked at.
+    Measured: one skill uploaded twice, unchanged, because the message it got back never said
+    what was wrong.
+
+    The commonest mistake by a wide margin is a missing space after the colon. ``name:foo`` is
+    a plain scalar in YAML, not a mapping, so the field reads as absent while looking present.
+    """
+    if not text:
+        return None
+    block = _FM_BLOCK.match(text.lstrip("\ufeff"))
+    if not block:
+        # No block at all is fine: with_frontmatter adds a well-formed one.
+        return None
+    body = block.group(1)
+    try:
+        data = yaml.safe_load(body)
+    except yaml.YAMLError as exc:
+        first = str(exc).splitlines()[0] if str(exc) else "无法解析"
+        return f"SKILL.md 的 frontmatter 不是有效的 YAML:{first}"
+    if not isinstance(data, dict):
+        offenders = [ln.strip() for ln in body.splitlines()
+                     if re.match(r"^\s*(name|description)\s*:\S", ln)]
+        hint = ""
+        if offenders:
+            field = offenders[0].split(":", 1)[0].strip()
+            hint = (f"——`{offenders[0][:60]}` 里冒号后面少了空格,"
+                    f"YAML 会把整段读成一行字符串,于是 `{field}` 被当成没写。"
+                    f"改成 `{field}: ` 加空格即可")
+        return ("SKILL.md 的 frontmatter 没能解析成键值对" + hint
+                + "。正确写法:`name: 你的名字` 与 `description: 一句话说明`,冒号后要有空格。")
+    missing = [k for k in ("name", "description") if not str(data.get(k) or "").strip()]
+    if missing:
+        return (f"SKILL.md 的 frontmatter 缺少 {'、'.join(missing)}。"
+                "两个字段都必填,格式为 `name: 你的名字`、`description: 一句话说明`。")
+    return None
+
+
 def parse_frontmatter(text: str) -> tuple[str | None, str | None]:
     """Extract the name and description values from the markdown frontmatter.
 

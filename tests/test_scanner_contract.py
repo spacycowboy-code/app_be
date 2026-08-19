@@ -76,3 +76,51 @@ def test_each_stage_marker_still_appears_in_the_scanner(marker):
         f"the scanner no longer prints {marker!r}: progress reporting would go quiet without "
         "any error. Re-read its phase logging and update STAGE_MARKERS."
     )
+
+
+# ``verdict._no_report_cause`` still has to tell "the scanner refused to load this bundle" apart
+# from "the scan broke", and it does that from the scanner's own wording. Two strings, asserted
+# here so a rewording upstream fails a test instead of quietly turning an author-fixable case
+# into "no guidance yet".
+_LOAD_ERROR_MARKERS = ["Error loading skill", "missing required field"]
+
+
+@needs_scanner
+@pytest.mark.parametrize("marker", _LOAD_ERROR_MARKERS)
+def test_each_load_error_marker_still_appears_in_the_scanner(marker):
+    pkg = _package_dir()
+    if pkg is None:
+        pytest.skip("could not locate the installed scanner package")
+    hits = [p for p in pkg.rglob("*.py")
+            if marker in p.read_text(encoding="utf-8", errors="replace")]
+    assert hits, (
+        f"the scanner no longer says {marker!r}. A bundle it cannot load would be classified as "
+        "a platform failure instead of something the author can fix. Re-read its skill loader "
+        "and update verdict._no_report_cause."
+    )
+
+
+@needs_scanner
+def test_the_load_error_wording_actually_classifies_the_real_case():
+    """End to end on the real thing: run the scanner on the frontmatter that failed in
+    production, and check the message it produces lands on the author-fixable cause."""
+    import json
+    import subprocess
+    import tempfile
+
+    from app.services.skill_audit import verdict
+
+    bad = ("---\nname:A Replir Allocation Tool - HTML Generator Skill\n\n"
+           "description:By using this skill you can made a html tool\n---\n\n# T\n\nbody\n")
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "SKILL.md").write_text(bad, encoding="utf-8")
+        proc = subprocess.run([_SCANNER, "scan", d, "--format", "json"],
+                              capture_output=True, text=True, timeout=300)
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "missing required field" in combined, combined[-400:]
+    cause = verdict._no_report_cause(
+        next(ln for ln in combined.splitlines() if "Error loading skill" in ln))
+    assert cause == verdict.CAUSE_BUNDLE_UNLOADABLE
+    assert verdict.owner_of(cause) == verdict.OWNER_AUTHOR, (
+        "a bundle the scanner cannot load is the author's to fix, not an outage of ours"
+    )

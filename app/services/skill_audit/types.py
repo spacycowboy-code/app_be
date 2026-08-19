@@ -47,6 +47,12 @@ class AuditResult:
     degraded: list[str] = field(default_factory=list)
     # Why this outcome, in one line, for the record and the reviewer.
     reason: str = ""
+    # The same answer as data, on two axes: how much was examined, and why not all of it.
+    # Prose is for people; anything that acts on the outcome reads these. See verdict for why
+    # they are two fields and not one (they answer different people's questions), and why the
+    # owner is derived from the cause rather than stored.
+    coverage: str = "complete"
+    cause: str | None = None
     # Hash of what was audited, so a record can say whether it saw the same bytes.
     content_sha: str | None = None
     # What produced the verdict. Without these the record cannot be reproduced: a later

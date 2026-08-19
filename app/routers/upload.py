@@ -33,6 +33,7 @@ from app.schemas.audit import SkillEvaluateResult, AuditFinding, AuditCheck
 from app.services.skill_manifest import (
     extract_skill_md_from_zip,
     has_name_and_description,
+    frontmatter_problem,
     parse_frontmatter,
 )
 from app.services.skill_storage import skill_storage
@@ -118,6 +119,14 @@ async def _read_upload(
             status.HTTP_400_BAD_REQUEST,
             "Skill 定义必须包含 name: 和 description: 两个字段",
         )
+    problem = frontmatter_problem(definition)
+    if problem:
+        # The check above only looks for the two labels. This one asks whether the block is
+        # actually YAML, because that is what every downstream reader assumes — including the
+        # scanner, which refuses to load the skill at all when it is not, so the audit ends as
+        # "not checked" and a reviewer is handed a skill nobody looked at. Saying it here costs
+        # the author one edit instead of an audit, a review MR and a second identical upload.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, problem)
     return definition, artifact_bytes, artifact_filename
 
 
@@ -252,9 +261,11 @@ async def upload_skill(
             db, audit_ref, audit, skill_id=None, skill_name=name, uploader_eid=eid
         )
         db.commit()
+        # The reason is the only actionable part: without it the author can only
+        # re-upload the same bytes and be refused again.
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"上传被安全审计拒绝：命中安全红线。参考编号 {audit_ref}",
+            f"上传被安全审计拒绝：{audit.reason or '命中安全红线'}。参考编号 {audit_ref}",
         )
 
     # Resolve identity: existing skill (by id) -> re-upload/version bump.
@@ -403,6 +414,9 @@ async def upload_skill(
                 findings=audit.findings,
                 audit_ref=audit_ref,
                 uploader=gate._uploader_label(db, eid),
+                reason=audit.reason,
+                coverage=audit.coverage,
+                cause=audit.cause,
             )
         )
     gate.record(
@@ -421,6 +435,7 @@ async def upload_skill(
         storage_path=result.storage_path,
         pushed=result.pushed,
         audit_state=audit.state,
+        reason=audit.reason,
         mr_url=mr_url,
         reference=audit_ref,
         checks=_checks_out(audit),

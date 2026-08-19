@@ -30,6 +30,8 @@ COLUMNS = [
     ("rp_ai_skill_finding", "remediation", "TEXT NULL"),
     ("rp_ai_skill_audit_record", "content_sha", "VARCHAR(64) NULL"),
     ("rp_ai_skill_audit_record", "reason", "VARCHAR(300) NULL"),
+    ("rp_ai_skill_audit_record", "coverage", "VARCHAR(20) NULL"),
+    ("rp_ai_skill_audit_record", "cause", "VARCHAR(40) NULL"),
     ("rp_ai_skill_audit_record", "scanner_version", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "policy_fingerprint", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "analyzers_used", "TEXT NULL"),

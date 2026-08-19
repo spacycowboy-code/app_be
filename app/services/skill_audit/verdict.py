@@ -75,12 +75,65 @@ _DETERMINISTIC = frozenset({
 })
 
 
+# Two facts, kept apart because they answer different questions and different people ask them.
+#
+# The split is not ours: SARIF (the OASIS standard for static-analysis output, which this
+# scanner can emit) puts "did the tool manage to run every rule over every target" in the
+# invocation — ``executionSuccessful`` and ``toolExecutionNotifications`` — and keeps what was
+# found in the results, where ``kind: review`` means "requires review by a human user to decide
+# if it represents a problem". Same two axes. Measured, though: this scanner sets
+# ``executionSuccessful`` and never populates the notifications, so reading its SARIF would buy
+# one boolean we already have from "did we get a report at all". We take the vocabulary and
+# derive both values from the JSON report we already read.
+#
+#: How much of the content was actually examined. This is the reviewer's first question — if it
+#: is not ``complete``, merging publishes something nobody has fully looked at.
+COVERAGE_COMPLETE = "complete"
+COVERAGE_PARTIAL = "partial"      # a report, but something in it was not examined
+COVERAGE_NONE = "none"            # no report at all: nothing was examined
+
+#: Why coverage is not complete. Empty when it is. Closed set, additive only: every value has
+#: to arrive with an owner (below) and a sentence for the reviewer (``gitlab_mr``), and a test
+#: enforces both. The raw tool message is always kept alongside, so a later reclassification
+#: works from the fact rather than from today's judgement.
+CAUSE_BUNDLE_UNLOADABLE = "bundle_unloadable"              # the scanner refused to load it
+CAUSE_BUNDLE_UNREADABLE_MEMBER = "bundle_unreadable_member"  # a member could not be read
+CAUSE_BUNDLE_TOO_BIG = "bundle_too_big"                    # over the semantic budget
+CAUSE_SCANNER_TIMEOUT = "scanner_timeout"
+CAUSE_SCANNER_BROKEN = "scanner_broken"                    # no usable report, could not run
+CAUSE_LAYER_FAILED = "layer_failed"                        # an analyzer reported its failure
+
+#: Who has to do something about it. A pure function of the cause, so it is derived rather than
+#: stored: two fields that can disagree are two chances to be wrong.
+OWNER_AUTHOR = "作者"
+OWNER_PLATFORM = "平台"
+OWNER_SHARED = "作者与平台"
+
+_CAUSE_OWNER = {
+    CAUSE_BUNDLE_UNLOADABLE: OWNER_AUTHOR,
+    CAUSE_BUNDLE_UNREADABLE_MEMBER: OWNER_AUTHOR,
+    CAUSE_BUNDLE_TOO_BIG: OWNER_SHARED,
+    CAUSE_SCANNER_TIMEOUT: OWNER_PLATFORM,
+    CAUSE_SCANNER_BROKEN: OWNER_PLATFORM,
+    CAUSE_LAYER_FAILED: OWNER_PLATFORM,
+}
+
+
+def owner_of(cause: str | None) -> str | None:
+    """Who can close this gap, or None when there is no gap."""
+    return _CAUSE_OWNER.get(cause or "")
+
+
 @dataclass
 class Decision:
     state: str                     # pass | suspect | danger
     reason: str = ""               # one line, for the record and the reviewer
     incomplete: list[str] | None = None
-
+    #: How much was examined, and why not all of it. Prose is for people; anything that acts on
+    #: the outcome reads these instead of matching substrings of the sentence above: the review
+    #: MR deciding whether anyone has looked, and a count of how often the audit itself fails.
+    coverage: str = COVERAGE_COMPLETE
+    cause: str | None = None
 
 def _is_executable(path: str | None) -> bool:
     return bool(path) and str(path).lower().rstrip("\"'").endswith(EXECUTABLE_SUFFIXES)
@@ -120,6 +173,24 @@ def gating_findings(report: ScanReport) -> list:
     return out
 
 
+def _no_report_cause(error: str | None) -> str:
+    """Why there is no report at all — the one place a tool message becomes structure.
+
+    It cannot be avoided: when the scanner refuses to load a bundle it exits before writing any
+    report, JSON or SARIF, so the only signal is the line it printed. Measured on the real
+    failing skill. The two strings matched here are pinned by
+    ``tests/test_scanner_contract.py``, which runs the installed scanner, so a rewording
+    upstream fails a test instead of quietly reclassifying an author's mistake as our outage.
+    """
+    text = error or ""
+    if "timed out" in text:
+        return CAUSE_SCANNER_TIMEOUT
+    if "Error loading skill" in text or "missing required field" in text:
+        return CAUSE_BUNDLE_UNLOADABLE
+    return CAUSE_SCANNER_BROKEN
+
+
+
 def decide(report: ScanReport, *, expected_analyzers: frozenset[str] | None = None) -> Decision:
     """Map a scan report to pass / suspect / danger.
 
@@ -127,13 +198,17 @@ def decide(report: ScanReport, *, expected_analyzers: frozenset[str] | None = No
     because those are different statements and only one of them is evidence.
     """
     if not report.ran:
-        return Decision("suspect", f"审计没有产出结果:{report.error or '未知原因'}")
+        return Decision("suspect", f"审计没有产出结果:{report.error or '未知原因'}",
+                        coverage=COVERAGE_NONE, cause=_no_report_cause(report.error))
 
     incomplete = report.incomplete
     missing = sorted(expected_analyzers - set(report.analyzers_used)) if expected_analyzers else []
     if incomplete or missing:
         detail = ", ".join(incomplete + [f"{m} 未运行" for m in missing])
-        return Decision("suspect", f"某一层未跑完:{detail}", incomplete=incomplete + missing)
+        cause = (CAUSE_BUNDLE_TOO_BIG if any("BUDGET" in i for i in incomplete)
+                 else CAUSE_LAYER_FAILED)
+        return Decision("suspect", f"某一层未跑完:{detail}", incomplete=incomplete + missing,
+                        coverage=COVERAGE_PARTIAL, cause=cause)
 
     gating = gating_findings(report)
     if not gating:
@@ -149,7 +224,11 @@ def decide(report: ScanReport, *, expected_analyzers: frozenset[str] | None = No
 
     unreadable = [f for f in gating if f.rule_id in UNREADABLE_RULES]
     if unreadable and len(unreadable) == len(gating):
-        return Decision("suspect", f"读不了的可执行文件:{unreadable[0].file}")
+        # We did look; one member of the bundle is opaque. Partial, not none: everything
+        # else was examined, and the finding itself is the evidence.
+        return Decision("suspect", f"读不了的可执行文件:{unreadable[0].file}",
+                        coverage=COVERAGE_PARTIAL,
+                        cause=CAUSE_BUNDLE_UNREADABLE_MEMBER)
     worst = max((f for f in gating if f.rule_id not in UNREADABLE_RULES),
                 key=lambda f: _ORDER.get(f.severity, 0), default=gating[0])
     return Decision("suspect", f"{worst.severity} {worst.category}({worst.rule_id})")

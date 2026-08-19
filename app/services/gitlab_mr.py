@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 
 from app.config import get_settings
+from app.services.skill_audit import verdict
 from app.services.skill_audit.types import Finding
 
 log = logging.getLogger("skill_audit.mr")
@@ -65,23 +66,96 @@ def _reviewer_id(username: str) -> int | None:
         return None
 
 
+# One sentence per cause, for the reviewer. Keyed on the cause the verdict layer decided, not
+# on substrings of its prose: the structure is known where the decision is made, and recovering
+# it by grepping a sentence breaks as soon as the wording changes — including the scanner's
+# wording, which is not ours to fix. ``verdict.owner_of`` says who; this says what to do.
+_CAUSE_ADVICE: dict[str, str] = {
+    verdict.CAUSE_BUNDLE_UNLOADABLE: (
+        "扫描器无法加载这个 skill,所以**它的内容一次都没有被检查过**。原因见上面的判定理由;"
+        "最常见的是 `SKILL.md` 的 frontmatter 没能解析成键值对——`name:foo` 这样冒号后面少一个空格,"
+        "YAML 就会把整段读成一行字符串,于是 `name` 被当成没写,尽管肉眼看它写了。正确写法是 "
+        "`name: 名字` 与 `description: 一句话`,两个字段都必填。请作者改好后重传;"
+        "在那之前合入等于上架一个未经检查的 skill。"
+    ),
+    verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER: (
+        "包里有个会运行的文件读不出来(常见于 `.pyz`、`.exe`,或非 UTF-8 编码的脚本),"
+        "其余内容都已检查。请人工打开那个文件确认它做什么;或让作者把脚本平铺成可读的文本。"
+    ),
+    verdict.CAUSE_BUNDLE_TOO_BIG: (
+        "内容超出了送给语义层的预算,超出的部分没有被语义分析看过(确定性层仍然扫了每个文件)。"
+        "如果这个包确实很大,请作者拆分或去掉不必要的附件;如果它并不大,那是预算配得太紧,属平台侧。"
+    ),
+    verdict.CAUSE_SCANNER_TIMEOUT: (
+        "审计超时,不是查出了问题。请维护者看一眼判定器与扫描器的负载,然后重跑;"
+        "不要凭这个结论决定合不合。"
+    ),
+    verdict.CAUSE_SCANNER_BROKEN: (
+        "扫描器没有交出可用的报告(跑不起来、无输出,或输出不是有效 JSON)。这是我们的故障,"
+        "不是作者的问题;skill 的内容没有被检查过。"
+    ),
+    verdict.CAUSE_LAYER_FAILED: (
+        "语义分析或仲裁这一层没跑成,所以这次只有确定性层的结果。这是我们的故障,不是作者的问题。"
+        "请维护者查判定器,再重跑一次审计。"
+    ),
+}
+
+
+def _coverage_note(coverage: str | None, cause: str | None) -> list[str]:
+    """What a reviewer needs before anything else: was this content examined?
+
+    ``complete`` needs no note — the findings table is the whole story. Anything else means the
+    table is not, and merging publishes something that was not fully looked at.
+    """
+    if not coverage or coverage == verdict.COVERAGE_COMPLETE:
+        return []
+    examined = ("**一点都没有被检查过**" if coverage == verdict.COVERAGE_NONE
+                else "**只检查了一部分**")
+    lines = [f"**覆盖度:** 这个 skill {examined},所以合入前请自己看一遍 diff。", ""]
+    owner = verdict.owner_of(cause)
+    advice = _CAUSE_ADVICE.get(cause or "")
+    if owner and advice:
+        lines += [f"**归属:** {owner}", "", advice, ""]
+    else:
+        lines += ["这个原因还没有对应的处置说明,请把上面的判定理由发给维护者。", ""]
+    return lines
+
+
 def _findings_markdown(skill_name: str, findings: list[Finding],
-                       uploader: str | None = None) -> str:
+                       uploader: str | None = None, reason: str | None = None,
+                       coverage: str | None = None, cause: str | None = None) -> str:
+    """The review MR's body: why this is here, who to talk to, and what was found.
+
+    The reason line is not decoration. A verdict of "suspect" does not always come with
+    findings — "a layer did not finish" is the commonest one, and it produces none. Rendering
+    only the findings table left those MRs as a bare table header: the reviewer could not tell
+    why the skill was in front of them, and the author never learned what to fix. Seen in
+    production on 2026-08-19, twice for the same skill, and merged with no evidence.
+    """
     lines = [f"### 🔒 安全审计:`{skill_name}` 判为**可疑**,请复核后决定是否合入", ""]
     # Who uploaded it, stated rather than left to be inferred from the folder name
     # in the diff. A reviewer's first question is who to talk to.
     if uploader:
         lines += [f"**上传者:** {uploader}", ""]
-    lines.append("| 位置 | 检查项 | 严重度 | 命中原文 | 说明 |")
-    lines.append("|---|---|---|---|---|")
-    for f in findings:
-        where = f.file or "-"
-        if f.line:
-            where = f"{where}:{f.line}"
-        where = where.replace("|", "\\|")[:120]
-        ev = (f.evidence or "").replace("|", "\\|").replace("\n", " ")[:120]
-        dt = (f.detail or "").replace("|", "\\|").replace("\n", " ")[:160]
-        lines.append(f"| `{where}` | {f.category} | {f.severity} | {ev} | {dt} |")
+    if reason:
+        lines += [f"**判定理由:** {reason}", ""]
+
+    lines += _coverage_note(coverage, cause)
+
+    if findings:
+        lines.append("| 位置 | 检查项 | 严重度 | 命中原文 | 说明 |")
+        lines.append("|---|---|---|---|---|")
+        for f in findings:
+            where = f.file or "-"
+            if f.line:
+                where = f"{where}:{f.line}"
+            where = where.replace("|", "\\|")[:120]
+            ev = (f.evidence or "").replace("|", "\\|").replace("\n", " ")[:120]
+            dt = (f.detail or "").replace("|", "\\|").replace("\n", " ")[:160]
+            lines.append(f"| `{where}` | {f.category} | {f.severity} | {ev} | {dt} |")
+    elif coverage == verdict.COVERAGE_COMPLETE:
+        # Fully examined and nothing gating: this should not have become a review at all.
+        lines += ["没有命中,且内容已全部检查过。这条复核单不该存在,请把参考编号发给维护者。", ""]
     lines.append("")
     lines.append("_合入此 MR = 该 skill 上线。_")
     return "\n".join(lines)
@@ -90,19 +164,22 @@ def _findings_markdown(skill_name: str, findings: list[Finding],
 def review_suspect(
     *, source_branch: str, target_branch: str, skill_name: str,
     findings: list[Finding], audit_ref: str, uploader: str | None = None,
+    reason: str | None = None, coverage: str | None = None, cause: str | None = None,
 ) -> str | None:
     """Create a Draft MR from source_branch and post findings. Returns MR url."""
     settings = get_settings()
     if not settings.audit_review_enabled:
         return None
     try:
+        body = _findings_markdown(skill_name, findings, uploader, reason,
+                                  coverage, cause)
         payload = {
             "source_branch": source_branch,
             "target_branch": target_branch,
             "title": (f"Draft: [skill-audit] 可疑复核 {skill_name}"
                       + (f" — {uploader}" if uploader else "")
                       + f" ({audit_ref})"),
-            "description": _findings_markdown(skill_name, findings, uploader),
+            "description": body,
             "remove_source_branch": True,
         }
         rid = _reviewer_id(settings.audit_mr_reviewer) if settings.audit_mr_reviewer else None
@@ -115,7 +192,7 @@ def review_suspect(
         if iid:
             try:
                 _request("POST", f"projects/{_project()}/merge_requests/{iid}/notes",
-                         {"body": _findings_markdown(skill_name, findings, uploader)})
+                         {"body": body})
             except Exception as exc:  # note is best-effort
                 log.warning("MR note failed: %s", exc)
         log.info("opened Draft MR for suspect skill '%s': %s", skill_name, mr_url)

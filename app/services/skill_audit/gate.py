@@ -104,6 +104,8 @@ def record(
         judge_model=audit.judge_model,
         content_sha=audit.content_sha,
         reason=audit.reason or None,
+        coverage=audit.coverage or None,
+        cause=audit.cause or None,
         scanner_version=audit.scanner_version,
         policy_fingerprint=audit.policy_fingerprint,
         analyzers_used=",".join(audit.analyzers_used) or None,

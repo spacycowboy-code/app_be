@@ -480,7 +480,7 @@ async def update_skill(
         db.commit()
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"编辑被安全审计拒绝：命中安全红线。参考编号 {decision.ref}",
+            f"编辑被安全审计拒绝：{audit.reason or '命中安全红线'}。参考编号 {decision.ref}",
         )
 
     # Persist the edit into the git-managed skill repo: refresh the folder
@@ -534,6 +534,9 @@ async def update_skill(
                 findings=audit.findings,
                 audit_ref=decision.ref,
                 uploader=gate._uploader_label(db, editor),
+                reason=audit.reason,
+                coverage=audit.coverage,
+                cause=audit.cause,
             )
         )
     gate.record(db, decision.ref, audit, skill_id=skill.id,
