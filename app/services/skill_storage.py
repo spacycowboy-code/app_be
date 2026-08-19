@@ -95,15 +95,24 @@ class SkillStorage:
             return None
 
     def _push_with_guard(self, tag: str | None, branch: str | None = None) -> bool:
-        """Push HEAD to `branch` (default: the live branch), with a retry guard."""
+        """Push `branch` (default: the live branch) to the remote, with a retry guard.
+
+        The refspec names the local branch explicitly instead of ``HEAD``. ``HEAD`` is
+        shared mutable state: the suspect path checks out a review branch for the whole
+        duration of a write, so a concurrent live publish pushing ``HEAD:main`` would put
+        unreviewed content on the live branch — the one thing the audit gate exists to
+        prevent. Naming the branch makes that impossible; if the local branch is not where
+        we think it is, the push fails instead of publishing the wrong commit.
+        """
         if not settings.skill_repo_push:
             return False
         remote = settings.skill_repo_remote
         branch = branch or settings.skill_repo_branch
+        refspec = f"refs/heads/{branch}:{branch}"
         last_err = ""
         for attempt in range(3):
             try:
-                self._git("push", remote, f"HEAD:{branch}")
+                self._git("push", remote, refspec)
                 if tag:
                     self._git("push", remote, tag)
                 return True
@@ -226,7 +235,11 @@ class SkillStorage:
         self._git("add", "-A", "--", str(rel))
         commit_msg = f"{action}({category_slug}): {name} v{version}"
         try:
-            self._git("commit", "-m", commit_msg)
+            # Commit only this skill's folder. Without the pathspec the commit takes the
+            # whole index, so a concurrent write that has already staged its own files
+            # gets swept into this commit — two skills in one commit, and the other
+            # request's commit then finds nothing to commit.
+            self._git("commit", "-m", commit_msg, "--", str(rel))
         except subprocess.CalledProcessError as exc:
             # "nothing to commit" — treat as no-op but still return current sha.
             if "nothing to commit" not in (exc.stdout or "") + (exc.stderr or ""):
