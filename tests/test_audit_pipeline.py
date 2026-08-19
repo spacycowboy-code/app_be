@@ -334,6 +334,30 @@ class TestVerdictReuseIsShared:
         assert got.scanner_version == "skill-scanner 2.0.12"
         assert got.analyzers_used == ["static_analyzer"]
 
+    def test_reuse_carries_coverage_and_cause(self):
+        """The reused verdict has to be the same answer, not a convenient subset.
+
+        Defaulting these to "fully examined, no cause" is worse than losing them: the review MR
+        drops its coverage note and the health figures undercount, and it happens on the second
+        identical upload — the case that motivated the two fields.
+        """
+        from app.database import SessionLocal
+        from app.services.skill_audit import gate, verdict
+        from app.services.skill_audit.types import AuditResult
+
+        sha = "sha-" + "c" * 8
+        audit = AuditResult(state="suspect", reason="审计没有产出结果:Error loading skill",
+                            content_sha=sha, coverage=verdict.COVERAGE_NONE,
+                            cause=verdict.CAUSE_BUNDLE_UNLOADABLE)
+        with SessionLocal() as db:
+            gate.record(db, "ref-reuse-cov", audit, skill_id=None, skill_name="s",
+                        uploader_eid="E")
+            db.commit()
+            got = gate.recent_audit(db, sha)
+        assert got is not None
+        assert got.coverage == verdict.COVERAGE_NONE, "a reused verdict must not claim完整覆盖"
+        assert got.cause == verdict.CAUSE_BUNDLE_UNLOADABLE
+
     def test_a_different_content_hash_is_not_reused(self):
         from app.database import SessionLocal
         from app.services.skill_audit import gate

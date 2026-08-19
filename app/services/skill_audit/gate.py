@@ -184,6 +184,13 @@ def recent_audit(db: Session, content_sha: str, *, ttl: int = REUSE_TTL_SECONDS)
         judge_model=rec.judge_model,
         scanner_version=rec.scanner_version,
         policy_fingerprint=rec.policy_fingerprint,
+        # Everything the record holds has to come back, not just what is convenient. Omitting
+        # these let a reused verdict default to "fully examined, no cause", which silently
+        # stripped the coverage note from the review MR and undercounted the health figures —
+        # on the second identical upload, which is precisely the case that motivated them.
+        coverage=rec.coverage or "complete",
+        cause=rec.cause,
+        verdict=rec.judge_verdict,
         analyzers_used=(rec.analyzers_used or "").split(",") if rec.analyzers_used else [],
         incomplete=(rec.incomplete or "").split(",") if rec.incomplete else [],
     )

@@ -72,7 +72,15 @@ def frontmatter_problem(text: str) -> str | None:
         return None
     block = _FM_BLOCK.match(text.lstrip("\ufeff"))
     if not block:
-        # No block at all is fine: with_frontmatter adds a well-formed one.
+        # No delimited block. ``with_frontmatter`` would add one — but only when the labels are
+        # absent, and ``has_name_and_description`` matches them anywhere in the file, so a
+        # SKILL.md carrying bare `name:` / `description:` lines and no `---` block reaches the
+        # scanner unchanged. Measured against the installed scanner: it refuses to load that
+        # with "missing required field: name". Same incident, different door.
+        if _FM_NAME.search(text) or _FM_DESC.search(text):
+            return ("SKILL.md 缺少 frontmatter 的 `---` 分隔块。`name:` 与 `description:` 必须写在"
+                    "文件开头的一对 `---` 之间,否则扫描器无法加载这个 skill。正确形状:\n"
+                    "```\n---\nname: 你的名字\ndescription: 一句话说明\n---\n```")
         return None
     body = block.group(1)
     try:

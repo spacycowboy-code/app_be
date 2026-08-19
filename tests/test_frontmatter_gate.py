@@ -121,3 +121,33 @@ class TestTheAuthorIsToldAtUploadTime:
         resp = _post(client, "/api/skills/evaluate", "# no frontmatter labels\n\nbody\n")
         assert resp.status_code == 400
         assert "name:" in resp.json()["detail"]
+
+
+class TestTheBlocklessDoor:
+    """Found by review, confirmed against the installed scanner.
+
+    ``has_name_and_description`` matches the two labels anywhere in the file, so
+    ``with_frontmatter`` treats a SKILL.md with bare `name:` / `description:` lines as already
+    having frontmatter and leaves it alone. The scanner then refuses to load it — the same
+    incident through a different door.
+    """
+
+    BLOCKLESS = "name: probe\ndescription: A benign probe\n\n# Probe\n\nbody\n"
+
+    def test_bare_labels_without_a_block_are_refused(self):
+        problem = frontmatter_problem(self.BLOCKLESS)
+        assert problem is not None
+        assert "`---`" in problem
+
+    def test_the_message_shows_the_correct_shape(self):
+        problem = frontmatter_problem(self.BLOCKLESS) or ""
+        assert "name: 你的名字" in problem
+
+    def test_a_file_with_no_frontmatter_at_all_is_still_allowed(self):
+        """with_frontmatter genuinely does add a block for these, so refusing would be wrong."""
+        assert frontmatter_problem("# Just a heading\n\nbody\n") is None
+
+    def test_upload_refuses_it(self, client):
+        resp = _post(client, "/api/skills/evaluate", self.BLOCKLESS, name="blockless")
+        assert resp.status_code == 400, resp.text
+        assert "`---`" in resp.json()["detail"]
