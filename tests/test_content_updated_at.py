@@ -108,6 +108,36 @@ def test_a_skill_uploaded_once_is_not_an_update(client):
     assert not _is_update_on_home(row)
 
 
+def test_a_first_upload_whose_version_row_lands_later_is_not_an_update(client):
+    """The row and its version row are not written at the same instant.
+
+    ``upload.py`` flushes the skill on its own, then adds the version row, which
+    is only INSERTed at commit — after the audit record and, for a suspect
+    upload, after a GitLab MR round-trip. Each INSERT evaluates
+    ``CURRENT_TIMESTAMP`` separately, so the version row is stamped seconds after
+    the skill. Comparing the two directly would announce every brand-new skill as
+    "Updated" the moment it appears.
+
+    The row is also churned here so that every wrong answer is caught: reporting
+    the version row's stamp fails, and so does falling back to ``updated_at``.
+    """
+    _seed(versions=[timedelta(seconds=5)])
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, SKILL_ID)
+        assert skill is not None
+        skill.downloads = "1"  # someone downloads it right after it appears
+        db.commit()
+
+    row = _summary(client)
+
+    assert row["updatedAt"] > row["createdAt"], "precondition: the row was churned"
+    assert row["contentUpdatedAt"] == row["createdAt"], (
+        "a single upload counts as creation, not as an update, however long the "
+        "version row took to land"
+    )
+    assert not _is_update_on_home(row)
+
+
 def test_a_re_upload_is_an_update(client):
     """A second version row is a real content change and must still surface."""
     _seed(versions=[timedelta(0), timedelta(hours=1)])
