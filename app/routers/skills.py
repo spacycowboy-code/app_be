@@ -139,8 +139,23 @@ def list_skills(
                 .group_by(RpAiUserFavorite.skill_id)
             ).all()
         )
+        # Newest upload per skill: the authoritative record of a content change,
+        # one row per upload. ``updated_at`` on the skill row cannot serve here
+        # because it moves on any write to the row; official imports have no
+        # version rows, so they fall back to it.
+        last_upload = dict(
+            db.execute(
+                select(
+                    RpAiSkillVersion.skill_id,
+                    func.max(RpAiSkillVersion.created_at),
+                )
+                .where(RpAiSkillVersion.skill_id.in_(ids))
+                .group_by(RpAiSkillVersion.skill_id)
+            ).all()
+        )
         for s in skills:
             s.favorite_count = int(counts.get(s.id, 0))
+            s.content_updated_at = last_upload.get(s.id) or s.updated_at
     return skills
 
 
@@ -152,6 +167,10 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
         .select_from(RpAiUserFavorite)
         .where(RpAiUserFavorite.skill_id == skill_id)
     ) or 0
+    skill.content_updated_at = db.scalar(
+        select(func.max(RpAiSkillVersion.created_at))
+        .where(RpAiSkillVersion.skill_id == skill_id)
+    ) or skill.updated_at
     return skill
 
 

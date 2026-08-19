@@ -19,7 +19,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -48,7 +48,10 @@ def _write_skill(skill: RpAiSkill, db: Session) -> str:
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    skill.storage_path = rel
+    # ``storage_path`` is not assigned here: it is written together with
+    # ``repo_commit`` in ``main`` as a Core UPDATE that preserves ``updated_at``.
+    # Going through the ORM would trip ``TimestampMixin.onupdate`` and make every
+    # skill in the catalog look freshly updated on the Home feed.
 
     # Ensure a version row exists.
     version = skill.version or "1.0.0"
@@ -87,8 +90,10 @@ def main() -> None:
         skills = list(db.scalars(select(RpAiSkill).order_by(RpAiSkill.id)))
         print(f"Materializing {len(skills)} skills into {REPO} ...")
         tags: list[str] = []
+        rels: dict[str, str] = {}
         for skill in skills:
             rel = _write_skill(skill, db)
+            rels[skill.id] = rel
             version = skill.version or "1.0.0"
             tags.append(f"{sanitize_segment(skill.id, 'id')}@{version}")
             print(f"  - {rel}  (v{version})")
@@ -106,8 +111,22 @@ def main() -> None:
             _git("tag", "-a", tag, "-m", tag, check=False)
 
         sha = _git("rev-parse", "HEAD").stdout.strip()
+        # One Core UPDATE per skill, naming ``updated_at`` so it keeps its current
+        # value. ``repo_commit`` gets a fresh sha on every run, so going through
+        # the ORM would fire ``onupdate=func.now()`` for the whole catalog and the
+        # Home feed — which reads ``updated_at > created_at`` as "this skill was
+        # updated" — would announce every skill as updated each time this script
+        # runs. Materializing the catalog is not a change to any skill's content.
         for skill in skills:
-            skill.repo_commit = sha
+            db.execute(
+                update(RpAiSkill)
+                .where(RpAiSkill.id == skill.id)
+                .values(
+                    storage_path=rels[skill.id],
+                    repo_commit=sha,
+                    updated_at=RpAiSkill.updated_at,
+                )
+            )
         db.commit()
 
         pushed = False

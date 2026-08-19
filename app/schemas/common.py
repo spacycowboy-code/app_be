@@ -36,7 +36,14 @@ class CamelModel(BaseModel):
         from_attributes=True,
     )
 
-    @field_serializer("created_at", "updated_at", check_fields=False)
+    @field_serializer(
+        "created_at", "updated_at", "content_updated_at", check_fields=False
+    )
     def _serialize_utc(self, value: object) -> object:
-        """Emit timestamps as timezone-aware UTC ISO strings."""
+        """Emit timestamps as timezone-aware UTC ISO strings.
+
+        Every timestamp the frontend compares must be labelled the same way: the
+        Home feed decides "is this an update?" by comparing these strings, and a
+        naive value sorts as *less than* an otherwise identical labelled one.
+        """
         return as_utc(value)
