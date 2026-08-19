@@ -55,10 +55,21 @@ class TestTheCheckItself:
         assert problem is not None
         assert "不是有效的 YAML" in problem
 
-    def test_a_present_but_empty_field_is_reported(self):
-        problem = frontmatter_problem("---\nname:\ndescription: x\n---\n\nbody\n")
+    def test_an_empty_value_is_allowed_because_the_scanner_loads_it(self):
+        """Measured: the scanner loads `name:` with no value. Refusing here would block a skill
+        it would have accepted, and the author could not tell that we, not it, turned them away."""
+        assert frontmatter_problem("---\nname:\ndescription: x\n---\n\nbody\n") is None
+
+    def test_a_missing_key_is_reported(self):
+        problem = frontmatter_problem("---\nname: probe\n---\n\nbody\n")
         assert problem is not None
-        assert "缺少" in problem and "name" in problem
+        assert "缺少" in problem and "description" in problem
+
+    def test_a_bare_colon_inside_a_value_is_allowed(self):
+        """`description: A tool: does things` is not valid yaml.safe_load input, but the scanner's
+        own parser accepts it. The check follows the scanner, not the stricter library."""
+        assert frontmatter_problem(
+            "---\nname: probe\ndescription: A tool: does things\n---\n\nbody\n") is None
 
     @pytest.mark.parametrize("block", [
         "---\nname: x\ndescription: y\n---\n",                      # minimal

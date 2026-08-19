@@ -124,3 +124,59 @@ def test_the_load_error_wording_actually_classifies_the_real_case():
     assert verdict.owner_of(cause) == verdict.OWNER_AUTHOR, (
         "a bundle the scanner cannot load is the author's to fix, not an outage of ours"
     )
+
+
+# What the upload check refuses has to be what the scanner refuses — no wider. A check that is
+# stricter than the tool blocks skills the tool would have accepted, and the author has no way to
+# tell that the platform, not the scanner, turned them away. Each case below was measured against
+# the installed binary; the first attempt at this check got two of them wrong (it refused a bare
+# colon inside a value, and an empty value, both of which the scanner loads).
+_FRONTMATTER_CASES = [
+    ("no space after the colon",
+     "---\nname:probe\ndescription:no space\n---\n\nbody\n", True),
+    ("no space on name only",
+     "---\nname:probe\ndescription: ok\n---\n\nbody\n", True),
+    ("a bare colon inside a value",
+     "---\nname: probe\ndescription: A tool: does things\n---\n\nbody\n", False),
+    ("an empty value",
+     "---\nname:\ndescription: x\n---\n\nbody\n", False),
+    ("unparseable YAML",
+     "---\nname: [unclosed\ndescription: x\n---\n\nbody\n", True),
+    ("a tab-indented line",
+     "---\nname: probe\n\tdescription: x\n---\n\nbody\n", True),
+    ("a missing required key",
+     "---\nname: probe\n---\n\nbody\n", True),
+    ("bare labels with no --- block",
+     "name: probe\ndescription: x\n\nbody\n", True),
+    ("a well-formed block",
+     "---\nname: probe\ndescription: A benign probe\n---\n\nbody\n", False),
+    ("a quoted value containing a colon",
+     "---\nname: probe\ndescription: \"A tool: does things\"\n---\n\nbody\n", False),
+]
+
+
+@needs_scanner
+@pytest.mark.parametrize("label,body,scanner_refuses", _FRONTMATTER_CASES)
+def test_the_upload_check_agrees_with_the_scanner(label, body, scanner_refuses):
+    """Both sides of the boundary, against the installed scanner."""
+    import subprocess
+    import tempfile
+
+    from app.services.skill_manifest import frontmatter_problem
+
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "SKILL.md").write_text(body, encoding="utf-8")
+        proc = subprocess.run([_SCANNER, "scan", d, "--format", "json"],
+                              capture_output=True, text=True, timeout=300)
+    refused = "Error loading skill" in (proc.stderr or "")
+    assert refused is scanner_refuses, (
+        f"the scanner's tolerance for {label!r} changed: it now "
+        f"{'refuses' if refused else 'loads'} it. Re-measure and update both this table and "
+        "skill_manifest.frontmatter_problem."
+    )
+    blocked = frontmatter_problem(body) is not None
+    assert blocked is refused, (
+        f"for {label!r} the upload check says {'block' if blocked else 'allow'} while the scanner "
+        f"says {'refuse' if refused else 'load'}. Stricter than the tool blocks skills it would "
+        "have accepted; looser hands a reviewer a skill nobody could examine."
+    )

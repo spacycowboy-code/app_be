@@ -55,51 +55,93 @@ def extract_skill_md_from_zip(data: bytes) -> str | None:
 
 
 def frontmatter_problem(text: str) -> str | None:
-    """Why this skill's frontmatter will not be readable, or None if it is fine.
+    """Why the scanner will refuse to load this skill, or None if it will not.
 
     ``parse_frontmatter`` is deliberately forgiving: it falls back to a regex so a slightly
-    malformed block still yields a name for the marketplace card. Everything downstream is
-    not that forgiving. The scanner parses the block as YAML and refuses to load the skill
-    when it is not a mapping, which makes the audit end as "no report" — the gate then reads
-    that as "not checked" and sends it to a human, who is handed a skill nobody has looked at.
-    Measured: one skill uploaded twice, unchanged, because the message it got back never said
-    what was wrong.
+    malformed block still yields a name for the marketplace card. The scanner is not that
+    forgiving — it refuses to load the skill outright, which makes the audit end as "no report".
+    The gate then reads that as "not checked" and sends it to a human, who is handed a skill
+    nobody has looked at. Measured: one skill uploaded twice, unchanged, because the message it
+    got back never said what was wrong.
 
-    The commonest mistake by a wide margin is a missing space after the colon. ``name:foo`` is
-    a plain scalar in YAML, not a mapping, so the field reads as absent while looking present.
+    **This check exists to match the scanner, not to be stricter than it.** Its tolerance was
+    measured against the installed binary, and it is wider than ``yaml.safe_load``:
+
+    ==============================  ===============  ===========================================
+    frontmatter                     scanner          why
+    ==============================  ===============  ===========================================
+    ``name:foo`` (no space)         refuses          plain scalar, so ``name`` reads as absent
+    ``description: a: b``           **loads**        tolerated by its own parser
+    ``name:`` (empty)               **loads**        present, just empty
+    unparseable YAML                refuses          "Failed to parse YAML frontmatter"
+    tab-indented                    refuses          same
+    no ``---`` block at all         refuses          fields are not found
+    missing ``description``         refuses          required field
+    ==============================  ===============  ===========================================
+
+    So the rule is: refuse when the *keys* are unreachable, not when a *value* is unusual.
+    ``tests/test_frontmatter_gate.py`` pins the cases above; a divergence means this function
+    and the scanner have drifted and one of them is now wrong.
     """
     if not text:
         return None
-    block = _FM_BLOCK.match(text.lstrip("\ufeff"))
+    stripped = text.lstrip("\ufeff")
+    block = _FM_BLOCK.match(stripped)
     if not block:
         # No delimited block. ``with_frontmatter`` would add one — but only when the labels are
         # absent, and ``has_name_and_description`` matches them anywhere in the file, so a
         # SKILL.md carrying bare `name:` / `description:` lines and no `---` block reaches the
-        # scanner unchanged. Measured against the installed scanner: it refuses to load that
-        # with "missing required field: name". Same incident, different door.
+        # scanner unchanged, which refuses it. Same incident, different door.
         if _FM_NAME.search(text) or _FM_DESC.search(text):
             return ("SKILL.md 缺少 frontmatter 的 `---` 分隔块。`name:` 与 `description:` 必须写在"
                     "文件开头的一对 `---` 之间,否则扫描器无法加载这个 skill。正确形状:\n"
                     "```\n---\nname: 你的名字\ndescription: 一句话说明\n---\n```")
         return None
     body = block.group(1)
+
+    # The mistake that caused the incident, checked before parsing: `name:foo` parses as a plain
+    # scalar rather than a mapping, so the field is absent while looking present. Reported by
+    # name because "a required field is missing" sends the author looking for something they can
+    # see is already there.
+    for line in body.splitlines():
+        m = re.match(r"^\s*(name|description)\s*:(?=\S)", line)
+        if m:
+            field = m.group(1)
+            return (f"SKILL.md 的 frontmatter 里 `{line.strip()[:60]}` 冒号后面少了空格。"
+                    f"YAML 会把整段读成一行字符串,于是 `{field}` 被当成没写——尽管肉眼看它写了。"
+                    f"改成 `{field}: ` 加空格即可。")
+
     try:
         data = yaml.safe_load(body)
     except yaml.YAMLError as exc:
-        first = str(exc).splitlines()[0] if str(exc) else "无法解析"
+        # Not every YAML error means the scanner will refuse: its own parser accepts things
+        # ``safe_load`` rejects, notably a bare colon inside a plain value
+        # (``description: A tool: does things``). Refusing on every parse error made this check
+        # stricter than the tool, which blocks skills it would have accepted — and the author
+        # cannot tell that the platform, not the scanner, turned them away.
+        #
+        # So only the errors that also stop *it* are reported. Measured against the installed
+        # binary: a tab-indented line and an unclosed flow collection are refused there too;
+        # a stray colon in a value is not. The table in
+        # ``tests/test_scanner_contract.py::test_the_upload_check_agrees_with_the_scanner``
+        # holds both sides of this boundary and fails if either moves.
+        message = str(exc)
+        first = message.splitlines()[0] if message else "无法解析"
+        refused_by_scanner_too = (
+            "found character '\\t'" in message
+            or "expected ',' or ']'" in message
+            or "expected ',' or '}'" in message
+            or "found unexpected end of stream" in message
+        )
+        if not refused_by_scanner_too:
+            return None
         return f"SKILL.md 的 frontmatter 不是有效的 YAML:{first}"
     if not isinstance(data, dict):
-        offenders = [ln.strip() for ln in body.splitlines()
-                     if re.match(r"^\s*(name|description)\s*:\S", ln)]
-        hint = ""
-        if offenders:
-            field = offenders[0].split(":", 1)[0].strip()
-            hint = (f"——`{offenders[0][:60]}` 里冒号后面少了空格,"
-                    f"YAML 会把整段读成一行字符串,于是 `{field}` 被当成没写。"
-                    f"改成 `{field}: ` 加空格即可")
-        return ("SKILL.md 的 frontmatter 没能解析成键值对" + hint
-                + "。正确写法:`name: 你的名字` 与 `description: 一句话说明`,冒号后要有空格。")
-    missing = [k for k in ("name", "description") if not str(data.get(k) or "").strip()]
+        return ("SKILL.md 的 frontmatter 没能解析成键值对。正确写法:`name: 你的名字` 与 "
+                "`description: 一句话说明`,冒号后要有空格。")
+    # Missing keys are refused; an empty value is not — the scanner loads that, and refusing it
+    # here would block a skill it would have accepted.
+    missing = [k for k in ("name", "description") if k not in data]
     if missing:
         return (f"SKILL.md 的 frontmatter 缺少 {'、'.join(missing)}。"
                 "两个字段都必填,格式为 `name: 你的名字`、`description: 一句话说明`。")
