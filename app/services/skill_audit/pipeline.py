@@ -192,6 +192,8 @@ def audit_skill(
         result = AuditResult(
             state="danger", findings=precheck, content_sha=key,
             reason=f"明文凭据:{precheck[0].file}:{precheck[0].line}",
+            # A red line we found ourselves: fully examined.
+            coverage=verdict.COVERAGE_COMPLETE,
             judge_model=settings.audit_kiro_model,
         )
         _cache_put(key, result)
@@ -218,6 +220,8 @@ def audit_skill(
     result = AuditResult(
         state=decision.state,
         reason=decision.reason,
+        coverage=decision.coverage,
+        cause=decision.cause,
         content_sha=key,
         findings=report.findings,
         incomplete=decision.incomplete or [],

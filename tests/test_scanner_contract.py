@@ -76,3 +76,107 @@ def test_each_stage_marker_still_appears_in_the_scanner(marker):
         f"the scanner no longer prints {marker!r}: progress reporting would go quiet without "
         "any error. Re-read its phase logging and update STAGE_MARKERS."
     )
+
+
+# ``verdict._no_report_cause`` still has to tell "the scanner refused to load this bundle" apart
+# from "the scan broke", and it does that from the scanner's own wording. Two strings, asserted
+# here so a rewording upstream fails a test instead of quietly turning an author-fixable case
+# into "no guidance yet".
+_LOAD_ERROR_MARKERS = ["Error loading skill", "missing required field"]
+
+
+@needs_scanner
+@pytest.mark.parametrize("marker", _LOAD_ERROR_MARKERS)
+def test_each_load_error_marker_still_appears_in_the_scanner(marker):
+    pkg = _package_dir()
+    if pkg is None:
+        pytest.skip("could not locate the installed scanner package")
+    hits = [p for p in pkg.rglob("*.py")
+            if marker in p.read_text(encoding="utf-8", errors="replace")]
+    assert hits, (
+        f"the scanner no longer says {marker!r}. A bundle it cannot load would be classified as "
+        "a platform failure instead of something the author can fix. Re-read its skill loader "
+        "and update verdict._no_report_cause."
+    )
+
+
+@needs_scanner
+def test_the_load_error_wording_actually_classifies_the_real_case():
+    """End to end on the real thing: run the scanner on the frontmatter that failed in
+    production, and check the message it produces lands on the author-fixable cause."""
+    import json
+    import subprocess
+    import tempfile
+
+    from app.services.skill_audit import verdict
+
+    bad = ("---\nname:A Replir Allocation Tool - HTML Generator Skill\n\n"
+           "description:By using this skill you can made a html tool\n---\n\n# T\n\nbody\n")
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "SKILL.md").write_text(bad, encoding="utf-8")
+        proc = subprocess.run([_SCANNER, "scan", d, "--format", "json"],
+                              capture_output=True, text=True, timeout=300)
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    assert "missing required field" in combined, combined[-400:]
+    cause = verdict._no_report_cause(
+        next(ln for ln in combined.splitlines() if "Error loading skill" in ln))
+    assert cause == verdict.CAUSE_BUNDLE_UNLOADABLE
+    assert verdict.owner_of(cause) == verdict.OWNER_AUTHOR, (
+        "a bundle the scanner cannot load is the author's to fix, not an outage of ours"
+    )
+
+
+# What the upload check refuses has to be what the scanner refuses — no wider. A check that is
+# stricter than the tool blocks skills the tool would have accepted, and the author has no way to
+# tell that the platform, not the scanner, turned them away. Each case below was measured against
+# the installed binary; the first attempt at this check got two of them wrong (it refused a bare
+# colon inside a value, and an empty value, both of which the scanner loads).
+_FRONTMATTER_CASES = [
+    ("no space after the colon",
+     "---\nname:probe\ndescription:no space\n---\n\nbody\n", True),
+    ("no space on name only",
+     "---\nname:probe\ndescription: ok\n---\n\nbody\n", True),
+    ("a bare colon inside a value",
+     "---\nname: probe\ndescription: A tool: does things\n---\n\nbody\n", False),
+    ("an empty value",
+     "---\nname:\ndescription: x\n---\n\nbody\n", False),
+    ("unparseable YAML",
+     "---\nname: [unclosed\ndescription: x\n---\n\nbody\n", True),
+    ("a tab-indented line",
+     "---\nname: probe\n\tdescription: x\n---\n\nbody\n", True),
+    ("a missing required key",
+     "---\nname: probe\n---\n\nbody\n", True),
+    ("bare labels with no --- block",
+     "name: probe\ndescription: x\n\nbody\n", True),
+    ("a well-formed block",
+     "---\nname: probe\ndescription: A benign probe\n---\n\nbody\n", False),
+    ("a quoted value containing a colon",
+     "---\nname: probe\ndescription: \"A tool: does things\"\n---\n\nbody\n", False),
+]
+
+
+@needs_scanner
+@pytest.mark.parametrize("label,body,scanner_refuses", _FRONTMATTER_CASES)
+def test_the_upload_check_agrees_with_the_scanner(label, body, scanner_refuses):
+    """Both sides of the boundary, against the installed scanner."""
+    import subprocess
+    import tempfile
+
+    from app.services.skill_manifest import frontmatter_problem
+
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "SKILL.md").write_text(body, encoding="utf-8")
+        proc = subprocess.run([_SCANNER, "scan", d, "--format", "json"],
+                              capture_output=True, text=True, timeout=300)
+    refused = "Error loading skill" in (proc.stderr or "")
+    assert refused is scanner_refuses, (
+        f"the scanner's tolerance for {label!r} changed: it now "
+        f"{'refuses' if refused else 'loads'} it. Re-measure and update both this table and "
+        "skill_manifest.frontmatter_problem."
+    )
+    blocked = frontmatter_problem(body) is not None
+    assert blocked is refused, (
+        f"for {label!r} the upload check says {'block' if blocked else 'allow'} while the scanner "
+        f"says {'refuse' if refused else 'load'}. Stricter than the tool blocks skills it would "
+        "have accepted; looser hands a reviewer a skill nobody could examine."
+    )

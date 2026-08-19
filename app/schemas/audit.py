@@ -61,5 +61,10 @@ class SkillEvaluateResult(CamelModel):
     # Why this outcome, in one line. Without it the wizard can only say "needs review"
     # and the author has to infer which finding caused it.
     reason: str = ""
+    # The same answer as data, so the wizard can address the author in its own words instead of
+    # forwarding a sentence written for a reviewer: how much was examined, and why not all of it.
+    # An empty checks list does not mean "nothing found" — it can also mean nobody could look.
+    coverage: str = ""
+    cause: str | None = None
     checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []   # flat list, kept for the audit trail

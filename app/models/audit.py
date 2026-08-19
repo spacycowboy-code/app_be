@@ -53,6 +53,13 @@ class RpAiSkillAuditRecord(TimestampMixin, Base):
     content_sha: Mapped[str | None] = mapped_column(String(64), index=True)
     # One line saying why this outcome, so the record explains itself.
     reason: Mapped[str | None] = mapped_column(String(300))
+    # The same answer as data, so the questions people actually ask are answerable:
+    # "was this content examined at all" (coverage) and "how often does the audit itself fail,
+    # and on what" (cause). Neither is answerable from ``reason``: it is a sentence, and part of
+    # it comes from the scanner, whose wording is not ours. Older records have both NULL, which
+    # means "not recorded then" — they are never backfilled by re-reading the prose.
+    coverage: Mapped[str | None] = mapped_column(String(20))
+    cause: Mapped[str | None] = mapped_column(String(40))
     # Kept for records written before the scanner owned the pipeline.
     rules_hash: Mapped[str | None] = mapped_column(String(64))
     # A verdict can only be explained later if the three inputs are known: which model,
