@@ -10,4 +10,4 @@ deploy — it is read from the ``APP_GIT_COMMIT`` env var, which the CI deploy
 job injects with the pushed commit SHA (see .gitlab-ci.yml / Dockerfile).
 """
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
