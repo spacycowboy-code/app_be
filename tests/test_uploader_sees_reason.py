@@ -89,3 +89,29 @@ class TestTheAuthorIsToldWhy:
         body = _evaluate(client, "evaluate-reason").json()
         assert body["state"] == "suspect"
         assert body["reason"] == NO_REPORT
+
+
+class TestTheTwoFieldsReachTheClient:
+    """The wizard renders its own wording from these, so an API that omits them silently
+    downgrades the author back to a sentence written for a reviewer. Found exactly that way:
+    the frontend was reading fields the responses did not carry."""
+
+    def test_evaluate_returns_coverage_and_cause(self, client, monkeypatch):
+        monkeypatch.setattr(upload_mod, "audit_skill", lambda **kw: AuditResult(
+            state="suspect", reason=NO_REPORT, coverage="none", cause="bundle_unloadable"))
+        body = _evaluate(client, "cov-evaluate").json()
+        assert body["coverage"] == "none"
+        assert body["cause"] == "bundle_unloadable"
+
+    def test_upload_returns_coverage_and_cause(self, client, monkeypatch):
+        monkeypatch.setattr(upload_mod, "audit_skill", lambda **kw: AuditResult(
+            state="suspect", reason=NO_REPORT, coverage="partial", cause="layer_failed"))
+        body = _upload(client, "cov-upload").json()
+        assert body["coverage"] == "partial"
+        assert body["cause"] == "layer_failed"
+
+    def test_a_clean_pass_carries_complete_and_no_cause(self, client, monkeypatch):
+        monkeypatch.setattr(upload_mod, "audit_skill", lambda **kw: AuditResult(state="pass"))
+        body = _evaluate(client, "cov-clean").json()
+        assert body["coverage"] == "complete"
+        assert body["cause"] is None

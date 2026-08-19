@@ -100,6 +100,8 @@ def register(router: APIRouter, read_upload, checks_out, findings_out, acting_ei
                     db.commit()
             yield _sse("result", {
                 "state": audit.state, "reference": reference, "reason": audit.reason,
+                # Same two fields as the plain endpoint: the client renders one screen either way.
+                "coverage": audit.coverage, "cause": audit.cause,
                 "checks": [c.model_dump(by_alias=True) for c in checks_out(audit)],
                 "findings": [f.model_dump(by_alias=True) for f in findings_out(audit)],
             })

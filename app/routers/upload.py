@@ -216,6 +216,7 @@ async def evaluate_skill(
         db.commit()
     return SkillEvaluateResult(
         state=audit.state, reference=reference, reason=audit.reason,
+        coverage=audit.coverage, cause=audit.cause,
         checks=_checks_out(audit), findings=_findings_out(audit),
     )
 
@@ -436,6 +437,8 @@ async def upload_skill(
         pushed=result.pushed,
         audit_state=audit.state,
         reason=audit.reason,
+        coverage=audit.coverage,
+        cause=audit.cause,
         mr_url=mr_url,
         reference=audit_ref,
         checks=_checks_out(audit),

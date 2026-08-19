@@ -32,6 +32,8 @@ class SkillUploadResult(CamelModel):
     # Why, in one line. A suspect verdict does not always have findings — "a layer did not
     # finish" produces none — so without this the wizard can only say "needs review".
     reason: str | None = None
+    coverage: str | None = None
+    cause: str | None = None
     mr_url: str | None = None           # set when suspect -> review MR
     reference: str | None = None
     checks: list[AuditCheck] = []
