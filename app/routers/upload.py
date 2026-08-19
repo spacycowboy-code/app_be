@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.category import RpAiCategory
+from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
@@ -49,9 +50,9 @@ settings = get_settings()
 
 def _category_image(category_id: str) -> str:
     """Frontend image asset for a category group."""
-    # Public groups ('public', 'bnew') have no dedicated image; reuse tavily art.
+    # The 'public' group has no dedicated image; reuse tavily art.
     slug = category_id or "product-system"
-    if slug in ("public", "bnew"):
+    if slug == "public":
         return "skill-images/tavily.jpg"
     # AI team group has no dedicated art; use the shared default image.
     if slug == "ai-team":
@@ -265,11 +266,33 @@ async def upload_skill(
         # New upload but slug collides with another skill; make it unique.
         resolved_id = f"{resolved_id}-{uuid.uuid4().hex[:6]}"
 
-    # Category: category_id is the slug; look up its display label.
-    category = db.get(RpAiCategory, category_id)
-    category_label = category.label if category else category_id
-
     _ensure_user(db, eid)
+
+    # Category: category_id is the slug. Two things were missing here — an
+    # unknown slug was written through to the row, the manifest and the git path
+    # (a skill filed under a category nobody filters by is invisible everywhere
+    # except "All"), and an empty one had no fallback even though the uploader's
+    # department already implies a group.
+    category_id = (category_id or "").strip()
+    if not category_id:
+        category_id = group_for_eid(db, eid) or ""
+    if not category_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Choose a group for this skill: your department does not map to one.",
+        )
+    if category_id in PSEUDO_CATEGORY_IDS:
+        # 'all' is a filter, not a home. Storing it would hide the skill from
+        # every real group while looking like a valid choice.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"'{category_id}' is not a group you can upload to."
+        )
+    category = db.get(RpAiCategory, category_id)
+    if category is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"Unknown group '{category_id}'."
+        )
+    category_label = category.label
 
     # Build manifest metadata (persisted alongside the files).
     parsed_tags = _parse_tags(tags)

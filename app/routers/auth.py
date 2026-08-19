@@ -20,10 +20,12 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
+from app.models.category import RpAiCategory
 from app.models.login_event import RpAiLoginEvent
 from app.models.user import RpAiPortal
 from app.services import ldap_auth
 from app.services.auth_tokens import create_token
+from app.services.dept_groups import verified_group
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -38,7 +40,23 @@ class LoginRequest(BaseModel):
     password: SecretStr = Field(..., description="Corporate password — verified via LDAP")
 
 
-class LoginResponse(BaseModel):
+class GroupInfo(BaseModel):
+    """The caller's portal group, derived from their LDAP department.
+
+    ``group`` is a category slug the frontend can filter and upload with;
+    ``groupLabel`` is what to show a person; ``department`` is the raw directory
+    path, carried so the UI can explain where the group came from instead of
+    presenting it as magic. All three are null when the department maps to no
+    group (or the directory gave us no department) — the frontend then shows the
+    whole market and asks the uploader to choose.
+    """
+
+    group: str | None = None
+    groupLabel: str | None = None
+    department: str | None = None
+
+
+class LoginResponse(GroupInfo):
     token: str
     tokenType: str = "Bearer"
     expiresIn: int
@@ -46,9 +64,18 @@ class LoginResponse(BaseModel):
     displayName: str | None = None
 
 
-class MeResponse(BaseModel):
+class MeResponse(GroupInfo):
     eid: str
     displayName: str | None = None
+
+
+def group_of(db: Session, department: str | None) -> GroupInfo:
+    """Resolve a department to the group payload the frontend consumes."""
+    slug = verified_group(db, department)
+    if not slug:
+        return GroupInfo(department=department)
+    category = db.get(RpAiCategory, slug)
+    return GroupInfo(group=slug, groupLabel=category.label, department=department)
 
 
 def _upsert_user(db: Session, user: ldap_auth.LdapUser) -> None:
@@ -141,17 +168,31 @@ def login(
     _record_login(db, user.eid)
     token, expires_in = create_token(user.eid, user.display_name)
     return LoginResponse(
-        token=token, expiresIn=expires_in, eid=user.eid, displayName=user.display_name
+        token=token,
+        expiresIn=expires_in,
+        eid=user.eid,
+        displayName=user.display_name,
+        **group_of(db, user.department).model_dump(),
     )
 
 
 @router.get("/me", response_model=MeResponse)
-def me(request: Request) -> MeResponse:
-    """Return the identity carried by the (already-validated) bearer token."""
+def me(request: Request, db: Session = Depends(get_db)) -> MeResponse:
+    """Return the identity carried by the (already-validated) bearer token.
+
+    The group is read from the database rather than the token: the mapping and a
+    person's department both change, and a claim minted at sign-in would stay
+    wrong for the whole token lifetime.
+    """
     eid = getattr(request.state, "eid", None)
     if not eid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
-    return MeResponse(eid=eid, displayName=getattr(request.state, "display_name", None))
+    row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid))
+    return MeResponse(
+        eid=eid,
+        displayName=getattr(request.state, "display_name", None),
+        **group_of(db, row.department if row else None).model_dump(),
+    )
 
 
 #: An EID is a signum: ASCII only. Anything else is refused rather than copied
