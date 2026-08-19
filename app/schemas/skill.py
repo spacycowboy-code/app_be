@@ -135,6 +135,9 @@ class SkillRead(SkillBase, SkillDerived):
     favorite_count: int = 0
     created_at: datetime
     updated_at: datetime
+    # See ``SkillSummary.content_updated_at``: when the content last changed,
+    # rather than when the row was last written.
+    content_updated_at: datetime | None = None
     # Git sync status of the last write. ``synced`` is None when remote push is
     # disabled or not applicable; False means the change was saved locally but
     # the push to the GitLab remote failed. ``sync_warning`` carries a
@@ -167,3 +170,10 @@ class SkillSummary(CamelModel):
     audit_state: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # When this skill's *content* last changed, as opposed to when its row was
+    # last written. Taken from the newest ``rp_ai_skill_version`` row (one per
+    # upload); for skills with no version history — the official imports — it
+    # falls back to ``updated_at``. The Home feed uses this to decide what counts
+    # as an "Update", so that bookkeeping writes to the row (download counters,
+    # ratings, repo bookkeeping) cannot announce a skill as updated.
+    content_updated_at: datetime | None = None

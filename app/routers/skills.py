@@ -3,6 +3,7 @@ import io
 import re
 import uuid
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -97,6 +98,31 @@ def _apply_children(skill: RpAiSkill, payload) -> None:
         ]
 
 
+def _content_updated_at(
+    skill: RpAiSkill, upload_count: int, latest_upload: datetime | None
+) -> datetime | None:
+    """When this skill's content last changed, for the Home feed's "Update" rule.
+
+    ``rp_ai_skill_version`` holds one row per upload, which is the only
+    authoritative record of a content change — ``updated_at`` on the skill row is
+    a bookkeeping column that moves on any write to it.
+
+    * two or more uploads -> the newest one is a real update;
+    * exactly one upload -> that upload *is* the creation, so report the creation
+      time. Its version row is stamped seconds later than the skill row (separate
+      INSERTs, separate ``CURRENT_TIMESTAMP``), and returning that would announce
+      every brand-new skill as updated;
+    * no version history at all -> the official imports, which never write one.
+      Fall back to ``updated_at``: it is trustworthy for them now that the import
+      writes a per-folder commit sha rather than the repo-wide HEAD.
+    """
+    if upload_count >= 2 and latest_upload is not None:
+        return latest_upload
+    if upload_count == 1:
+        return skill.created_at
+    return skill.updated_at
+
+
 @router.get("", response_model=list[SkillSummary])
 def list_skills(
     db: Session = Depends(get_db),
@@ -139,8 +165,28 @@ def list_skills(
                 .group_by(RpAiUserFavorite.skill_id)
             ).all()
         )
+        # Upload history per skill: how many uploads, and when the newest landed.
+        # The count is what decides whether the content ever changed — a single
+        # upload is the creation itself, however many seconds after the skill row
+        # its version row happened to be INSERTed (``upload.py`` flushes the skill
+        # first, then commits the version row after the audit record and, for a
+        # suspect upload, a GitLab round-trip). Comparing the two timestamps
+        # directly would mark every brand-new skill as updated.
+        version_stats = {
+            sid: (int(n), latest)
+            for sid, n, latest in db.execute(
+                select(
+                    RpAiSkillVersion.skill_id,
+                    func.count(RpAiSkillVersion.id),
+                    func.max(RpAiSkillVersion.created_at),
+                )
+                .where(RpAiSkillVersion.skill_id.in_(ids))
+                .group_by(RpAiSkillVersion.skill_id)
+            ).all()
+        }
         for s in skills:
             s.favorite_count = int(counts.get(s.id, 0))
+            s.content_updated_at = _content_updated_at(s, *version_stats.get(s.id, (0, None)))
     return skills
 
 
@@ -152,6 +198,15 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
         .select_from(RpAiUserFavorite)
         .where(RpAiUserFavorite.skill_id == skill_id)
     ) or 0
+    upload_count, latest_upload = db.execute(
+        select(
+            func.count(RpAiSkillVersion.id),
+            func.max(RpAiSkillVersion.created_at),
+        ).where(RpAiSkillVersion.skill_id == skill_id)
+    ).one()
+    skill.content_updated_at = _content_updated_at(
+        skill, int(upload_count or 0), latest_upload
+    )
     return skill
 
 
