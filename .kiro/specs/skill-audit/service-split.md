@@ -92,7 +92,8 @@ GET  /health           → 只证明进程活着
 跨仓之后门户与引擎进入两个独立的 sha 空间。今天门户和判定器是**同一个 commit**(版本集合里两个 tag
 完全相同),兼容性是结构保证的;拆开后只能靠契约。契约由三部分组成:
 
-**一、响应的字段名**。门户保留一份 DTO 镜像(`AuditResult` / `Finding`,含 `is_danger` 这个属性),
+**一、响应的字段名**。门户保留一份 DTO 镜像(`AuditResult` / `Finding`,含 `is_danger` 属性与
+`retryable` 字段),
 不共享包。新增字段兼容,改名或删字段不兼容 —— 那要升 `apiVersion`。
 
 **二、封闭枚举随 `apiVersion` 走**:`state`(pass/suspect/danger)、`coverage`(complete/partial/none)。
@@ -126,24 +127,42 @@ GET  /health           → 只证明进程活着
 前端有三处 `clear` 分支。也就是说"看见什么被检查过并且通过了"这件事其实没实现。它是功能缺口,需要单独
 决定,不该混进拆分。
 
-## 失败语义:不能一刀切
+## 失败语义:那条规则今天其实从未生效
 
-`gate.py` 里已经有一条精确的规则,拆分**必须保留**:
+`gate.py` 里有一条精确的规则:
 
 > `unavailable` = 审计跑不起来 **且** 内容已经上线 → 调用方什么都不要改,让它重试。
 > 别处遇到不可用的判定会转人工复核,那是在提交者身上 fail closed;这里那样做,是在**每一个已经在用
 > 这个技能的人**身上 fail closed,而它一分钟前还是好的。
 
-所以:
+它的实现是 `audit.verdict == "error" and replaces_published`。核过之后:**当前代码从不给 `verdict`
+赋值** —— `AuditResult(...)` 的四个构造点(`pipeline.py` 178/192/220、`gate.py` 174 回读记录)一个都不传,
+只有 `tests/test_edit_audit.py` 手工构造出 `verdict="error"`。所以这条规则**从来没有可能成立**:今天
+扫描器坏掉时重发布一个已上线技能,拿到的是 pending,正是这段注释说"更糟"的那个结果。
+
+生产库也印证了这一点:`judge_verdict` 有 16/21 条非空,但 `coverage` 与 `cause` **0/21** —— 那 16 条是
+更早那套"门户直接调判定器"留下的历史数据,而现在这套扫描器流水线**在生产一条审计记录都没写过**。
+
+所以拆分不是"保留"这条规则,而是**让它第一次真的生效**,并且不靠给 `verdict` 兼职:
+
+引擎在结论里报一个**事实** `retryable` —— "再试一次有可能得到不同答案"。判断依据就是归属:平台侧的
+缺口(扫描器超时、起不来、某一层报错)再试可能就好;作者侧的(附件解不开、成员读不出来)再试一百次
+都一样,那要作者改内容。这是关于失败本身的事实,不是生命周期决定,所以它属于引擎;**怎么处置**仍然
+只在 `gate.py`。
 
 | 情形 | 处理 |
 |---|---|
-| 引擎不可达 / 版本不匹配 / 审计没跑起来 | 客户端返回 `state=suspect` + `verdict=error` + `cause` |
-| 新提交 + error | 转人工复核(与今天进程内扫描器坏掉时一致) |
-| **重新发布已上线内容 + error** | **retry,不降级**。不能把线上好技能因为一次抖动打成 pending |
+| 引擎不可达 / 版本不匹配 | 客户端造 `state=suspect` + `coverage=none` + `cause=engine_unreachable` + `retryable=true` |
+| 新提交 + 审计没跑起来 | 转人工复核(在提交者身上 fail closed,与今天一致) |
+| **重新发布已上线内容 + `retryable`** | **503 retry,不降级**。这条从今天起才真的生效 |
+| 重新发布 + 不可重试(作者侧) | 照常 fail closed:再试也不会变,要作者改内容 |
 
-判断仍然只在 `gate.py`,**一行都不用改** —— 客户端把不可达表达成 `suspect` + `verdict=error`,
-`gate.unavailable`(`verdict == "error" and replaces_published`)自然就成立了。
+`gate.unavailable` 因此改成 `audit.retryable and replaces_published`,一行。
+
+**复用不能把失败复活。** `gate.recent_audit` 现在会复用 600 秒内同内容的任何记录,包括"什么都没查出来"
+的那种 —— 扫描器五分钟前坏了,接下来十分钟每次上传都直接replay那个失败,连试都不试。改成**只复用真的
+得出过结论的记录**(`coverage != "none"`)。顺带解掉一个依赖:回读出来的记录不需要带 `retryable`,
+所以不必为它加列。
 
 ## 去重键归门户
 
