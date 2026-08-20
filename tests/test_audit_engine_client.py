@@ -211,3 +211,20 @@ def test_without_the_table_it_says_it_cannot_tell(monkeypatch):
 def test_with_the_table_platform_failures_are_counted():
     assert audit_engine.platform_owned(
         ["scanner_timeout", "scanner_broken", "bundle_unloadable"]) == 2
+
+
+def test_the_portals_own_causes_have_an_owner_without_asking_the_engine(monkeypatch):
+    """引擎连不上时,归属不能是"算不出来"。
+
+    这两个 cause 是门户自己造的:引擎没应答,或者应答读不懂。查引擎的表永远查不到它们,而"引擎连不上"
+    恰好是引擎故障时最常出现的那一条 —— 显示成"没有对应说明"的话,复核人看到的信息比我们知道的更少。
+    这里连分类表都取不到,归属仍然要能给出来。
+    """
+    monkeypatch.setattr(audit_engine, "_vocab", None)
+    monkeypatch.setattr(audit_engine, "_vocab_at", 0.0)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no route")))
+    assert audit_engine.cause_owner(audit_engine.CAUSE_ENGINE_UNREACHABLE) == "平台"
+    assert audit_engine.cause_owner(audit_engine.CAUSE_ENGINE_CONTRACT) == "平台"
+    # 引擎那边的 cause 仍然是"算不出来",不能因为加了本地表就开始猜
+    assert audit_engine.cause_owner("scanner_timeout") is None

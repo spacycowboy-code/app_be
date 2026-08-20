@@ -284,15 +284,30 @@ def _vocabulary() -> dict | None:
 OWNER_WORDS = {"author": "作者", "platform": "平台", "shared": "作者与平台"}
 
 
+#: 门户自己造的 cause 的归属。这**不是**引擎那张表的副本 —— 引擎压根没见过这些情况(它没应答,
+#: 或者它的应答门户读不懂),所以只能由门户自己判定。两者都是平台的问题:调用不通、契约对不上,
+#: 都不是上传者能做什么的事。
+_OWN_CAUSE_OWNER = {
+    CAUSE_ENGINE_UNREACHABLE: "platform",
+    CAUSE_ENGINE_CONTRACT: "platform",
+}
+
+
 def cause_owner(cause: str | None) -> str | None:
     """谁能补上这个覆盖缺口,已渲染成中文。算不出来时返回 None。
 
     分类表来自引擎(`GET /v1/vocabulary`),门户不留副本 —— 归属是 cause 的纯函数,两份可能互相矛盾的
     定义分散在两个仓里,漂移时没有任何一处会报错。取不到表时返回 None,调用方必须**说自己算不出来**,
     不能报一个错的数字。
+
+    例外是门户自己造的那两个 cause:引擎没见过它们,查它的表永远查不到。而"引擎连不上"恰好是引擎故障
+    时最常出现的那一条 —— 如果它显示成"没有对应说明",复核人看到的信息比我们知道的更少。
     """
     if not cause:
         return None
+    own = _OWN_CAUSE_OWNER.get(cause)
+    if own:
+        return OWNER_WORDS.get(own)
     vocab = _vocabulary()
     if not vocab:
         return None
@@ -304,5 +319,5 @@ def platform_owned(causes: list[str]) -> int | None:
     vocab = _vocabulary()
     if not vocab:
         return None
-    owners = vocab.get("causeOwners") or {}
+    owners = {**(vocab.get("causeOwners") or {}), **_OWN_CAUSE_OWNER}
     return sum(1 for c in causes if owners.get(c) == "platform")
