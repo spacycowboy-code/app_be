@@ -201,3 +201,17 @@ class TestReviewSuspectPassesTheReason:
         assert gitlab_mr.review_suspect(
             source_branch="b", target_branch="main", skill_name="s", findings=[],
             audit_ref="r", reason="x") is None
+
+
+def test_an_unreachable_engine_tells_the_reviewer_what_to_do():
+    """引擎连不上时,复核人必须被明确告知"不要凭这份 MR 判断内容安全"。
+
+    这条 MR 的处境很特殊:内容一个字都没被检查过,而 MR 本身长得和"查过、有可疑发现"的那种一样。
+    没有这段说明,最可能的结果是有人看一眼 diff 觉得没问题就合了。
+    """
+    body = gitlab_mr._findings_markdown("s", [], "u", "审计服务暂时连不上",
+                                        audit_engine.COVERAGE_NONE,
+                                        audit_engine.CAUSE_ENGINE_UNREACHABLE)
+    assert "**归属:** 平台" in body, body
+    assert "不要凭这份 MR 判断" in body
+    assert "还没有对应的处置说明" not in body, "这个原因我们完全知道该怎么办,不该落到兜底上"
