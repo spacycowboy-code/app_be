@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.main import app
 from app.routers import upload as upload_mod
 from app.services.auth_tokens import create_token
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.audit_engine import AuditResult, Finding
 from app.services.skill_storage import StoreResult
 
 SKILL_MD = "---\nname: T\ndescription: d\n---\n# T\nbody\n"

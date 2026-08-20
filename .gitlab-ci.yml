@@ -14,6 +14,5 @@ include:
       service: rp-ai-portal-be
       app_module: app.main:app
       apt_packages: "openssh-client"
-      extra_pip: "pip install --no-cache-dir pipx && pipx install cisco-ai-skill-scanner==2.0.12 && skill-scanner --version"
       extra_dockerfile: Dockerfile.judge
       extra_service: skill-audit-judge

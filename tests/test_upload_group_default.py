@@ -17,7 +17,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.routers import upload as upload_mod
 from app.services.auth_tokens import create_token
-from app.services.skill_audit.types import AuditResult
+from app.services.audit_engine import AuditResult
 from app.services.skill_storage import StoreResult
 
 SKILL_MD = "---\nname: T\ndescription: d\n---\n# T\nbody\n"

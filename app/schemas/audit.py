@@ -35,7 +35,7 @@ class AuditFinding(CamelModel):
 class AuditCheck(CamelModel):
     """One fixed check in the report, with its own findings as evidence.
     # False = 只作上下文,不影响结论(例如打包规范类)。
-    gating: bool = True
+
 
 
     The check list is closed and comes from the policy, so a clear check is

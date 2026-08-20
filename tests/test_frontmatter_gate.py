@@ -18,7 +18,7 @@ from app.main import app
 from app.routers import upload as upload_mod
 from app.services.auth_tokens import create_token
 from app.services.skill_manifest import frontmatter_problem, parse_frontmatter
-from app.services.skill_audit.types import AuditResult
+from app.services.audit_engine import AuditResult
 
 EID = "EYINCNG"
 

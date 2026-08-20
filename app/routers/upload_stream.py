@@ -21,8 +21,8 @@ from fastapi.responses import StreamingResponse
 
 from app.database import SessionLocal
 from app.services.skill_audit import gate
-from app.services.skill_audit.pipeline import audit_skill
-from app.services.skill_audit.types import AuditResult
+from app.services.audit_engine import audit_skill
+from app.services.audit_engine import AuditResult
 
 # Order matters: it is the order the scanner reaches them in, which is what the UI shows.
 STAGES: tuple[tuple[str, str], ...] = (

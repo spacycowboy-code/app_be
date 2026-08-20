@@ -15,9 +15,8 @@ import re
 import pytest
 
 from app.services import gitlab_mr
-from app.services.skill_audit import verdict
-from app.services.skill_audit.scan import ScanReport
-from app.services.skill_audit.types import Finding
+from app.services import audit_engine
+from app.services.audit_engine import Finding
 
 REASON_NO_REPORT = "审计没有产出结果:Error loading skill: SKILL.md missing required field: name"
 
@@ -35,8 +34,8 @@ class TestReviewBodyWithoutFindings:
         return gitlab_mr._findings_markdown(
             kw.get("name", "A Replir Allocation Tool"), kw.get("findings", []),
             kw.get("uploader", "Tony Li W (ERTABDF)"), kw.get("reason", REASON_NO_REPORT),
-            kw.get("coverage", verdict.COVERAGE_NONE),
-            kw.get("cause", verdict.CAUSE_BUNDLE_UNLOADABLE))
+            kw.get("coverage", audit_engine.COVERAGE_NONE),
+            kw.get("cause", "bundle_unloadable"))
 
     def test_the_reason_is_in_the_body(self):
         assert "SKILL.md missing required field: name" in self.body()
@@ -79,106 +78,60 @@ class TestCoverageAndCause:
     """
 
     ALL_CAUSES = sorted({
-        verdict.CAUSE_BUNDLE_UNLOADABLE, verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER,
-        verdict.CAUSE_BUNDLE_TOO_BIG, verdict.CAUSE_SCANNER_TIMEOUT,
-        verdict.CAUSE_SCANNER_BROKEN, verdict.CAUSE_LAYER_FAILED,
+        "bundle_unloadable", "bundle_unreadable_member",
+        "bundle_too_big", "scanner_timeout",
+        "scanner_broken", "layer_failed",
     })
 
     @pytest.mark.parametrize("cause", ALL_CAUSES)
     def test_every_cause_has_an_owner_and_advice(self, cause):
         """The rule for adding a cause: it arrives with both, or this fails."""
-        assert verdict.owner_of(cause), cause
+        assert audit_engine.cause_owner(cause), cause
         body = gitlab_mr._findings_markdown("s", [], "u", "某个理由",
-                                            verdict.COVERAGE_PARTIAL, cause)
-        assert f"**归属:** {verdict.owner_of(cause)}" in body, body
+                                            audit_engine.COVERAGE_PARTIAL, cause)
+        assert f"**归属:** {audit_engine.cause_owner(cause)}" in body, body
         assert "某个理由" in body, "the raw reason still has to be quoted"
 
     def test_complete_coverage_adds_no_note(self):
         body = gitlab_mr._findings_markdown("s", [f()], "u", "high prompt_injection(X)",
-                                            verdict.COVERAGE_COMPLETE, None)
+                                            audit_engine.COVERAGE_COMPLETE, None)
         assert "覆盖度" not in body
         assert "| 位置 |" in body
 
     def test_none_and_partial_say_different_things(self):
-        none = gitlab_mr._findings_markdown("s", [], "u", "r", verdict.COVERAGE_NONE,
-                                            verdict.CAUSE_BUNDLE_UNLOADABLE)
-        partial = gitlab_mr._findings_markdown("s", [f()], "u", "r", verdict.COVERAGE_PARTIAL,
-                                               verdict.CAUSE_LAYER_FAILED)
+        none = gitlab_mr._findings_markdown("s", [], "u", "r", audit_engine.COVERAGE_NONE,
+                                            "bundle_unloadable")
+        partial = gitlab_mr._findings_markdown("s", [f()], "u", "r", audit_engine.COVERAGE_PARTIAL,
+                                               "layer_failed")
         assert "一点都没有被检查过" in none
         assert "只检查了一部分" in partial
 
     def test_a_partial_verdict_still_shows_its_findings(self):
         """Partial coverage and findings are not exclusive: the table is still evidence."""
-        body = gitlab_mr._findings_markdown("s", [f()], "u", "r", verdict.COVERAGE_PARTIAL,
-                                            verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER)
+        body = gitlab_mr._findings_markdown("s", [f()], "u", "r", audit_engine.COVERAGE_PARTIAL,
+                                            "bundle_unreadable_member")
         assert "只检查了一部分" in body
         assert "| 位置 |" in body
 
     def test_platform_causes_do_not_blame_the_author(self):
-        for cause in (verdict.CAUSE_SCANNER_TIMEOUT, verdict.CAUSE_SCANNER_BROKEN,
-                      verdict.CAUSE_LAYER_FAILED):
-            body = gitlab_mr._findings_markdown("s", [], "u", "r", verdict.COVERAGE_NONE, cause)
-            assert verdict.owner_of(cause) == verdict.OWNER_PLATFORM
+        for cause in ("scanner_timeout", "scanner_broken",
+                      "layer_failed"):
+            body = gitlab_mr._findings_markdown("s", [], "u", "r", audit_engine.COVERAGE_NONE, cause)
+            assert audit_engine.cause_owner(cause) == "平台"
             assert "请作者" not in body, cause
 
     def test_an_unknown_cause_says_so_instead_of_guessing(self):
         body = gitlab_mr._findings_markdown("s", [], "u", "审计没有产出结果:something new",
-                                            verdict.COVERAGE_NONE, "cause_we_never_defined")
+                                            audit_engine.COVERAGE_NONE, "cause_we_never_defined")
         assert "归属" not in body
         assert "还没有对应的处置说明" in body
         assert "something new" in body
 
-    # The two fields have to be *decided* correctly, not just rendered.
-    @pytest.mark.parametrize("error,cause", [
-        ("Error loading skill: SKILL.md missing required field: name",
-         verdict.CAUSE_BUNDLE_UNLOADABLE),
-        ("Error loading skill: SKILL.md missing required field: description",
-         verdict.CAUSE_BUNDLE_UNLOADABLE),
-        ("timed out after 900s", verdict.CAUSE_SCANNER_TIMEOUT),
-        ("unparseable report: Expecting value", verdict.CAUSE_SCANNER_BROKEN),
-        ("no output (rc=1)", verdict.CAUSE_SCANNER_BROKEN),
-        ("[Errno 2] No such file or directory: 'skill-scanner'", verdict.CAUSE_SCANNER_BROKEN),
-        (None, verdict.CAUSE_SCANNER_BROKEN),
-    ])
-    def test_no_report_means_no_coverage_and_a_classified_cause(self, error, cause):
-        d = verdict.decide(ScanReport(ran=False, error=error))
-        assert d.state == "suspect"
-        assert d.coverage == verdict.COVERAGE_NONE
-        assert d.cause == cause
-
-    def test_a_failed_layer_and_an_exceeded_budget_are_partial_with_different_causes(self):
-        base = dict(ran=True, analyzers_used=["static_analyzer"])
-        failed = verdict.decide(ScanReport(
-            findings=[Finding(source="llm", category="policy_violation", severity="info",
-                              rule_id="LLM_ANALYSIS_FAILED")], **base))
-        budget = verdict.decide(ScanReport(
-            findings=[Finding(source="llm", category="policy_violation", severity="info",
-                              rule_id="LLM_CONTEXT_BUDGET_EXCEEDED")], **base))
-        assert failed.coverage == budget.coverage == verdict.COVERAGE_PARTIAL
-        assert failed.cause == verdict.CAUSE_LAYER_FAILED
-        assert budget.cause == verdict.CAUSE_BUNDLE_TOO_BIG
-
-    def test_an_unreadable_executable_is_partial_not_none(self):
-        """We did look. Calling this "nothing was examined" would count a working gate as an
-        outage, and tell the reviewer to ignore evidence we actually have."""
-        d = verdict.decide(ScanReport(
-            ran=True, analyzers_used=["static_analyzer"],
-            findings=[Finding(source="static", category="policy_violation", severity="low",
-                              rule_id="UNANALYZABLE_BINARY", file="bin/tool.exe")]))
-        assert d.coverage == verdict.COVERAGE_PARTIAL
-        assert d.cause == verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER
-        assert verdict.owner_of(d.cause) == verdict.OWNER_AUTHOR
-
-    def test_a_clean_pass_and_a_plain_finding_are_complete_with_no_cause(self):
-        clean = verdict.decide(ScanReport(ran=True, analyzers_used=["static_analyzer"]))
-        found = verdict.decide(ScanReport(ran=True, analyzers_used=["static_analyzer"],
-                                         findings=[f(sev="high")]))
-        for d in (clean, found):
-            assert d.coverage == verdict.COVERAGE_COMPLETE
-            assert d.cause is None
-            assert verdict.owner_of(d.cause) is None
-
-
+    # 原来这里还有一个 @pytest.mark.parametrize 块和四条测试,走的是 verdict.decide(ScanReport(...)):
+    # 扫描器的各种错误文本分别该归到哪个 cause、某一层没跑完是 partial 而不是 none、可读性问题不算
+    # "什么都没查"。那些测的是引擎怎么**决定**这两个字段,不是门户怎么**渲染**它们,已随拆分搬到
+    # skill-audit 仓 tests/test_verdict_mapping.py。这里留下的都是渲染:同样的 coverage/cause 传进去,
+    # 复核人应该读到什么。
 
 class TestReviewBodyWithFindings:
     def body(self, reason="high prompt_injection(X)"):
@@ -228,8 +181,8 @@ class TestReviewSuspectPassesTheReason:
         url = gitlab_mr.review_suspect(
             source_branch="b", target_branch="main", skill_name="s",
             findings=[], audit_ref="ref1", uploader="Tony Li W (ERTABDF)",
-            reason=REASON_NO_REPORT, coverage=verdict.COVERAGE_NONE,
-            cause=verdict.CAUSE_BUNDLE_UNLOADABLE,
+            reason=REASON_NO_REPORT, coverage=audit_engine.COVERAGE_NONE,
+            cause="bundle_unloadable",
         )
         assert url == "https://gitlab/mr/1"
         created = next(p for m, path, p in sent if path.endswith("merge_requests"))

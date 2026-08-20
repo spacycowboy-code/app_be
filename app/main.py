@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from app.config import get_settings
 from app.version import __version__
 from app.services.auth_tokens import TokenError, check_token_scope, decode_token
-from app.services.skill_audit.types import BundleTooLarge
+from app.services.audit_engine import BundleTooLarge
 from app.routers import (
     audit,
     auth,

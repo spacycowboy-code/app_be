@@ -14,7 +14,7 @@ from app.main import app
 from app.models.audit import RpAiSkillAuditRecord
 from app.routers import upload as upload_mod
 from app.services.auth_tokens import create_token
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.audit_engine import AuditResult, Finding
 
 SKILL_MD = "---\nname: T\ndescription: d\n---\n# T\nbody\n"
 SIGNED_IN, CLAIMED = "EYINCNG", "EXINGEN"

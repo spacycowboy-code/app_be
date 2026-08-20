@@ -21,8 +21,8 @@ import urllib.parse
 import urllib.request
 
 from app.config import get_settings
-from app.services.skill_audit import verdict
-from app.services.skill_audit.types import Finding
+from app.services import audit_engine
+from app.services.audit_engine import Finding
 
 log = logging.getLogger("skill_audit.mr")
 
@@ -69,32 +69,35 @@ def _reviewer_id(username: str) -> int | None:
 # One sentence per cause, for the reviewer. Keyed on the cause the verdict layer decided, not
 # on substrings of its prose: the structure is known where the decision is made, and recovering
 # it by grepping a sentence breaks as soon as the wording changes — including the scanner's
-# wording, which is not ours to fix. ``verdict.owner_of`` says who; this says what to do.
+# wording, which is not ours to fix. ``audit_engine.cause_owner`` says who; this says what to do.
+#
+# 键是引擎给的 cause 标识符,字面写在这里。它是开放集合(引擎会增加),所以这张表可能缺项 —— 缺项时
+# 下面会打印"这个原因还没有对应的处置说明",看得见,而不是静默少一段。
 _CAUSE_ADVICE: dict[str, str] = {
-    verdict.CAUSE_BUNDLE_UNLOADABLE: (
+    "bundle_unloadable": (
         "扫描器无法加载这个 skill,所以**它的内容一次都没有被检查过**。原因见上面的判定理由;"
         "最常见的是 `SKILL.md` 的 frontmatter 没能解析成键值对——`name:foo` 这样冒号后面少一个空格,"
         "YAML 就会把整段读成一行字符串,于是 `name` 被当成没写,尽管肉眼看它写了。正确写法是 "
         "`name: 名字` 与 `description: 一句话`,两个字段都必填。请作者改好后重传;"
         "在那之前合入等于上架一个未经检查的 skill。"
     ),
-    verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER: (
+    "bundle_unreadable_member": (
         "包里有个会运行的文件读不出来(常见于 `.pyz`、`.exe`,或非 UTF-8 编码的脚本),"
         "其余内容都已检查。请人工打开那个文件确认它做什么;或让作者把脚本平铺成可读的文本。"
     ),
-    verdict.CAUSE_BUNDLE_TOO_BIG: (
+    "bundle_too_big": (
         "内容超出了送给语义层的预算,超出的部分没有被语义分析看过(确定性层仍然扫了每个文件)。"
         "如果这个包确实很大,请作者拆分或去掉不必要的附件;如果它并不大,那是预算配得太紧,属平台侧。"
     ),
-    verdict.CAUSE_SCANNER_TIMEOUT: (
+    "scanner_timeout": (
         "审计超时,不是查出了问题。请维护者看一眼判定器与扫描器的负载,然后重跑;"
         "不要凭这个结论决定合不合。"
     ),
-    verdict.CAUSE_SCANNER_BROKEN: (
+    "scanner_broken": (
         "扫描器没有交出可用的报告(跑不起来、无输出,或输出不是有效 JSON)。这是我们的故障,"
         "不是作者的问题;skill 的内容没有被检查过。"
     ),
-    verdict.CAUSE_LAYER_FAILED: (
+    "layer_failed": (
         "语义分析或仲裁这一层没跑成,所以这次只有确定性层的结果。这是我们的故障,不是作者的问题。"
         "请维护者查判定器,再重跑一次审计。"
     ),
@@ -107,12 +110,18 @@ def _coverage_note(coverage: str | None, cause: str | None) -> list[str]:
     ``complete`` needs no note — the findings table is the whole story. Anything else means the
     table is not, and merging publishes something that was not fully looked at.
     """
-    if not coverage or coverage == verdict.COVERAGE_COMPLETE:
+    if not coverage or coverage == audit_engine.COVERAGE_COMPLETE:
         return []
-    examined = ("**一点都没有被检查过**" if coverage == verdict.COVERAGE_NONE
-                else "**只检查了一部分**")
+    if coverage == audit_engine.COVERAGE_NONE:
+        examined = "**一点都没有被检查过**"
+    elif coverage == audit_engine.COVERAGE_PARTIAL:
+        examined = "**只检查了一部分**"
+    else:
+        # 认不出来的取值不能猜成"只检查了一部分":那会把"完全没查"说轻。覆盖度是随契约版本走的封闭
+        # 枚举,所以出现未知值意味着两边版本对不上,该让人看见。
+        examined = f"**覆盖情况无法判断**(引擎报的是 `{coverage}`,门户不认识这个取值)"
     lines = [f"**覆盖度:** 这个 skill {examined},所以合入前请自己看一遍 diff。", ""]
-    owner = verdict.owner_of(cause)
+    owner = audit_engine.cause_owner(cause)
     advice = _CAUSE_ADVICE.get(cause or "")
     if owner and advice:
         lines += [f"**归属:** {owner}", "", advice, ""]
@@ -153,7 +162,7 @@ def _findings_markdown(skill_name: str, findings: list[Finding],
             ev = (f.evidence or "").replace("|", "\\|").replace("\n", " ")[:120]
             dt = (f.detail or "").replace("|", "\\|").replace("\n", " ")[:160]
             lines.append(f"| `{where}` | {f.category} | {f.severity} | {ev} | {dt} |")
-    elif coverage == verdict.COVERAGE_COMPLETE:
+    elif coverage == audit_engine.COVERAGE_COMPLETE:
         # Fully examined and nothing gating: this should not have become a review at all.
         lines += ["没有命中,且内容已全部检查过。这条复核单不该存在,请把参考编号发给维护者。", ""]
     lines.append("")

@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.models.user import RpAiPortal
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.audit_engine import COVERAGE_NONE, AuditResult, Finding
 
 
 @dataclass
@@ -57,8 +57,16 @@ class WriteDecision:
         unusable verdict routes to review, which fails closed at the submitter's
         expense; here it would fail closed at the expense of every user of a skill
         that was fine a minute ago.
+
+        It reads ``retryable`` — a fact the engine reports: trying again may produce a
+        different answer, because the gap is on the platform's side. It used to read
+        ``verdict == "error"``, which **nothing ever set**: the audit pipeline never
+        assigns ``verdict``, so this rule could not fire at all and a broken scanner
+        quietly moved a live skill to pending — the very outcome the paragraph above
+        argues against. An author-side gap (a bundle that cannot be unpacked) is not
+        retryable and still fails closed: trying again cannot change it.
         """
-        return self.audit.verdict == "error" and self.replaces_published
+        return self.audit.retryable and self.replaces_published
 
     @property
     def needs_review(self) -> bool:
@@ -166,6 +174,9 @@ def recent_audit(db: Session, content_sha: str, *, ttl: int = REUSE_TTL_SECONDS)
         db.query(RpAiSkillAuditRecord)
         .filter(RpAiSkillAuditRecord.content_sha == content_sha)
         .filter(RpAiSkillAuditRecord.created_at >= cutoff)
+        # 只复用真的得出过结论的。扫描器五分钟前坏了的话,复用会让接下来十分钟每次上传都直接
+        # replay 那个失败,连试都不试 —— 而重试正是这种情况下唯一有用的动作。
+        .filter(RpAiSkillAuditRecord.coverage != COVERAGE_NONE)
         .order_by(RpAiSkillAuditRecord.created_at.desc())
         .first()
     )

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.audit import RpAiSkillAuditRecord
-from app.services.skill_audit import verdict
+from app.services import audit_engine
 from app.services.skill_audit.reconcile import reconcile_all
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -82,9 +82,11 @@ def health(
             by_cause[cause] = by_cause.get(cause, 0) + count
 
     total = sum(by_state.values())
-    platform = sum(n for cause, n in by_cause.items()
-                   if verdict.owner_of(cause) == verdict.OWNER_PLATFORM)
-    not_examined = by_coverage.get(verdict.COVERAGE_NONE, 0)
+    # 归属分类由引擎发布(GET /v1/vocabulary),门户不留副本。取不到时**说自己算不出来**,而不是
+    # 报一个偏小的数字 —— 那种数字看起来像"平台很稳定",恰好在链路有问题时最容易误导人。
+    platform = audit_engine.platform_owned(
+        [c for c, n in by_cause.items() for _ in range(n)])
+    not_examined = by_coverage.get(audit_engine.COVERAGE_NONE, 0)
     return {
         "windowDays": days,
         "total": total,
@@ -95,7 +97,10 @@ def health(
         # audited in the window, how much failed because of us, and how much reached a human
         # with nothing examined at all.
         "platformFailures": platform,
-        "platformFailureRate": round(platform / total, 4) if total else 0.0,
+        "platformFailureRate": (round(platform / total, 4) if platform is not None and total
+                                else None if platform is None else 0.0),
+        # 分类表取不到时上面两个是 null。前端要按"算不出来"显示,不要显示成 0。
+        "platformFailuresUnavailable": platform is None,
         "notExamined": not_examined,
         "unclassified": unclassified,
     }

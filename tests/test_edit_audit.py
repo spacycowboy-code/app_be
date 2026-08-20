@@ -10,7 +10,7 @@ from app.models.audit import RpAiSkillAuditRecord
 from app.models.skill import RpAiSkill
 from app.routers import skills as skills_mod
 from app.routers import upload as upload_mod
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.audit_engine import AuditResult, Finding
 from app.services.skill_storage import StoreResult
 
 SKILL_MD = "---\nname: T\ndescription: d\n---\n# T\nbody\n"
@@ -125,15 +125,21 @@ def test_editing_metadata_without_touching_the_content_is_still_audited(
     assert len(seen) == 1
 
 
-def test_a_judge_outage_does_not_take_a_live_skill_off_the_market(client, monkeypatch):
+def test_a_platform_outage_does_not_take_a_live_skill_off_the_market(client, monkeypatch):
     """Failing closed on an edit would punish everyone but the editor: the skill
-    would leave the market because a service was down while someone fixed a typo."""
+    would leave the market because a service was down while someone fixed a typo.
+
+    信号是引擎报的 ``retryable``(再试一次可能就好,因为缺口在平台这边)。它以前读的是
+    ``verdict == "error"``,而**没有任何代码给 verdict 赋值** —— 也就是说这条保护从来没有真的生效过,
+    扫描器坏掉时线上技能照样被打成 pending。
+    """
     calls: list = []
     _stub_store(monkeypatch, calls)
     sid = _create_skill(client, monkeypatch)
     writes_before = len(calls)
     monkeypatch.setattr(skills_mod, "audit_skill",
-                        lambda **kw: AuditResult(state="suspect", verdict="error"))
+                        lambda **kw: AuditResult(state="suspect", coverage="none",
+                                                 cause="scanner_broken", retryable=True))
 
     r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
     assert r.status_code == 503, r.text
@@ -145,11 +151,30 @@ def test_a_judge_outage_does_not_take_a_live_skill_off_the_market(client, monkey
         assert skill.description == "d"                 # edit not applied
 
 
+def test_an_author_side_failure_still_fails_closed(client, monkeypatch):
+    """作者自己能改的失败**不是** 503。
+
+    附件解不开是作者的问题,再试一百次都一样 —— 让他重试是把人挂在一个永远不变的结果上。这种情况照旧
+    fail closed:转人工复核、技能不再是 approved。这条与上面那条一起,才说清了"不可用"和"查不动"的区别。
+    """
+    calls: list = []
+    _stub_store(monkeypatch, calls)
+    sid = _create_skill(client, monkeypatch)
+    monkeypatch.setattr(skills_mod, "audit_skill",
+                        lambda **kw: AuditResult(state="suspect", coverage="none",
+                                                 cause="bundle_unloadable", retryable=False))
+
+    r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
+    assert r.status_code != 503, "作者侧的失败不该让人重试"
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, sid).status == "pending"
+
+
 def test_a_review_branch_is_cut_from_the_remote_live_ref(monkeypatch, tmp_path):
     """Merges happen in GitLab and nothing pulls them back into this clone, so a
     branch cut from the local ref carries "revert everything merged since"."""
     from app.services import skill_storage as mod
-    from app.services.skill_audit.types import AuditResult
+    from app.services.audit_engine import AuditResult
 
     st = mod.SkillStorage()
     monkeypatch.setattr(st, "repo", tmp_path, raising=False)
@@ -213,7 +238,7 @@ def test_the_uploader_label_prefers_the_display_name(monkeypatch):
 
 def test_the_findings_table_carries_the_uploader():
     from app.services.gitlab_mr import _findings_markdown
-    from app.services.skill_audit.types import Finding as F
+    from app.services.audit_engine import Finding as F
 
     body = _findings_markdown("s", [F("judge", "dangerous_instruction", "medium")],
                               "Terry Yin (EYINCNG)")
