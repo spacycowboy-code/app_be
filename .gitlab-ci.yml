@@ -14,5 +14,3 @@ include:
       service: rp-ai-portal-be
       app_module: app.main:app
       apt_packages: "openssh-client"
-      extra_dockerfile: Dockerfile.judge
-      extra_service: skill-audit-judge

@@ -112,7 +112,7 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 | 镜像 | 内容 |
 |---|---|
 | `proj-rvc/rp-ai/rp-ai-portal-be:<sha>` | 后端;对账器用同一个镜像,只换 entrypoint |
-| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器;镜像里装了 kiro-cli,配方是本仓的 `Dockerfile.judge` |
+| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器。**不再由本仓构建** —— 随审计能力一起搬到 `rp-ai-miao/skill-audit`(镜像名与 external 卷名逐字不变,改名会让它挂到空卷、表现为未登录) |
 
 判定器的 kiro-cli 登录态在命名卷里(`*_judge-kiro-home`、`*_judge-kiro-share`),环境描述把它们
 声明为 `external` 并写死卷名。卷名一变判定器就是未登录状态,继而所有上传 fail-closed 转人工复核。
