@@ -107,15 +107,15 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rvc/rp-ai/rp-ai-portal-be:<commit sha>`;
 发布就是在环境描述里把镜像标签改成它。
 
-本仓产出**两个**镜像:
+本仓产出**一个**镜像 `proj-rvc/rp-ai/rp-ai-portal-be:<sha>`(对账器用同一个镜像,只换 entrypoint)。
 
-| 镜像 | 内容 |
-|---|---|
-| `proj-rvc/rp-ai/rp-ai-portal-be:<sha>` | 后端;对账器用同一个镜像,只换 entrypoint |
-| `proj-rvc/rp-ai/skill-audit-judge:<sha>` | 判定器。**不再由本仓构建** —— 随审计能力一起搬到 `rp-ai-miao/skill-audit`(镜像名与 external 卷名逐字不变,改名会让它挂到空卷、表现为未登录) |
+审计能力已经拆到 `rp-ai-miao/skill-audit`,那个仓产出引擎 `skill-audit` 与判定器 `skill-audit-judge`。
+本仓不再装第三方扫描器、也不再构建判定器;审计通过一次 HTTP 调用完成,客户端是
+`app/services/audit_engine.py`。边界见 `.kiro/specs/skill-audit/service-split.md`。
 
 判定器的 kiro-cli 登录态在命名卷里(`*_judge-kiro-home`、`*_judge-kiro-share`),环境描述把它们
-声明为 `external` 并写死卷名。卷名一变判定器就是未登录状态,继而所有上传 fail-closed 转人工复核。
+声明为 `external` 并写死卷名。卷名一变判定器就是未登录状态,继而所有上传 fail-closed 转人工复核 ——
+所以迁仓时镜像名逐字不变。
 
 各环境端口:验收后端 9100、前端 9101;生产后端 9000、前端 9001。
 
