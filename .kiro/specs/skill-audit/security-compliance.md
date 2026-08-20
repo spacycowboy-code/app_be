@@ -146,18 +146,31 @@ skill 不是文档,是 agent 的指令与脚本:SKILL.md 里的自然语言会�
 
 ## 代码在哪
 
+审计能力已经拆到独立仓 **`rp-ai-miao/skill-audit`**(边界与契约见 [service-split.md](service-split.md))。
+所以这张表分两半:
+
+**在新仓 `skill-audit`**
+
 | 文件 | 职责 |
 |---|---|
-| `app/services/skill_audit/scan.py` | 调 `skill-scanner`,原样读报告。没有报告 = 没查,不等于干净 |
-| `app/services/skill_audit/verdict.py` | **裁决规则,唯一一张我们维护的表**。命中 → 上架 / 复核 / 拒收 |
-| `app/services/skill_audit/pipeline.py` | 串起来:准备输入 → 前置检查 → 扫描 → 裁决 → 落记录;含进程内缓存 |
-| `app/services/skill_audit/gate.py` | 写入门与判定复用(`recent_audit`) |
-| `app/services/skill_audit/scanners.py` | 只剩凭据红线的前置正则检查 |
-| `app/services/skill_audit/report.py` | 把命中翻成界面上的中文,未映射的类别回落到扫描器的 `title` |
-| `app/services/skill_audit/reconcile.py` | 从 MR 状态重算 status |
-| `app/services/skill_audit/acp.py` + `app/acp_openai_service.py` | 适配器:HTTP 接口 → `kiro-cli acp` |
+| `skill_audit/scan.py` | 调 `skill-scanner`,原样读报告。没有报告 = 没查,不等于干净 |
+| `skill_audit/verdict.py` | **裁决规则,唯一一张我们维护的表**。命中 → 上架 / 复核 / 拒收;另含"覆盖缺口归谁"的分类 |
+| `skill_audit/pipeline.py` | 串起来:准备输入 → 前置检查 → 扫描 → 裁决;含进程内缓存 |
+| `skill_audit/scanners.py` | 只剩凭据红线的前置正则检查 |
+| `skill_audit/remediation.py` | 扫描器没给处置建议时补默认值(在结论装配处补,不在渲染处) |
+| `skill_audit/skill_repo.py` | 按 commit sha 从 GitLab 读技能仓(重复性维度的语料) |
 | `skill_audit/policy.yaml` | 扫描器的策略(阈值、预算、白名单),改这里而不是改 Python |
-| `.kiro/agents/json-endpoint.json` | 语义层用的 agent 定义:不带任何工具,只回 JSON |
+| `app/main.py` | 引擎的 HTTP 表面:`POST /v1/audits`(事件流)、`GET /v1/vocabulary`、`/health` |
+| `app/judge.py` + `Dockerfile.judge` + `.kiro/agents/json-endpoint.json` | 判定器:HTTP 接口 → `kiro-cli acp`,以及只回 JSON、不带工具的 agent 定义 |
+
+**留在门户**
+
+| 文件 | 职责 |
+|---|---|
+| `app/services/audit_engine.py` | 调引擎的客户端 + DTO 镜像 + 去重键。门户对引擎的**唯一**接触面 |
+| `app/services/audit_report.py` | 把命中翻成界面上的中文,未映射的类别照原样显示 |
+| `app/services/skill_audit/gate.py` | 写入门与判定复用(`recent_audit`) |
+| `app/services/skill_audit/reconcile.py` | 从 MR 状态重算 status |
 
 ## 一次扫描调用
 

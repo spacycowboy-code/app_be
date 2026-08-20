@@ -120,7 +120,10 @@
   服务就断。
 * 项目访问令牌有独立的 bot 身份,归属清楚,轮换不牵连任何人的账号。
 
-审计引擎只读技能仓,另发一个只读的(`read_api` + `read_repository` 足够),不要复用写权限那个。
+审计引擎只读技能仓,另发一个只读的,不要复用写权限那个。**已发**:技能仓
+(`rp-ai/rp-ai-skill`)的项目访问令牌 `skill-audit-engine-read`,scope 只有 `read_api` +
+`read_repository`,权限级别 Reporter,到期 2027-08-19。它配在引擎的环境里(测试环境的
+`SKILL_AUDIT_TEST_ENV`),读仓的代码是新仓的 `skill_audit/skill_repo.py`。
 
 ## 落地顺序
 
