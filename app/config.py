@@ -3,7 +3,6 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -35,6 +34,9 @@ class Settings(BaseSettings):
     skill_repo_remote: str = "origin"
     # --- 审计引擎(独立服务,仓库 rp-ai-miao/skill-audit)------------------------
     # 同一个 overlay 内按服务名访问;不发布端口,鉴权全靠 token。
+    # 扫描器与判定器的那一批配置(模型、超时、策略文件、工作目录…)**不在这里** —— 它们跟着引擎
+    # 走了(仓库 rp-ai-miao/skill-audit,环境变量在 SKILL_AUDIT_*_ENV 里)。这里曾经留着 14 个那样的
+    # 字段,没有任何代码读它们:在门户环境里改 AUDIT_KIRO_MODEL 不会有任何效果,而看起来像是能改。
     audit_engine_url: str = "http://skill-audit:8000"
     # 与引擎的 ENGINE_TOKEN 相同。为空时引擎会拒绝请求(它 token 为空则拒绝启动)。
     audit_engine_token: str = ""
@@ -124,54 +126,6 @@ class Settings(BaseSettings):
     local_admin_password: str = "adminmm"
     local_admin_display: str = "Administrator"
 
-
-    # --- Skill security audit (upload-time gate) ----------------------------
-    # Master switch. When off, uploads skip the audit (state left null).
-    audit_enabled: bool = True
-    # kiro-cli binary for the semantic judge (must be logged in on the host).
-    audit_kiro_bin: str = "kiro-cli"
-    # Judge model; empty => kiro-cli default (auto). Pin before hard-gating.
-    # Pinned, never "auto": a gate has to give the same verdict for the same
-    # input, and "auto" may switch models without notice.
-    audit_kiro_model: str = "claude-sonnet-5"
-    # Second opinion, asked only when the primary judge wants to reject. A
-    # disagreement routes to human review instead of blocking the author.
-    # Note: claude-opus-5 is an experimental preview; switch when it goes GA.
-    # Seconds to wait for the judge; on timeout the audit fails closed.
-    audit_judge_timeout: int = 200
-    # Agent definition the ACP adapter starts kiro with. It must declare no tools
-    # and demand JSON-only output: an interactive agent otherwise answers a JSON
-    # request with a markdown report, which the scanner reads as "analysis failed".
-    audit_acp_agent: str = "json-endpoint"
-    # Remote judge-service URL. Empty => run kiro-cli in-process (host only).
-    # Set this in the (cred-less) backend container to call the host judge service.
-    # Where the scanner reaches the model: our ACP adapter. Empty disables the
-    # semantic and meta layers, which the gate then reports as not checked.
-    audit_llm_base_url: str = "http://audit-judge:8790/v1"
-    # Optional shared secret required by the judge service (X-Judge-Token).
-    audit_judge_token: str = ""
-    # Red-line rules / criteria injected into the judge prompt.
-    # Deterministic secret detection (detect-secrets, in-process, 27 detectors).
-    # Broad matches route to review; the regex layer catches live-format keys
-    # as red-line.
-    audit_detect_secrets_enabled: bool = True
-    # Cisco AI Defense skill-scanner (static analyzers, no key): the judge's
-    # blind spots — bundled scripts / .pyc bytecode / unicode-hidden instructions.
-    audit_cisco_enabled: bool = True
-    audit_cisco_bin: str = "skill-scanner"
-    # Our policy file: a permissive base with the overrides the measurements
-    # required. Ships with the repo so the audit is reproducible.
-    audit_policy_path: str = "skill_audit/policy.yaml"
-    # One scan runs the deterministic analyzers plus two model calls; measured
-    # median 41s and max 85s over 46 real skills. The ceiling is generous on
-    # purpose: a timeout is recorded as "not checked", which costs a review.
-    audit_scan_timeout: int = 900
-    # Behavioral analysis is off by default: measured 29s on a 26-file bundle but
-    # 228s on a 10-file one (a single large file makes the taint analysis diverge),
-    # for one extra finding. Enable it with a budget, not unconditionally.
-    audit_behavioral_enabled: bool = False
-    # Working dir for the judge subprocess (kiro-cli writes a small state db).
-    audit_work_dir: str = "/tmp/skill-audit"
     # EID allowed to see 可疑(suspect) skills while browsing (internal-only).
     audit_admin_eid: str = "ADMINMM"
     # 可疑 -> Draft MR review. Needs a GitLab token with `api` scope.
@@ -195,7 +149,6 @@ class Settings(BaseSettings):
     @property
     def dashboard_eid_list(self) -> list[str]:
         return [e.strip().upper() for e in self.dashboard_eids.split(",") if e.strip()]
-
 
 @lru_cache
 def get_settings() -> Settings:
