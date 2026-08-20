@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     skill_repo_push: bool = True
     # Git remote/branch to push to.
     skill_repo_remote: str = "origin"
+    # --- 审计引擎(独立服务,仓库 rp-ai-miao/skill-audit)------------------------
+    # 同一个 overlay 内按服务名访问;不发布端口,鉴权全靠 token。
+    audit_engine_url: str = "http://skill-audit:8000"
+    # 与引擎的 ENGINE_TOKEN 相同。为空时引擎会拒绝请求(它 token 为空则拒绝启动)。
+    audit_engine_token: str = ""
+    # **单次读**超时,不是总时长。引擎每 15 秒发一个 ping,所以一分钟没有任何字节就说明它挂死了;
+    # 而一次审计本身可以跑到十几分钟(扫描 900 秒 + 判定 200 秒),那不受这个值限制。
+    audit_engine_read_timeout: int = 60
     skill_repo_branch: str = "main"
     # Identity used for skill-repo commits (does not touch global git config).
     git_author_name: str = "RP AI Portal"

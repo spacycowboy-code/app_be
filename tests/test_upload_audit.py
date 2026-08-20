@@ -7,7 +7,7 @@ from app.routers import upload as upload_mod
 from app.database import SessionLocal
 from app.models.skill import RpAiSkill
 from app.models.audit import RpAiSkillAuditRecord
-from app.services.skill_audit.types import AuditResult, Finding
+from app.services.audit_engine import AuditResult, Finding
 from app.services.skill_storage import StoreResult
 
 SKILL_MD = "---\nname: T\ndescription: d\n---\n# T\nbody\n"

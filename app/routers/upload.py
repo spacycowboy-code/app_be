@@ -39,9 +39,9 @@ from app.services.skill_manifest import (
 from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
-from app.services.skill_audit import audit_skill, content_key, AuditResult
+from app.services.audit_engine import AuditResult, audit_skill, content_key
 from app.services.skill_audit import gate
-from app.services.skill_audit.report import build_checks
+from app.services.audit_report import build_checks
 from app.services import gitlab_mr
 from fastapi.concurrency import run_in_threadpool
 
@@ -161,7 +161,7 @@ def _checks_out(audit: AuditResult) -> list[AuditCheck]:
     return [
         AuditCheck(
             id=c.id, label=c.label, status=c.status, description=c.description,
-            severity=c.severity, note=c.note, gating=c.gating,
+            severity=c.severity, note=c.note,
             findings=[_finding_out(f) for f in c.findings],
         )
         for c in build_checks(audit)

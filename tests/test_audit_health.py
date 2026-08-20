@@ -12,8 +12,9 @@ from fastapi.testclient import TestClient
 from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
-from app.services.skill_audit import gate, verdict
-from app.services.skill_audit.types import AuditResult
+from app.services import audit_engine
+from app.services.skill_audit import gate
+from app.services.audit_engine import AuditResult
 from app.services.auth_tokens import create_token
 
 
@@ -47,33 +48,33 @@ def _health(client, days: int | None = None) -> dict:
 
 class TestTheNumbersAreSeparable:
     def test_platform_failures_are_counted_apart_from_real_findings(self, client):
-        _seed("h1", state="suspect", reason="r", coverage=verdict.COVERAGE_NONE,
-              cause=verdict.CAUSE_SCANNER_TIMEOUT)
-        _seed("h2", state="suspect", reason="r", coverage=verdict.COVERAGE_PARTIAL,
-              cause=verdict.CAUSE_LAYER_FAILED)
-        _seed("h3", state="suspect", reason="r", coverage=verdict.COVERAGE_NONE,
-              cause=verdict.CAUSE_BUNDLE_UNLOADABLE)
-        _seed("h4", state="suspect", reason="r", coverage=verdict.COVERAGE_COMPLETE)
-        _seed("h5", state="pass", coverage=verdict.COVERAGE_COMPLETE)
+        _seed("h1", state="suspect", reason="r", coverage=audit_engine.COVERAGE_NONE,
+              cause="scanner_timeout")
+        _seed("h2", state="suspect", reason="r", coverage=audit_engine.COVERAGE_PARTIAL,
+              cause="layer_failed")
+        _seed("h3", state="suspect", reason="r", coverage=audit_engine.COVERAGE_NONE,
+              cause="bundle_unloadable")
+        _seed("h4", state="suspect", reason="r", coverage=audit_engine.COVERAGE_COMPLETE)
+        _seed("h5", state="pass", coverage=audit_engine.COVERAGE_COMPLETE)
 
         body = _health(client)
         assert body["total"] == 5
         assert body["platformFailures"] == 2, body
         assert body["platformFailureRate"] == round(2 / 5, 4)
-        assert body["byCause"][verdict.CAUSE_BUNDLE_UNLOADABLE] == 1
+        assert body["byCause"]["bundle_unloadable"] == 1
         assert body["byState"]["suspect"] == 4
         assert body["byState"]["pass"] == 1
 
     def test_not_examined_counts_only_none_not_partial(self, client):
         """Partial means something was examined; folding the two together would overstate the
         damage and hide the difference the reviewer cares about."""
-        _seed("n1", state="suspect", reason="r", coverage=verdict.COVERAGE_NONE,
-              cause=verdict.CAUSE_BUNDLE_UNLOADABLE)
-        _seed("n2", state="suspect", reason="r", coverage=verdict.COVERAGE_PARTIAL,
-              cause=verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER)
+        _seed("n1", state="suspect", reason="r", coverage=audit_engine.COVERAGE_NONE,
+              cause="bundle_unloadable")
+        _seed("n2", state="suspect", reason="r", coverage=audit_engine.COVERAGE_PARTIAL,
+              cause="bundle_unreadable_member")
         body = _health(client)
         assert body["notExamined"] == 1
-        assert body["byCoverage"][verdict.COVERAGE_PARTIAL] == 1
+        assert body["byCoverage"][audit_engine.COVERAGE_PARTIAL] == 1
 
     def test_records_from_before_the_columns_existed_are_counted_separately(self, client):
         """Folding them into a bucket would invent data. A growing number here means the
@@ -102,11 +103,11 @@ class TestTheEndpointItself:
     def test_every_cause_the_verdict_can_produce_is_reportable(self, client):
         """Guards the seam: a cause with no owner would silently drop out of the rate."""
         for i, cause in enumerate(sorted({
-                verdict.CAUSE_BUNDLE_UNLOADABLE, verdict.CAUSE_BUNDLE_UNREADABLE_MEMBER,
-                verdict.CAUSE_BUNDLE_TOO_BIG, verdict.CAUSE_SCANNER_TIMEOUT,
-                verdict.CAUSE_SCANNER_BROKEN, verdict.CAUSE_LAYER_FAILED})):
+                "bundle_unloadable", "bundle_unreadable_member",
+                "bundle_too_big", "scanner_timeout",
+                "scanner_broken", "layer_failed"})):
             _seed(f"all-{i}", state="suspect", reason="r",
-                  coverage=verdict.COVERAGE_PARTIAL, cause=cause)
+                  coverage=audit_engine.COVERAGE_PARTIAL, cause=cause)
         body = _health(client)
         assert len(body["byCause"]) == 6, body["byCause"]
         assert body["platformFailures"] == 3, "timeout, broken, layer_failed"

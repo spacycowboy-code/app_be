@@ -1,27 +1,23 @@
-"""Roll the audit result up into the report the upload wizard renders.
+"""把结论渲染成上传向导要看的报告。
 
-The checks are named in the reader's language, but the categories underneath are the
-scanner's. That split matters: the label is presentation, and a presentation table that
-silently drops an unknown category would recreate the renaming problem in the UI. So an
-unmapped category is shown with the scanner's own wording instead of being folded into
-"other".
+引擎给的是事实和分类:每条发现属于哪个类别、多严重,以及哪几层没跑完。**叫什么名字、按什么顺序读、
+"没跑完"那句话怎么说,是门户的事** —— 引擎里放中文标签的话,任何别的调用方都会继承门户的话术,而门户
+改一个错别字要发引擎版本。整条边界见 `.kiro/specs/skill-audit/service-split.md`。
 
-Rules kept deliberately simple:
-  * a check's ``status`` is a roll-up of its findings, never an average;
-  * ``severity`` is the highest severity among that check's findings;
-  * a layer that could not run is reported as such, so "we could not tell" is never
-    rendered as "clean".
+两处刻意的选择:
+
+* **未知类别照原样显示**,不折叠进"其它"。扫描器升版会带来新类别,而新类别正是最不该消失的东西。
+* **"未能核实"那一行的状态是 `degraded`**,不是引擎内部用的 `incomplete`。前端判的就是 `degraded`
+  (两处:严重度色块给 indeterminate、标签给 "Not verified");发 `incomplete` 过去会落到 else 分支,
+  于是"这一层没跑完、结果未知"被渲染成一条发现加一个严重度色块。措辞归门户,就是指这种事由门户负责对上。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.services.skill_audit.scan import INCOMPLETE_RULES
-from app.services.skill_audit.types import AuditResult, Finding
-from app.services.skill_audit.verdict import HYGIENE_RULES
+from app.services.audit_engine import AuditResult, Finding
 
-# The scanner's category -> what to call it to an author, and what it looks for. Order is
-# the display order. Categories the scanner adds later fall through to their own title.
+# 扫描器的类别 -> 对作者怎么称呼它、它在找什么。顺序就是展示顺序。
 LABELS: dict[str, tuple[str, str]] = {
     "hardcoded_secrets": ("敏感信息", "写进文件里的真实密钥、令牌或口令。"),
     "prompt_injection": ("提示注入", "让助手忽略既有规则的文字。"),
@@ -50,15 +46,6 @@ LABELS: dict[str, tuple[str, str]] = {
     "policy_violation": ("规范与可读性", "打包规范问题,以及系统读不了的文件。"),
 }
 
-# What to change when the scanner does not say. Its own remediation always wins.
-_REMEDIATION = {
-    "hardcoded_secrets": "把凭据从文件里去掉并轮换,运行时从配置或环境变量读取。",
-    "prompt_injection": "删掉推翻助手既有规则的那段文字。",
-    "obfuscation": "删掉不可见字符与形似字母,用普通字符书写。",
-    "unicode_steganography": "删掉零宽字符与双向控制符。",
-    "policy_violation": "按提示补齐打包信息;读不了的可执行文件请改为平铺的源码。",
-}
-
 _UNKNOWN_HINT = "扫描器报出的类别,我们没有对应的中文说明,按它自己的描述阅读。"
 _INCOMPLETE_NOTE = "这一层没有跑完,所以结果未知——该技能转人工复核,而不是直接通过。"
 _SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
@@ -66,18 +53,28 @@ _SEV_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
 @dataclass
 class Check:
+    """报告里的一行。
+
+    没有 `gating` 字段:它曾经存在,但门户只是原样转发,前端类型里没有声明、代码里零引用。等真的有人
+    渲染"这一行只是提示、不影响结论"的时候再加,那时它有读者。
+    """
+
     id: str
     label: str
-    status: str                      # clear | hit | incomplete
+    status: str                      # hit | degraded
     description: str = ""
     severity: str | None = None
     note: str | None = None
-    gating: bool = True              # False = 只作上下文,不影响结论
     findings: list[Finding] = field(default_factory=list)
 
 
 def build_checks(audit: AuditResult) -> list[Check]:
-    """Group findings by the scanner's category, in the reader's language."""
+    """按类别归并,并按展示顺序排好。
+
+    归并放在门户而不是引擎:放在引擎意味着响应里要再带一份 findings 的拷贝,而那两份拷贝**曾经真的
+    不一致**(归并顺手补了处置建议,顶层那份已经序列化过了)。归并要用的东西门户本来就有 —— 每条发现
+    带 `category`,结论带 `incomplete`。
+    """
     by_cat: dict[str, list[Finding]] = {}
     for f in audit.findings:
         by_cat.setdefault(f.category, []).append(f)
@@ -87,30 +84,20 @@ def build_checks(audit: AuditResult) -> list[Check]:
 
     def add(cid: str, found: list[Finding]) -> None:
         label, description = LABELS.get(cid, (cid.replace("_", " "), _UNKNOWN_HINT))
-        for f in found:
-            if not f.remediation:
-                f.remediation = _REMEDIATION.get(f.category)
-        # Hygiene findings are facts about packaging: shown, never gating.
-        gating = not all(f.rule_id in HYGIENE_RULES for f in found)
         worst = max(found, key=lambda f: _SEV_ORDER.get(f.severity, 0))
-        checks.append(Check(cid, label, "hit", description, severity=worst.severity,
-                            gating=gating, findings=found))
+        checks.append(Check(cid, label, "hit", description,
+                            severity=worst.severity, findings=found))
         seen.add(cid)
 
     for cid in LABELS:
         if by_cat.get(cid) and cid not in seen:
             add(cid, by_cat[cid])
-    for cid, found in by_cat.items():          # categories we have no label for
+    for cid, found in by_cat.items():          # 我们没有中文说明的类别
         if cid not in seen:
             add(cid, found)
 
     if audit.incomplete:
-        checks.append(Check("incomplete", "未能核实的检查", "incomplete",
+        checks.append(Check("incomplete", "未能核实的检查", "degraded",
                             "某一层没有跑完,结论按未核实处理。",
                             note=f"{_INCOMPLETE_NOTE}({', '.join(audit.incomplete)})"))
     return checks
-
-
-def incomplete_findings(audit: AuditResult) -> list[Finding]:
-    """The findings by which the scanner reported its own failure."""
-    return [f for f in audit.findings if f.rule_id in INCOMPLETE_RULES]

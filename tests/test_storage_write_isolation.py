@@ -11,7 +11,7 @@
 
 import pytest
 
-from app.services.skill_audit.types import AuditResult
+from app.services.audit_engine import AuditResult
 from app.services.skill_storage import SkillStorage
 
 

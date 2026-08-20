@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
-from app.services.skill_audit.types import AuditResult
+from app.services.audit_engine import AuditResult
 
 settings = get_settings()
 

@@ -58,3 +58,25 @@ def _fresh_db():
 @pytest.fixture
 def client():
     return TestClient(app)
+
+@pytest.fixture(autouse=True)
+def _audit_vocabulary(monkeypatch):
+    """把引擎的分类表预置进缓存,别让测试去连网络。
+
+    归属(谁能补上这个覆盖缺口)现在来自引擎的 GET /v1/vocabulary,门户不留副本。测试里没有引擎,
+    所以这里直接把缓存填好 —— 值与引擎 skill_audit/verdict.py 里那张表一致。要验"取不到分类表"时的
+    行为,单条测试把 _vocab 设成 None 即可(见 test_audit_engine_client.py)。
+    """
+    from app.services import audit_engine
+    monkeypatch.setattr(audit_engine, "_vocab", {
+        "apiVersion": audit_engine.API_VERSION,
+        "causeOwners": {
+            "bundle_unloadable": "author",
+            "bundle_unreadable_member": "author",
+            "bundle_too_big": "shared",
+            "scanner_timeout": "platform",
+            "scanner_broken": "platform",
+            "layer_failed": "platform",
+        },
+    })
+    monkeypatch.setattr(audit_engine, "_vocab_at", float("inf"))

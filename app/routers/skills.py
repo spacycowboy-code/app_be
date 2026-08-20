@@ -39,7 +39,8 @@ from app.services.skill_manifest import (
 from app.services.archives import common_top_dir
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
-from app.services.skill_audit import audit_skill, AuditResult, gate
+from app.services.audit_engine import AuditResult, audit_skill
+from app.services.skill_audit import gate
 from fastapi.concurrency import run_in_threadpool
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
