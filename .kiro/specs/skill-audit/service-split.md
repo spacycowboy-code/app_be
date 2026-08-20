@@ -18,8 +18,8 @@ HTTP 服务。`gate.py` 与 `reconcile.py` **留在门户**。
 
 ## 为什么是服务,不是库
 
-- 第三方扫描器 `cisco-ai-skill-scanner==2.0.12` 现在装在**门户主镜像**里(CI input `extra_pip`)。
-  扫描器升一个版本要重建并重新部署门户。
+- 第三方扫描器 `cisco-ai-skill-scanner==2.0.12` 原来装在**门户主镜像**里(CI input `extra_pip`),
+  升一个版本要重建并重新部署门户。现在它只在引擎镜像里。
 - 判定器早就是独立服务,链路今天已经是 门户 → HTTP → 判定器。再加一跳是同一个形状,不是新概念。
 - 扫描是重负载(`audit_scan_timeout` 默认 900 秒),今天和请求服务共进程共内存,一次跑飞的扫描会拖
   住后端 API。
@@ -193,12 +193,16 @@ GET  /health           → 只证明进程活着
 
 | 服务 | 配置 |
 |---|---|
-| 引擎(无状态) | `replicas: 2` + **`placement.max_replicas_per_node: 1`** + `update_config: start-first` + `failure_action: rollback` + `/health` + **不挂卷**(挂了就把副本钉死在一台机器,写 stdout) |
+| 引擎(无状态) | `replicas: 2` + **`placement.max_replicas_per_node: 1`** + **`update_config: stop-first, parallelism: 1`** + `failure_action: rollback` + `/health` + **不挂卷**(挂了就把副本钉死在一台机器,写 stdout) |
 | 判定器 | `update_config: stop-first` + 钉机器**不变**(kiro 登录卷在那台盘上,两副本同写会坏) |
 
 `max_replicas_per_node` 不是 `preferences`:实测滚动更新之后两个副本都落在了 manager 一台上,
 `preferences` 只是偏好。那一台一挂引擎就全没了,两副本是句空话。代价是一台下线时第二个副本会一直
 pending 调度不上去 —— 这是想要的,剩下那个照常服务。
+
+**而它必须配 `stop-first`。** 两台、两副本、每台最多一个,`start-first` 要先起新任务却没有地方放:实测第二个
+副本卡在 `Pending "no suitable node (max replica…)"`,更新永远完不了(服务本身还是 2/2,旧任务继续服务,
+所以不会报警,只是永远收敛不了)。`stop-first` + `parallelism: 1` 的代价是更新期间有一小段只有单副本。
 
 超时是两个数,别混:
 
@@ -225,17 +229,24 @@ SSE 要带 `X-Accel-Buffering: no`(两层反代之间需要它,否则事件被�
 
 1. **起引擎服务,门户不切过去。**(已完成)测试环境 2 副本,`/health` 200、鉴权 401、真实审计 21 秒
    `pass`/`complete`、五个分析器全部用到(判定器连通)。回退=删服务,门户零改动。
-2. **门户改成调用引擎,同一次改动里把扫描器从门户镜像去掉。** 不做开关:开关意味着两条代码路径都要
+2. **门户改成调用引擎,同一次改动里把扫描器从门户镜像去掉。**(已完成) 不做开关:开关意味着两条代码路径都要
    维护和验证,而门户仓有 git 历史,回退就是回滚这次改动并重放上一个 tag。
    切之前四条路径在测试环境真跑一遍:`pass`、`suspect`(有复核分支 + MR)、`danger`(拒绝写入)、
    **重发布时引擎不可达 → 503 retry 而不是降级**。另外验:门户镜像里 `skill-scanner` 确实没了;同一
    内容第二次上传走复用且字段不丢。
-3. **判定器迁仓单独做**,而且**门户仓移除构建与新仓接手必须同一步** —— 否则 `skill-audit-judge` 镜像
-   断产,任何引用新 tag 的部署都会失败。**镜像名与 external 卷名逐字不变**
-   (`ai-portal-be_judge-kiro-home` / `..._share`,测试环境 `ai-portal-audit-staging_*`)。改了名字就会
-   挂到空卷 → 判定器"未登录" → 全部上传转人工复核。切前先记基线:卷内容、技能条数、审计记录数。
-4. **生产**:`deploy/prod/compose.yml` 加引擎服务、`services.txt` 加一行、`env-files.txt` 加一行 +
+3. **判定器迁仓。**(已完成)顺序是**新仓先产、验过、门户再停**,不是"两仓同一步":两边同时产同名镜像
+   是无害的(不同 tag,谁部署谁生效),真正会断产的只有"门户先停而新仓没接上"这一个方向。
+   **镜像名与 external 卷名逐字不变**(`ai-portal-be_judge-kiro-home` / `..._share`,测试环境
+   `ai-portal-audit-staging_*`)。改了名字就会挂到空卷 → 判定器"未登录" → 全部上传转人工复核。
+   切前记基线、切后逐项对:测试环境实测 `auth_kv` 里 `device-registration` 的哈希**一字不差**,
+   `token` 那行字节数变了(kiro 就地刷新,说明登录活着且卷可写),真审计里 `llm_analyzer` 与
+   `meta_analyzer` 都跑到。
+
+   预演还查出一个耦合:门户仓带着 `extra_service: skill-audit-judge` 时,**部署门户会连判定器一起换 tag
+   并重启**。删掉那两行之后不再有这个耦合 —— 生产迁移时这一点要紧,否则一次门户发布会顺带重启判定器。
+
+4. **生产**(未做):`deploy/prod/compose.yml` 加引擎服务、`services.txt` 加一行、`env-files.txt` 加一行 +
    新建 `SKILL_AUDIT_PROD_ENV`(含非空 `ENGINE_TOKEN`,缺了部署任务直接 exit 1)。
-5. **版本集合**:切换前先 `capture-release` 存一组已知可用的。`SKILL_AUDIT_TAG` 会被自动采集(采集范围
+5. **版本集合**:测试环境这一组已存为 `deploy/test/releases/after-audit-split.env`。`SKILL_AUDIT_TAG` 会被自动采集(采集范围
    是描述文件里所有 `${*_TAG}`)。回滚到引擎出现之前的版本集合**不会坏**:`swarm-apply.sh` 对缺席的
    变量保留旧值、从不清空。
