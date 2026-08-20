@@ -30,6 +30,11 @@ class RpAiSkillDownload(Base):
     # EID of the user who downloaded, when known (the download endpoint is
     # otherwise anonymous). Indexed for per-user download leaderboards.
     eid: Mapped[str | None] = mapped_column(String(64), index=True)
+    # The downloader's department as it was at the time, so a weekly report can
+    # break downloads down by group without letting a later reorganisation
+    # rewrite past weeks. Nullable: rows written before this column existed
+    # (and anonymous downloads) have none.
+    department: Mapped[str | None] = mapped_column(String(64))
     # Written by the DB in its local time zone (naive), matching every other
     # table's ``created_at``; indexed for time-range dashboard queries.
     created_at: Mapped[datetime] = mapped_column(
