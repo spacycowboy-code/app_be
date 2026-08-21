@@ -26,29 +26,20 @@ without anything looking broken.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import db_utc_offset, get_db
+from app.database import get_db
 from app.models.login_event import RpAiLoginEvent
 from app.models.user import RpAiPortal
 from app.schemas.login_stats import ActiveUser, ActiveWindow, LoginStats
+from app.services import reporting_windows
 
 router = APIRouter(prefix="/api/login-stats", tags=["login-stats"])
-
-
-def _week_start(day_start: datetime) -> datetime:
-    """Monday 00:00 of the week containing ``day_start``.
-
-    ``weekday()`` is 0 on Monday, so subtracting it lands on Monday and leaves a
-    Monday untouched — the week is Monday–Sunday, matching how the team reports.
-    """
-    return day_start - timedelta(days=day_start.weekday())
 
 
 def _require_dashboard_access(request: Request) -> str:
@@ -69,31 +60,14 @@ def _require_dashboard_access(request: Request) -> str:
     return eid
 
 
-def _reporting_tz() -> ZoneInfo | timezone:
-    """The zone whose midnight starts a day. Falls back to the DB's own zone.
-
-    A missing tz database would otherwise turn a statistics page into a 500;
-    the DB offset is always available and is a defensible approximation.
-    """
-    name = get_settings().stats_timezone
-    try:
-        return ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        return timezone(db_utc_offset())
-
-
-def _to_db_naive(moment: datetime) -> datetime:
-    """Express an aware moment the way ``created_at`` stores it.
-
-    The column holds naive local time on the DB server, so an aware value has to
-    be moved into that zone and stripped before it can be compared.
-    """
-    return moment.astimezone(timezone(db_utc_offset())).replace(tzinfo=None)
-
-
-def _db_now() -> datetime:
-    """Now, on the DB server's clock, naive — comparable with stored timestamps."""
-    return datetime.now(timezone(db_utc_offset())).replace(tzinfo=None)
+# The window arithmetic lives in services.reporting_windows so that this page
+# and the weekly usage report cannot drift into two different definitions of
+# "this week". Re-exported under the original private names because that is how
+# the tests (and any future caller) already reach them.
+_reporting_tz = reporting_windows.reporting_tz
+_to_db_naive = reporting_windows.to_db_naive
+_db_now = reporting_windows.db_now
+_week_start = reporting_windows.week_start
 
 
 def _window(

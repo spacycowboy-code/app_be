@@ -22,6 +22,7 @@ from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.models.login_event import RpAiLoginEvent
+from app.models.usage_event import RpAiUsageEvent
 
 __all__ = [
     "RpAiPortal",
@@ -42,4 +43,5 @@ __all__ = [
     "RpAiSkillAuditRecord",
     "RpAiSkillFinding",
     "RpAiLoginEvent",
+    "RpAiUsageEvent",
 ]

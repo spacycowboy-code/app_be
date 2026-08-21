@@ -44,6 +44,7 @@ from app.services.skill_audit import gate
 from fastapi.concurrency import run_in_threadpool
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
+from app.services.usage import department_of
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
@@ -264,7 +265,13 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
         # counter alone rather than guess at its numeric value.
         next_count = None
     try:
-        db.add(RpAiSkillDownload(skill_id=skill.id, eid=downloader))
+        db.add(
+            RpAiSkillDownload(
+                skill_id=skill.id,
+                eid=downloader,
+                department=department_of(db, downloader),
+            )
+        )
         if next_count is not None:
             db.execute(
                 update(RpAiSkill)

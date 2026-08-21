@@ -15,6 +15,7 @@ from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResul
 from app.services.archives import rewrap_single_top_dir
 from app.services.auth_tokens import create_scoped_token
 from app.services.eids import normalize_eid
+from app.services.usage import department_of
 from app.services.gitlab_sync import (
     GitLabError,
     GitLabProject,
@@ -144,8 +145,13 @@ def record_download(
     # the query param only when auth is off in dev. The middleware's whole point
     # is that handlers stop trusting a client-supplied eid.
     caller_eid = getattr(request.state, "eid", None) or eid
+    downloader = normalize_eid(caller_eid) or None
     db.add(
-        RpAiMarketDownload(item_id=item_id, eid=normalize_eid(caller_eid) or None)
+        RpAiMarketDownload(
+            item_id=item_id,
+            eid=downloader,
+            department=department_of(db, downloader),
+        )
     )
     db.commit()
 

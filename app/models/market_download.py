@@ -28,6 +28,9 @@ class RpAiMarketDownload(Base):
     )
     # EID of the downloader when known; indexed for per-user / dedup counts.
     eid: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Department as it was at the time — see RpAiSkillDownload for why this is a
+    # snapshot rather than a join.
+    department: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), nullable=False, index=True
     )

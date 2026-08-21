@@ -23,6 +23,7 @@ from app.routers import (
     skill_import,
     skills,
     upload,
+    usage,
     users,
 )
 
@@ -140,6 +141,7 @@ app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
 app.include_router(market.router)
+app.include_router(usage.router)
 
 
 @app.get("/health", tags=["health"])
