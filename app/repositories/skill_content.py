@@ -172,6 +172,38 @@ def _strip_wrapper(names: list[str], prefix: str) -> dict[str, str]:
     return out
 
 
+def head_ref(branch: str | None = None) -> str:
+    """默认分支当前的引用。
+
+    导入与对账要从"现在最新的那一版"开始,而这个问题过去是靠 fetch + merge 把一棵共享工作副本
+    拉到最新来回答的 —— 那次 merge 会移动整棵树的 HEAD,把并发写请求脚下的分支抽走。
+
+    与 `gitlab_sync.fetch_head_commit_sha` 的区别:那个服务任意市场项目、返回 12 位短 sha、
+    失败给 None(它只是省一次重装)。这里要的是能当读引用用的完整标识,取不到必须报错。
+    """
+    ref = branch or get_settings().skill_repo_branch
+    raw = _fetch(f"branches/{urllib.parse.quote(ref, safe='')}")
+    sha = (json.loads(raw.decode("utf-8")).get("commit") or {}).get("id")
+    if not sha:
+        raise ContentUnavailable(f"取不到 {ref} 的当前引用")
+    return str(sha)
+
+
+def version_of(prefix: str, at: str) -> str | None:
+    """这个子树在 `at` 这一版里的**内容身份**。
+
+    调用方要的不是"某个提交",是"只在这个技能自己变了的时候才变的标识" —— 用整仓 HEAD 当这个标识,
+    会让任何一次无关提交都把每个技能标记成有更新。今天 git 用"最后碰过这个路径的提交"来回答;
+    换成产物存储,答案是那个包的 digest。所以这个函数返回的是不透明标识,调用方不该解析它。
+
+    取不到返回 None,由调用方决定退到什么。
+    """
+    raw = _fetch(f"commits?path={urllib.parse.quote(prefix, safe='')}"
+                 f"&ref_name={urllib.parse.quote(at, safe='')}&per_page=1")
+    commits = json.loads(raw.decode("utf-8"))
+    return str(commits[0]["id"]) if commits else None
+
+
 def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
     """取某一版里某个目录下的全部文件:{相对路径: 字节}。
 

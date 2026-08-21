@@ -16,10 +16,8 @@ assertions hold even where the clock has one-second granularity (sqlite's
 ``CURRENT_TIMESTAMP``): a stray ``onupdate`` jumps a whole hour, not a few ms.
 """
 import json
-import subprocess
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
@@ -214,67 +212,71 @@ def test_second_review_averages_and_still_leaves_the_timestamp(client):
 
 
 # --- official-skill sync --------------------------------------------------
+#
+# 原来这三条测试搭一个真的本地 git 仓来验。导入改成按引用读之后,它们盯的东西没变,只是换成对着
+# 内容仓储的契约验:head 是"当前那一版"的引用,而**每个技能自己的身份只在它自己变了的时候才变**。
+# 这个区分是这几条测试的全部意义 —— 用整仓 head 当每个技能的身份,任何无关提交都会把所有官方技能
+# 标记成有更新(``updated_at`` 被 onupdate 推走),它们就全都出现在首页的 What's New 上。
 
 
-def _git(repo: Path, *args: str) -> None:
-    subprocess.run(
-        [
-            "git", "-C", str(repo),
-            "-c", "user.name=Test", "-c", "user.email=test@example.com",
-            "-c", f"safe.directory={repo}",
-            *args,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+class _FakeStore:
+    """按契约行事的假内容存储。
 
+    ``commit(*folders)`` 模拟一次提交:head 换一个新引用,而只有被这次提交碰到的那些技能,
+    自己的身份才跟着换。
+    """
 
-def _write_official_skill(repo: Path, skill_id: str, version: str) -> Path:
-    folder = repo / "official" / "anthropics" / skill_id
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "manifest.json").write_text(
-        json.dumps({"id": skill_id, "name": skill_id, "version": version}),
-        encoding="utf-8",
-    )
-    (folder / "SKILL.md").write_text(f"# {skill_id}\n", encoding="utf-8")
-    return folder
+    def __init__(self) -> None:
+        self._n = 0
+        self.head = "head-0"
+        self.versions = {
+            "official/anthropics/alpha": "alpha-0",
+            "official/anthropics/beta": "beta-0",
+        }
+        self.tree = {}
+        for sid, version in (("alpha", "1.0.0"), ("beta", "2.0.0")):
+            self._write(sid, version)
+
+    def _write(self, skill_id: str, version: str) -> None:
+        folder = f"anthropics/{skill_id}"
+        self.tree[f"{folder}/manifest.json"] = json.dumps(
+            {"id": skill_id, "name": skill_id, "version": version}
+        ).encode()
+        self.tree[f"{folder}/SKILL.md"] = f"# {skill_id}\n".encode()
+
+    def commit(self, *folders: str) -> None:
+        self._n += 1
+        self.head = f"head-{self._n}"
+        for folder in folders:
+            self.versions[folder] = f"{folder.rsplit('/', 1)[-1]}-{self._n}"
+
+    def edit(self, skill_id: str, version: str) -> None:
+        self._write(skill_id, version)
+        self.commit(f"official/anthropics/{skill_id}")
 
 
 @pytest.fixture
-def official_repo(tmp_path, monkeypatch):
-    """A throwaway skill repo with two official skills, each its own commit."""
-    from app.services import official_import
-    from app.services.skill_storage import skill_storage
+def store(monkeypatch):
+    from app.repositories import skill_content
 
-    repo = tmp_path / "skill-repo"
-    repo.mkdir()
-    _git(repo, "init", "--initial-branch=main")
-
-    _write_official_skill(repo, "alpha", "1.0.0")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "add alpha")
-
-    _write_official_skill(repo, "beta", "2.0.0")
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-m", "add beta")
-
-    monkeypatch.setattr(skill_storage, "repo", repo)
-    monkeypatch.setattr(official_import.settings, "skill_repo_path", str(repo))
-    return repo
+    fake = _FakeStore()
+    monkeypatch.setattr(skill_content, "head_ref", lambda branch=None: fake.head)
+    monkeypatch.setattr(skill_content, "read_tree", lambda ref, prefix: dict(fake.tree))
+    monkeypatch.setattr(
+        skill_content, "version_of", lambda prefix, at: fake.versions.get(prefix)
+    )
+    return fake
 
 
-def _import(repo: Path) -> dict:
+def _import() -> dict:
     from app.services.official_import import import_official_skills
 
     with SessionLocal() as db:
-        # refresh=False: no fetch/ff against a remote this repo does not have.
-        summary = import_official_skills(db, refresh=False)
-    return summary
+        return import_official_skills(db)
 
 
-def test_official_import_records_the_commit_that_touched_each_skill(official_repo):
-    _import(official_repo)
+def test_official_import_records_the_commit_that_touched_each_skill(store):
+    _import()
 
     alpha, beta = _row("alpha"), _row("beta")
     assert alpha["repo_commit"] and beta["repo_commit"]
@@ -284,20 +286,18 @@ def test_official_import_records_the_commit_that_touched_each_skill(official_rep
     )
 
 
-def test_an_unrelated_commit_does_not_mark_official_skills_as_updated(official_repo):
+def test_an_unrelated_commit_does_not_mark_official_skills_as_updated(store):
     """The bug: any commit to the skill repo — including the backend's own
     upload commits for unrelated user skills — moved every official skill's
     repo_commit, so all of them surfaced as "Update" cards."""
-    _import(official_repo)
+    _import()
     before = {sid: _row(sid) for sid in ("alpha", "beta")}
 
-    # Something lands in the repo that has nothing to do with either skill.
-    (official_repo / "unrelated.txt").write_text("user upload\n", encoding="utf-8")
-    _git(official_repo, "add", "-A")
-    _git(official_repo, "commit", "-m", "an unrelated user-skill upload")
+    # 仓库里落了一次和这两个技能都无关的提交:head 动了,它们各自的身份没动。
+    store.commit()
 
     _tick()
-    _import(official_repo)
+    _import()
 
     for sid in ("alpha", "beta"):
         after = _row(sid)
@@ -311,18 +311,16 @@ def test_an_unrelated_commit_does_not_mark_official_skills_as_updated(official_r
         assert after["version"] == before[sid]["version"]
 
 
-def test_editing_a_skill_does_move_its_own_commit_and_timestamp(official_repo):
+def test_editing_a_skill_does_move_its_own_commit_and_timestamp(store):
     """The flip side: a real change to the skill's own files must still register,
     otherwise the fix would hide genuine updates."""
-    _import(official_repo)
+    _import()
     before = _row("alpha")
 
-    _write_official_skill(official_repo, "alpha", "1.1.0")
-    _git(official_repo, "add", "-A")
-    _git(official_repo, "commit", "-m", "bump alpha to 1.1.0")
+    store.edit("alpha", "1.1.0")
 
     _tick()
-    _import(official_repo)
+    _import()
 
     after = _row("alpha")
     assert after["repo_commit"] != before["repo_commit"], "alpha's own commit moved"
