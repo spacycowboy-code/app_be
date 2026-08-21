@@ -34,6 +34,19 @@ REVIEWER_EID = "EZHGMIO"
 BACKDATE = timedelta(hours=1)
 
 
+@pytest.fixture
+def content_in_repo(monkeypatch):
+    """下载的字节来自技能那一行记着的引用,不再来自 ``instructions``。
+
+    这些测试关心的是下载计数与时间戳,不是内容,所以仓库那一版用最小的一份就够。
+    """
+    from app.repositories import skill_content
+
+    monkeypatch.setattr(
+        skill_content, "read_tree", lambda ref, prefix: {"SKILL.md": b"# Probe\n"}
+    )
+
+
 def _seed(downloads: str = "0", *, skill_id: str = SKILL_ID) -> datetime:
     """Create the skill with timestamps an hour old; return that timestamp.
 
@@ -53,6 +66,8 @@ def _seed(downloads: str = "0", *, skill_id: str = SKILL_ID) -> datetime:
                 version="1.0.0",
                 rating=0.0,
                 review_count=0,
+                storage_path="team/download-timestamp-probe_EXXX_Probe",
+                repo_commit="e" * 40,
                 instructions="# Probe\n\nA skill body so the download has content.\n",
                 created_at=stamp,
                 updated_at=stamp,
@@ -108,7 +123,7 @@ def _download_events() -> list[str | None]:
 # --- downloading ----------------------------------------------------------
 
 
-def test_download_increments_counter_without_touching_updated_at(client):
+def test_download_increments_counter_without_touching_updated_at(client, content_in_repo):
     seeded = _seed("7")
 
     resp = client.get(f"/api/skills/{SKILL_ID}/download", params={"eid": "EZHGMIO"})
@@ -126,7 +141,7 @@ def test_download_increments_counter_without_touching_updated_at(client):
     assert _download_events() == ["EZHGMIO"]
 
 
-def test_anonymous_download_is_logged_without_eid(client):
+def test_anonymous_download_is_logged_without_eid(client, content_in_repo):
     seeded = _seed("0")
 
     assert client.get(f"/api/skills/{SKILL_ID}/download").status_code == 200
@@ -138,7 +153,7 @@ def test_anonymous_download_is_logged_without_eid(client):
 
 
 @pytest.mark.parametrize("formatted", ["5.6K", "1.2M"])
-def test_non_numeric_counter_keeps_event_row_and_timestamp(client, formatted):
+def test_non_numeric_counter_keeps_event_row_and_timestamp(client, formatted, content_in_repo):
     """A display-formatted counter can't be incremented; the event row and the
     timestamp must both survive that."""
     seeded = _seed(formatted)
