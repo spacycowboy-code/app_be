@@ -13,6 +13,7 @@ GitLab 是这个内容存储今天的实现。厂商概念(project、`PRIVATE-TO
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -39,6 +40,10 @@ _MAX_TREE_PAGES = 100
 
 class ContentUnavailable(RuntimeError):
     """引用或路径取不到内容。让调用方明确失败,而不是悄悄换一份内容。"""
+
+
+class Conflict(RuntimeError):
+    """有人在你读到之后改了同一个技能的文件。**不要重试** —— 重试等于拿自己这份盖掉对方。"""
 
 
 @dataclass
@@ -202,6 +207,77 @@ def version_of(prefix: str, at: str) -> str | None:
                  f"&ref_name={urllib.parse.quote(at, safe='')}&per_page=1")
     commits = json.loads(raw.decode("utf-8"))
     return str(commits[0]["id"]) if commits else None
+
+
+def _post(path: str, payload: dict) -> dict:
+    """向内容存储写一次。测试把这个函数换掉,不需要网络。"""
+    settings = get_settings()
+    project = urllib.parse.quote(str(settings.audit_mr_project), safe="")
+    url = (f"{settings.gitlab_url.rstrip('/')}/api/v4/projects/{project}/repository/"
+           f"{path.lstrip('/')}")
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"PRIVATE-TOKEN": settings.gitlab_token,
+                 "Content-Type": "application/json"})
+    try:
+        with _opener().open(req, timeout=_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")
+        if exc.code == 400 and "has changed since" in body:
+            raise Conflict(body) from exc
+        raise ContentUnavailable(f"{exc.code} {body[:200]}") from exc
+    except Exception as exc:
+        raise ContentUnavailable(f"{type(exc).__name__} {path}") from exc
+
+
+def publish(*, prefix: str, files: dict[str, bytes], expect: str | None,
+            branch: str, message: str, start_branch: str | None = None) -> str:
+    """把 `prefix` 这个目录的内容整体换成 `files`,返回新的引用。
+
+    * `files` 是**这个目录应有的全部内容**(键是相对 `prefix` 的路径)。没出现的文件会被删掉 ——
+      声明目标状态而不是描述增量,所以同样的输入重复执行结果一样。
+    * `expect` 是调用方读到这份内容时的引用。**每个已存在的文件都带上它做前置条件**:实测
+      `last_commit_id` 问的是"这个文件在这个提交之后被改过吗",按文件比而不是按分支比 ——
+      无关提交把分支头推走不会造成冲突。不带这个参数是静默覆盖。
+    * `expect=None` 表示这是新目录。
+    * **内容没变就不提交**,返回原引用。接口本身不幂等(相同内容也会产生空提交),这道闸在这里。
+    * 冲突抛 `Conflict`,**不重试**:按文件比的前置条件失败只可能是同一个技能被并发改了,
+      重试等于拿自己这份盖掉对方。
+
+    原子性:今天一次 Commits 调用把这个技能这一版的全部动作放在一起,git 保证要么全成要么全不成。
+    抽象不依赖这一项 —— 对象存储没有跨对象事务,那里的实现是先写内容对象再带前置条件切 manifest。
+    """
+    current = read_tree(expect, prefix) if expect else {}
+    actions: list[dict] = []
+    for rel in sorted(files):
+        full = f"{prefix.strip('/')}/{rel}"
+        if rel not in current:
+            actions.append({"action": "create", "file_path": full,
+                            "content": base64.b64encode(files[rel]).decode(),
+                            "encoding": "base64"})
+        elif current[rel] != files[rel]:
+            actions.append({"action": "update", "file_path": full,
+                            "content": base64.b64encode(files[rel]).decode(),
+                            "encoding": "base64", "last_commit_id": expect})
+    for rel in sorted(current):
+        if rel not in files:
+            actions.append({"action": "delete",
+                            "file_path": f"{prefix.strip('/')}/{rel}",
+                            "last_commit_id": expect})
+    if not actions:
+        return expect  # type: ignore[return-value]
+
+    payload: dict = {"branch": branch, "commit_message": message, "actions": actions}
+    if start_branch:
+        # 分支不存在时由这次调用顺带切出来,基点是远端的那个分支。原来的做法是本地
+        # fetch + checkout -B,而本地 ref 会漂:从漂了的 ref 切出来的分支,diff 里带着
+        # "把这期间合入的东西全revert 掉"。
+        payload["start_branch"] = start_branch
+    new_ref = _post("commits", payload).get("id")
+    if not new_ref:
+        raise ContentUnavailable("提交成功但响应里没有引用")
+    return str(new_ref)
 
 
 def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
