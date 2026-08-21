@@ -280,6 +280,15 @@ def publish(*, prefix: str, files: dict[str, bytes], expect: str | None,
     return str(new_ref)
 
 
+def tag(*, name: str, ref: str, message: str) -> bool:
+    """给某一版起个名字。已存在或失败返回 False —— 名字是方便人看的标记,不是上架的依据。"""
+    try:
+        _post("tags", {"tag_name": name, "ref": ref, "message": message})
+        return True
+    except (ContentUnavailable, Conflict):
+        return False
+
+
 def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
     """取某一版里某个目录下的全部文件:{相对路径: 字节}。
 

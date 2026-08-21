@@ -7,23 +7,19 @@ Stores each uploaded skill as a folder inside the git-managed skill repo:
         SKILL.md          # skill definition / instructions
         artifacts/        # uploaded raw file(s)
 
-Each upload bumps the manifest version, commits, tags (``<id>@<version>``)
-and (optionally) pushes to the remote with a small retry/sleep guard.
-
-The git author identity is passed per-command so global git config is never
-modified.
+每次上传把版本号推进一格、声明这个目录应有的全部内容、原子写进技能仓、并给这一版起个名字
+(``<id>@<version>``)。没有本地工作副本:写不成会抛,不存在"本地提交成功而推送失败"这种状态。
 """
 from __future__ import annotations
 
 import json
 import re
-import subprocess
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
+from app.repositories import skill_content
 from app.services.audit_engine import AuditResult
 
 settings = get_settings()
@@ -65,69 +61,9 @@ def bump_minor(version: str | None) -> str:
 
 class SkillStorage:
     def __init__(self) -> None:
-        self.repo = Path(settings.skill_repo_path)
+        # 没有本地状态了:内容走仓储层的接口读写。原来这里持有工作副本路径与 git 身份配置。
+        pass
 
-    # --- git helpers --------------------------------------------------------
-    def _git(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        cmd = [
-            "git",
-            "-C",
-            str(self.repo),
-            # The skill repo is a bind mount owned by the host user, while the
-            # container process runs as root. Without this, git refuses with
-            # "detected dubious ownership" (exit 128). Scope it to this repo.
-            "-c",
-            f"safe.directory={self.repo}",
-            "-c",
-            f"user.name={settings.git_author_name}",
-            "-c",
-            f"user.email={settings.git_author_email}",
-            *args,
-        ]
-        return subprocess.run(
-            cmd, capture_output=True, text=True, check=check, timeout=120
-        )
-
-    def _current_sha(self) -> str | None:
-        try:
-            return self._git("rev-parse", "HEAD").stdout.strip() or None
-        except subprocess.CalledProcessError:
-            return None
-
-    def _push_with_guard(self, tag: str | None, branch: str | None = None) -> bool:
-        """Push `branch` (default: the live branch) to the remote, with a retry guard.
-
-        The refspec names the local branch explicitly instead of ``HEAD``. ``HEAD`` is
-        shared mutable state: the suspect path checks out a review branch for the whole
-        duration of a write, so a concurrent live publish pushing ``HEAD:main`` would put
-        unreviewed content on the live branch — the one thing the audit gate exists to
-        prevent. Naming the branch makes that impossible; if the local branch is not where
-        we think it is, the push fails instead of publishing the wrong commit.
-        """
-        if not settings.skill_repo_push:
-            return False
-        remote = settings.skill_repo_remote
-        branch = branch or settings.skill_repo_branch
-        refspec = f"refs/heads/{branch}:{branch}"
-        last_err = ""
-        for attempt in range(3):
-            try:
-                self._git("push", remote, refspec)
-                if tag:
-                    self._git("push", remote, tag)
-                return True
-            except subprocess.CalledProcessError as exc:
-                last_err = (exc.stderr or "").strip()
-                # Someone else pushed first — rebase onto remote and retry.
-                try:
-                    self._git("pull", "--rebase", remote, branch, check=False)
-                except subprocess.CalledProcessError:
-                    pass
-                time.sleep(2 * (attempt + 1))  # backoff
-        print(f"[skill-storage] push failed after retries: {last_err}")
-        return False
-
-    # --- public API ---------------------------------------------------------
     def folder_name(self, skill_id: str, eid: str, name: str) -> str:
         return f"{sanitize_segment(skill_id, 'id')}_{sanitize_segment(eid, 'anon')}_{sanitize_segment(name)}"
 
@@ -173,51 +109,53 @@ class SkillStorage:
                 "content awaiting review must be written to a review branch, "
                 f"not to {settings.skill_repo_branch!r} (skill_id={skill_id!r})"
             )
-        if on_branch:
-            # Cut the review branch from the live branch *as it is on the remote*,
-            # not as this clone last saw it. Merges happen in GitLab and nothing
-            # pulls them back here, so the local ref drifts: a branch cut from it
-            # carries "revert everything merged since" in its diff. GitLab then
-            # either reports a conflict — which is the lucky case — or merges it
-            # cleanly and silently undoes work that was already reviewed and
-            # accepted. The live path self-heals because a stale push is rejected
-            # and retried after a rebase; pushing a new branch always succeeds, so
-            # this path has to synchronise deliberately.
-            base = settings.skill_repo_branch
-            if settings.skill_repo_push:
-                remote = settings.skill_repo_remote
-                if self._git("fetch", remote, base, check=False).returncode == 0:
-                    base = "FETCH_HEAD"
-            self._git("checkout", "-B", target_branch, base, check=False)
 
         category_slug = sanitize_segment(category_slug, "uncategorized")
 
         # Stable folder: reuse the existing path if the skill already exists.
         if existing_storage_path:
-            rel = Path(existing_storage_path)
+            rel = existing_storage_path
         else:
-            rel = Path(category_slug) / self.folder_name(skill_id, eid, name)
-        skill_dir = self.repo / rel
-        artifacts_dir = skill_dir / "artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
+            rel = f"{category_slug}/{self.folder_name(skill_id, eid, name)}"
 
-        version = bump_minor(current_version)
+        live = settings.skill_repo_branch
+        # 基点永远是**远端** live 分支现在这一版。复核分支由 publish 的 start_branch 从它切出来:
+        # 原来是本地 fetch + checkout -B,而本地 ref 会漂,从漂了的 ref 切出来的分支 diff 里带着
+        # "把这期间合入的东西全 revert 掉" —— GitLab 要么报冲突(运气好),要么干净地合并并悄悄
+        # 撤掉已经复核通过的工作。
+        base = skill_content.head_ref(live)
+        before = skill_content.read_tree(base, rel) if existing_storage_path else {}
 
-        # Write skill definition.
-        (skill_dir / "SKILL.md").write_text(instructions or f"# {name}\n", encoding="utf-8")
+        # 版本号从**仓库里那份 manifest** 推,不从数据库加一:两个并发发布从数据库加一会算出同一个
+        # 版本号,而 tag 冲突时代码是默默跳过 —— 两份不同内容共用一个版本号,没人知道。
+        # 仓库里没有 manifest(还没迁移过的老技能)才退到调用方给的当前版本。
+        version_in_repo: str | None = None
+        raw_manifest = before.get("manifest.json")
+        if raw_manifest:
+            try:
+                version_in_repo = json.loads(raw_manifest.decode("utf-8")).get("version")
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                version_in_repo = None
+        version = bump_minor(version_in_repo or current_version)
 
-        # Save uploaded artifact (if any).
+        # 声明这个目录**应有的全部内容**:先带上原有的文件,再覆盖这次要改的。不这么做的话,
+        # publish 会把没出现的文件(作者的脚本、参考资料)当成"要删掉"。
+        files: dict[str, bytes] = dict(before)
+
+        files["SKILL.md"] = (instructions or f"# {name}\n").encode("utf-8")
+
         artifact_name = None
         if artifact_bytes is not None and artifact_filename:
             # Replace any previously stored artifacts so stale files from an
             # earlier version don't leak into downloads.
-            for old in artifacts_dir.iterdir():
-                if old.is_file():
-                    old.unlink()
+            for old in [k for k in files if k.startswith("artifacts/")]:
+                del files[old]
             artifact_name = sanitize_segment(Path(artifact_filename).name, "artifact")
-            (artifacts_dir / artifact_name).write_bytes(artifact_bytes)
+            files[f"artifacts/{artifact_name}"] = artifact_bytes
+        else:
+            kept = sorted(k for k in files if k.startswith("artifacts/"))
+            artifact_name = Path(kept[0]).name if kept else None
 
-        # Write manifest.
         full_manifest = {
             **manifest,
             "id": skill_id,
@@ -227,46 +165,32 @@ class SkillStorage:
             "artifactName": artifact_name,
             "storedAt": datetime.now(timezone.utc).isoformat(),
         }
-        (skill_dir / "manifest.json").write_text(
-            json.dumps(full_manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        files["manifest.json"] = json.dumps(
+            full_manifest, ensure_ascii=False, indent=2
+        ).encode("utf-8")
+
+        commit_msg = f"{action}({category_slug}): {name} v{version}"
+        sha = skill_content.publish(
+            prefix=rel,
+            files=files,
+            expect=base if existing_storage_path else None,
+            branch=target_branch if on_branch else live,
+            message=commit_msg,
+            start_branch=live if on_branch else None,
         )
 
-        # Commit.
-        self._git("add", "-A", "--", str(rel))
-        commit_msg = f"{action}({category_slug}): {name} v{version}"
-        try:
-            # Commit only this skill's folder. Without the pathspec the commit takes the
-            # whole index, so a concurrent write that has already staged its own files
-            # gets swept into this commit — two skills in one commit, and the other
-            # request's commit then finds nothing to commit.
-            self._git("commit", "-m", commit_msg, "--", str(rel))
-        except subprocess.CalledProcessError as exc:
-            # "nothing to commit" — treat as no-op but still return current sha.
-            if "nothing to commit" not in (exc.stdout or "") + (exc.stderr or ""):
-                raise
-
-        tag = f"{sanitize_segment(skill_id, 'id')}@{version}"
-        try:
-            self._git("tag", "-a", tag, "-m", commit_msg)
-        except subprocess.CalledProcessError:
-            tag = None  # tag may already exist; don't fail the upload
-
-        sha = self._current_sha()
-        pushed = self._push_with_guard(tag, branch=target_branch if on_branch else None)
-
-        if on_branch:
-            # Return the working copy to the live branch; the suspect commit lives
-            # only on the remote feature branch (+ its Draft MR), never on live.
-            self._git("checkout", "-f", settings.skill_repo_branch, check=False)
-            self._git("branch", "-D", target_branch, check=False)
+        tag_name = f"{sanitize_segment(skill_id, 'id')}@{version}"
+        if not skill_content.tag(name=tag_name, ref=sha, message=commit_msg):
+            tag_name = None  # 已存在或失败:不让它挡住上传
 
         return StoreResult(
-            storage_path=str(rel),
+            storage_path=rel,
             version=version,
             commit_sha=sha,
-            tag=tag,
+            tag=tag_name,
             artifact_name=artifact_name,
-            pushed=pushed,
+            # 没有本地提交了:publish 返回即内容在远端。写不成会抛,由调用方决定怎么失败。
+            pushed=True,
         )
 
 
