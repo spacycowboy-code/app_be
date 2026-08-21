@@ -571,16 +571,10 @@ async def update_skill(
     db.commit()
     db.refresh(skill)
 
-    # Surface the git sync status without failing the request: the edit is
-    # already saved to the DB and committed to the local repo; only the push
-    # to the GitLab remote may have failed. The frontend can warn the user.
-    if settings.skill_repo_push:
-        skill.synced = result.pushed
-        if not result.pushed:
-            skill.sync_warning = (
-                "改动已保存，但同步到 GitLab 远端失败，远端暂未更新；"
-                "请稍后重试或联系管理员。"
-            )
+    # 写成功即内容在 GitLab 上:没有本地提交,也就没有"已保存但没同步"这种状态。写不成会抛,
+    # 由 main.py 的处理器答成 409/503,数据库那一行还没写(顺序是先仓库后数据库)。
+    # `synced` 字段保留(前端在读),但它现在恒为真;原来那条 sync_warning 分支不可达。
+    skill.synced = result.pushed
     return skill
 
 

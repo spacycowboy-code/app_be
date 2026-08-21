@@ -269,3 +269,39 @@ def test_publish_sends_bytes_as_base64_so_binaries_survive(monkeypatch, posted):
     a = posted[0]["actions"][0]
     assert a["encoding"] == "base64"
     assert base64.b64decode(a["content"]) == blob
+
+
+def test_a_missing_path_is_told_apart_from_an_upstream_failure(monkeypatch):
+    """收敛器要靠这个区分"技能被删了"和"GitLab 挂了"。
+
+    端到端验收时发现:删空一个目录之后列它,接口返回 404。两种情况合成一个异常的话,GitLab 挂一次
+    就会把所有技能置成 archived。
+    """
+    import urllib.error
+
+    def gone(url, *a, **kw):
+        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+
+    class _Opener:
+        open = staticmethod(gone)
+
+    monkeypatch.setattr(skill_content, "_opener", lambda: _Opener())
+    with pytest.raises(skill_content.NotFound):
+        skill_content.read("a" * 40, "team/nope/SKILL.md")
+    # NotFound 是 ContentUnavailable 的子类,所以已经按"读不到"处理的调用方行为不变
+    assert issubclass(skill_content.NotFound, skill_content.ContentUnavailable)
+
+
+def test_a_server_error_is_not_reported_as_missing(monkeypatch):
+    import urllib.error
+
+    def broken(url, *a, **kw):
+        raise urllib.error.HTTPError(url, 502, "Bad Gateway", {}, None)
+
+    class _Opener:
+        open = staticmethod(broken)
+
+    monkeypatch.setattr(skill_content, "_opener", lambda: _Opener())
+    with pytest.raises(skill_content.ContentUnavailable) as e:
+        skill_content.read("a" * 40, "team/x/SKILL.md")
+    assert not isinstance(e.value, skill_content.NotFound), "502 被当成了不存在"

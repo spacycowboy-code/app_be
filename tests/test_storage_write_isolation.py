@@ -1,39 +1,45 @@
-"""写入技能仓时,提交范围和推送目标都必须是显式的。
+"""写入技能仓时,写的范围和落在哪个分支都必须是显式的。
 
-两条都不是风格问题,各自对应一个真实后果:
+这四条原来盯的是 git 命令行:`commit` 要带 pathspec、`push` 不能用 `HEAD:`、可疑内容只能推到自己的
+复核分支、复核分支必须从远端的 live 切。它们各自对应一个真实后果:
 
-* `commit` 不带 pathspec → 提交的是整个索引。另一个并发写入刚 stage 的文件会被卷进这次提交,
-  而它自己的提交随后发现"nothing to commit"。
-* `push HEAD:<分支>` → HEAD 是共享可变状态。可疑内容那条路会在整个写入期间 checkout 到复核分支,
-  这期间一个并发的正常发布推 `HEAD:main`,就会把**未经复核的内容**推上 live —— 审计闸门存在的
-  全部意义就是拦住这个。
+* 提交不带 pathspec → 提交整个索引,另一个并发写入刚 stage 的文件被卷进这次提交。
+* `push HEAD:<分支>` → HEAD 是共享可变状态。可疑内容那条路整个写入期间都 checkout 在复核分支上,
+  这期间一个并发的正常发布推 `HEAD:main`,**未经复核的内容就上了 live** —— 审计闸门存在的全部意义
+  就是拦住这个。
+* 复核分支从**本地** ref 切 → 本地 ref 会漂,切出来的分支 diff 里带着"把这期间合入的东西全 revert 掉"。
+
+改成一次原子写之后这些性质是结构上成立的(没有索引、没有 HEAD、没有本地 ref),但性质本身还得有人盯,
+所以测试搬到新的层次:断言这次写**发出去的是什么** —— 动作的路径范围、落在哪个分支、从哪切。
 """
 
 import pytest
 
+from app.repositories import skill_content
 from app.services.audit_engine import AuditResult
 from app.services.skill_storage import SkillStorage
 
+LIVE = "main"
+
 
 @pytest.fixture()
-def recorded(tmp_path, monkeypatch):
-    """在临时目录上跑 store(),把每条 git 命令记下来而不真的执行。"""
-    storage = SkillStorage()
-    monkeypatch.setattr(storage, "repo", tmp_path)
-    calls: list[tuple[str, ...]] = []
+def published(monkeypatch):
+    """跑 store(),把发给内容存储的那次写记下来而不真的发出去。"""
+    seen: dict = {}
 
-    class _Result:
-        stdout = "0123456789abcdef"
-        stderr = ""
-        returncode = 0
+    def fake_publish(*, prefix, files, expect, branch, message, start_branch=None):
+        seen.update(prefix=prefix, files=files, expect=expect, branch=branch,
+                    message=message, start_branch=start_branch)
+        return "n" * 40
 
-    def fake_git(*args: str, check: bool = True):
-        calls.append(args)
-        return _Result()
-
-    monkeypatch.setattr(storage, "_git", fake_git)
-    monkeypatch.setattr("app.services.skill_storage.settings.skill_repo_push", True, raising=False)
-    return storage, calls
+    monkeypatch.setattr(skill_content, "publish", fake_publish)
+    monkeypatch.setattr(skill_content, "head_ref", lambda branch=None: "h" * 40)
+    monkeypatch.setattr(skill_content, "read_tree", lambda ref, prefix: {})
+    monkeypatch.setattr(skill_content, "tag", lambda **kw: True)
+    monkeypatch.setattr(
+        "app.services.skill_storage.settings.skill_repo_branch", LIVE, raising=False
+    )
+    return SkillStorage(), seen
 
 
 def _store(storage, **overrides):
@@ -54,39 +60,67 @@ def _store(storage, **overrides):
     return storage.store(**kwargs)
 
 
-def test_commit_is_limited_to_this_skill(recorded):
-    storage, calls = recorded
+def test_the_write_touches_only_this_skills_folder(published):
+    storage, seen = published
     result = _store(storage)
-    commits = [c for c in calls if c and c[0] == "commit"]
-    assert commits, "没有产生提交"
-    args = commits[0]
-    assert "--" in args, f"commit 没带 pathspec,会提交整个索引: {args}"
-    assert args[args.index("--") + 1] == result.storage_path
+    assert seen["prefix"] == result.storage_path
+    for rel in seen["files"]:
+        assert not rel.startswith("/") and ".." not in rel, rel
 
 
-def test_push_names_the_branch_not_head(recorded):
-    storage, calls = recorded
+def test_a_normal_publish_lands_on_the_live_branch(published):
+    storage, seen = published
     _store(storage)
-    pushes = [c for c in calls if c and c[0] == "push"]
-    assert pushes, "没有推送"
-    refspecs = [a for c in pushes for a in c if ":" in a]
-    assert refspecs, f"推送没有 refspec: {pushes}"
-    for spec in refspecs:
-        assert not spec.startswith("HEAD:"), (
-            f"用 HEAD 推送:并发写入切走分支时会把内容推到错误的分支 ({spec})"
-        )
-        assert spec.startswith("refs/heads/"), f"refspec 应显式命名本地分支: {spec}"
+    assert seen["branch"] == LIVE
+    assert seen["start_branch"] is None, "live 分支已经存在,不该要求切分支"
 
 
-def test_review_branch_push_targets_that_branch(recorded):
-    """可疑内容必须推到自己的复核分支,不能落到 live。"""
-    storage, calls = recorded
+def test_suspect_content_lands_only_on_its_review_branch(published):
+    """可疑内容必须落在自己的复核分支,不能落到 live。"""
+    storage, seen = published
     _store(
         storage,
         audit=AuditResult(state="suspect", verdict="suspect"),
         target_branch="review/s1-abc",
     )
-    pushes = [c for c in calls if c and c[0] == "push"]
-    refspecs = [a for c in pushes for a in c if ":" in a]
-    assert "refs/heads/review/s1-abc:review/s1-abc" in refspecs, refspecs
-    assert not any(s.endswith(":main") for s in refspecs), f"可疑内容被推向 live: {refspecs}"
+    assert seen["branch"] == "review/s1-abc"
+    assert seen["branch"] != LIVE
+
+
+def test_the_review_branch_is_cut_from_the_live_branch_in_the_same_write(published):
+    storage, seen = published
+    _store(
+        storage,
+        audit=AuditResult(state="suspect", verdict="suspect"),
+        target_branch="review/s1-abc",
+    )
+    assert seen["start_branch"] == LIVE, (
+        "复核分支必须由这次调用从 live 切出来 —— 本地 ref 会漂,从漂了的 ref 切出来的分支"
+        "会把这期间合入的东西 revert 掉"
+    )
+
+
+def test_suspect_content_is_refused_when_no_review_branch_is_given(published):
+    storage, _ = published
+    with pytest.raises(ValueError):
+        _store(storage, audit=AuditResult(state="suspect", verdict="suspect"))
+
+
+def test_rejected_content_is_never_written(published):
+    storage, seen = published
+    with pytest.raises(ValueError):
+        _store(storage, audit=AuditResult(state="danger", verdict="danger"))
+    assert seen == {}, "审计拒绝的内容却发出了写请求"
+
+
+def test_an_existing_skill_is_written_with_the_ref_it_was_read_at(published):
+    """已存在的技能必须带前置条件:不带就是静默覆盖。"""
+    storage, seen = published
+    _store(storage, existing_storage_path="cat/s1_EUSER_Some_Skill")
+    assert seen["expect"] == "h" * 40
+
+
+def test_a_brand_new_skill_has_nothing_to_base_on(published):
+    storage, seen = published
+    _store(storage)
+    assert seen["expect"] is None

@@ -170,40 +170,38 @@ def test_an_author_side_failure_still_fails_closed(client, monkeypatch):
         assert db.get(RpAiSkill, sid).status == "pending"
 
 
-def test_a_review_branch_is_cut_from_the_remote_live_ref(monkeypatch, tmp_path):
-    """Merges happen in GitLab and nothing pulls them back into this clone, so a
-    branch cut from the local ref carries "revert everything merged since"."""
+def test_a_review_branch_is_cut_from_the_live_branch_in_the_same_write(monkeypatch):
+    """复核分支的基点必须是 live 分支现在这一版。
+
+    原来是本地 fetch + checkout -B:合并发生在 GitLab 而没有任何东西把它们拉回这个克隆,所以本地 ref
+    会漂,从漂了的 ref 切出来的分支 diff 里带着"把这期间合入的东西全 revert 掉"。现在分支由写内容那
+    一次调用的 start_branch 顺带切出来,基点由服务端决定,不存在本地 ref。
+    """
+    from app.repositories import skill_content
     from app.services import skill_storage as mod
     from app.services.audit_engine import AuditResult
 
-    st = mod.SkillStorage()
-    monkeypatch.setattr(st, "repo", tmp_path, raising=False)
-    monkeypatch.setattr(mod.settings, "skill_repo_push", True, raising=False)
-    calls: list[tuple] = []
+    seen: dict = {}
 
-    class Done:
-        returncode = 0
-        stderr = ""
+    def fake_publish(*, prefix, files, expect, branch, message, start_branch=None):
+        seen.update(branch=branch, start_branch=start_branch)
+        return "n" * 40
 
-    def fake_git(*args, check=True):
-        calls.append(args)
-        return Done()
+    monkeypatch.setattr(skill_content, "publish", fake_publish)
+    monkeypatch.setattr(skill_content, "head_ref", lambda branch=None: "h" * 40)
+    monkeypatch.setattr(skill_content, "read_tree", lambda ref, prefix: {})
+    monkeypatch.setattr(skill_content, "tag", lambda **kw: True)
+    monkeypatch.setattr(mod.settings, "skill_repo_branch", "main", raising=False)
 
-    monkeypatch.setattr(st, "_git", fake_git)
-    monkeypatch.setattr(st, "_current_sha", lambda: "abc1234", raising=False)
-    monkeypatch.setattr(st, "_push_with_guard", lambda *a, **k: True, raising=False)
-    st.store(skill_id="s", eid="E", name="n", category_slug="c", manifest={},
-             instructions="x", artifact_bytes=None, artifact_filename=None,
-             current_version=None, existing_storage_path=None,
-             audit=AuditResult(state="suspect", verdict="flag"),
-             target_branch="skill-audit/s-deadbeef")
-    fetched = [c for c in calls if c[:1] == ("fetch",)]
-    checkout = [c for c in calls if c[:2] == ("checkout", "-B")]
-    assert fetched, "must synchronise before cutting the review branch"
-    assert checkout and checkout[0][3] == "FETCH_HEAD", checkout
+    mod.SkillStorage().store(
+        skill_id="s", eid="E", name="n", category_slug="c", manifest={},
+        instructions="x", artifact_bytes=None, artifact_filename=None,
+        current_version=None, existing_storage_path=None,
+        audit=AuditResult(state="suspect", verdict="flag"),
+        target_branch="skill-audit/s-deadbeef")
 
-
-# --- a review says who uploaded the skill -------------------------------------
+    assert seen["branch"] == "skill-audit/s-deadbeef"
+    assert seen["start_branch"] == "main"
 
 def test_the_review_mr_names_the_uploader(client, monkeypatch):
     """A reviewer's first question is who to talk to. Before this it could only be

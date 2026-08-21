@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
+from app.repositories import skill_content
 from app.version import __version__
 from app.services.auth_tokens import TokenError, check_token_scope, decode_token
 from app.services.audit_engine import BundleTooLarge
@@ -38,7 +39,36 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title=settings.app_name, version=__version__)
+
+@app.exception_handler(skill_content.Conflict)
+async def _content_conflict(_: Request, exc: skill_content.Conflict) -> JSONResponse:
+    """同一个技能被并发改了。**不重试** —— 重试等于拿这次的内容盖掉对方刚写的那份。
+
+    让调用方重新读一遍再决定。写不成的时候数据库那一行还没写(顺序是先仓库后数据库),
+    所以这里返回错误不会留下"库里有、仓库没有"的状态。
+    """
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": "这个技能刚被其他人改过，请刷新后重新提交。"},
+    )
+
+
+@app.exception_handler(skill_content.ContentUnavailable)
+async def _content_unavailable(_: Request, exc: skill_content.ContentUnavailable) -> JSONResponse:
+    """读写技能仓失败。
+
+    以前写入路径在这种情况下会**先把数据库写了**再返回 pushed=False,于是市场里看得到而远端 404。
+    现在明确失败:拿"悄悄不一致"换"明确失败"。
+    """
+    logger.warning("skill content store unavailable: %s", exc)
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "暂时无法读写技能仓，本次操作未保存，请稍后重试。"},
+    )
+
 
 @app.exception_handler(BundleTooLarge)
 async def _bundle_too_large(_request: Request, exc: BundleTooLarge) -> JSONResponse:
