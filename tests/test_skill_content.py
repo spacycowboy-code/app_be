@@ -130,3 +130,35 @@ def test_read_tree_is_one_request_even_for_many_files(monkeypatch):
     tree = skill_content.read_tree("3" * 40, prefix)
     assert len(tree) == 63
     assert len(calls) == 1
+
+
+def test_head_ref_returns_the_full_reference_of_the_branch(monkeypatch):
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"branches/": json.dumps(
+                            {"commit": {"id": "f" * 40, "short_id": "ffffff"}}).encode()}, []))
+    assert skill_content.head_ref("main") == "f" * 40
+
+
+def test_head_ref_refuses_a_response_without_a_reference(monkeypatch):
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"branches/": b"{}"}, []))
+    with pytest.raises(skill_content.ContentUnavailable):
+        skill_content.head_ref("main")
+
+
+def test_version_of_asks_for_the_last_commit_touching_that_path(monkeypatch):
+    """身份必须是**这个子树自己的**。用整仓 head 当身份,任何无关提交都会把所有技能标记成有更新。"""
+    calls: list[str] = []
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"commits?": json.dumps([{"id": "9" * 40}]).encode()}, calls))
+    assert skill_content.version_of("official/anthropics/xlsx", at="h" * 40) == "9" * 40
+    q = calls[0]
+    assert "path=official%2Fanthropics%2Fxlsx" in q
+    assert "ref_name=" + "h" * 40 in q
+    assert "per_page=1" in q
+
+
+def test_version_of_returns_none_when_the_path_has_no_history(monkeypatch):
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"commits?": b"[]"}, []))
+    assert skill_content.version_of("official/nope", at="h" * 40) is None
