@@ -24,6 +24,7 @@ from app.models.skill import (
 )
 from app.models.version import RpAiSkillVersion
 from app.models.download import RpAiSkillDownload
+from app.repositories import skill_content
 from app.schemas.skill import (
     SkillCreate,
     SkillRead,
@@ -51,12 +52,26 @@ settings = get_settings()
 
 
 def _read_skill_md(skill: RpAiSkill) -> str:
-    """Read the skill's SKILL.md from the repo; fall back to instructions."""
-    if skill.storage_path:
-        md_path = Path(settings.skill_repo_path) / skill.storage_path / "SKILL.md"
-        if md_path.is_file():
-            return md_path.read_text(encoding="utf-8")
-    return skill.instructions or ""
+    """按这一行记着的引用读 SKILL.md。
+
+    **读不到就 503,不回落到 `skill.instructions`。** 那一列是同一份正文的第二份副本,
+    回落等于把可能过期的内容当成当前版本拿去编辑或审计,而且从响应上看不出来。
+    生产 22 个技能的 `storage_path` 与 `repo_commit` 都有值,所以这条回落对现存数据从不生效。
+    """
+    if not skill.storage_path or not skill.repo_commit:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="这个技能没有记下内容在仓库里的位置或版本,无法读取正文",
+        )
+    try:
+        return skill_content.read_text(
+            skill.repo_commit, f"{skill.storage_path}/SKILL.md"
+        )
+    except skill_content.ContentUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="暂时读不到技能内容,请稍后重试",
+        ) from exc
 
 
 def _slugify(text: str) -> str:

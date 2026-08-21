@@ -52,6 +52,12 @@ class Settings(BaseSettings):
 
     # --- GitLab (Agent市场 sync) --------------------------------------------
     # Base URL of the GitLab instance.
+    #: 按 ref 缓存技能内容的目录。**必须是容器本地目录**,不能是 bind mount ——
+    #: 挂上去就又把后端钉回一台机器,而这次重构的目的正是解开它。
+    #: 内容按不可变引用寻址,所以缓存不需要失效逻辑,删了下次重取。
+    content_cache_dir: str = "/tmp/skill-content-cache"
+    content_cache_max_mb: int = 512
+
     gitlab_url: str = "https://gitlab.internal.ericsson.com"
     # Personal access token with `read_api` scope. Empty = sync disabled.
     gitlab_token: str = ""
