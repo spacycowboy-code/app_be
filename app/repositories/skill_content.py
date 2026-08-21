@@ -42,6 +42,15 @@ class ContentUnavailable(RuntimeError):
     """引用或路径取不到内容。让调用方明确失败,而不是悄悄换一份内容。"""
 
 
+class NotFound(ContentUnavailable):
+    """这个引用下没有这个路径。
+
+    和"上游故障"必须分开:收敛器要靠这个区分"技能在仓库里被删了"(把 `status` 置成 `archived`)和
+    "GitLab 挂了"(什么都别做)。合成一个异常的话,GitLab 挂一次就会把所有技能归档。
+    端到端验收时发现的:删空一个目录之后列它,接口返回 404。
+    """
+
+
 class Conflict(RuntimeError):
     """有人在你读到之后改了同一个技能的文件。**不要重试** —— 重试等于拿自己这份盖掉对方。"""
 
@@ -78,6 +87,8 @@ def _fetch(path_and_query: str) -> bytes:
         with _opener().open(req, timeout=_TIMEOUT) as resp:
             return resp.read()
     except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise NotFound(f"404 {path_and_query}") from exc
         raise ContentUnavailable(f"{exc.code} {path_and_query}") from exc
     except Exception as exc:  # 网络、超时、TLS
         raise ContentUnavailable(f"{type(exc).__name__} {path_and_query}") from exc
