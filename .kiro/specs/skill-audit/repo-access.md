@@ -10,13 +10,27 @@ git 是这个内容存储今天的实现,同时承担复核工作流;引用今�
 `project id` / `ref` / `last_commit_id`,渗到调用方,换实现就变成重写。
 
 ```
-read(ref, path)             -> bytes
-list(ref, prefix)           -> [path]
-archive(ref, prefix)        -> bytes
-publish(files, expect=ref)  -> ref        # expect 不匹配 -> 冲突
+read(ref, path)             -> bytes          # read_text 是它的文本包装
+list_files(ref, prefix)     -> [path]
+read_tree(ref, prefix)      -> {相对路径: 字节}
+head_ref(branch)            -> ref            # 默认分支现在是哪一版
+version_of(prefix, at=ref)  -> ref            # 这个子树的内容身份
+publish(files, expect=ref)  -> ref            # expect 不匹配 -> 冲突
 ```
 
 `last_commit_id` 留在实现里面,是"比较并交换"的前置条件。
+
+**`read_tree` 而不是"返回归档字节"**:归档带两层前缀(GitLab 的 `<项目>-<ref>-<ref>-<路径>/` 包装目录,
+以及技能在仓库里的完整路径),剥壳是存储细节。交出路径到字节的映射,调用方自己决定打包格式。
+格式用 `archive.zip` 而不是 `tar.gz`:门户已经在用前者(市场下载),两种格式并存没有理由。
+
+**`version_of` 返回的是内容身份,不是"某个提交"**:调用方要的是"只在这个技能自己变了的时候才变的标识"。
+用整仓 head 当它,任何无关提交都会把每个技能标记成有更新。今天 git 用"最后碰过这个路径的提交"回答,
+产物存储用包的 digest 回答 —— 所以它是不透明值,调用方不该解析。
+
+**`publish` 的原子单位必须是"切换一个 manifest / 指针",不是"原子地写 N 个文件"。**
+git 顺便给了 N 文件原子性,但对象存储没有跨对象事务(S3 的 `If-Match`、GCS 的 `ifGenerationMatch`
+都是单对象的)。抽象依赖 git 这项额外能力,换实现就是重新设计而不是换实现。
 
 今天的样子与此相反:一棵共享工作副本(`settings.skill_repo_path`,bind mount)上跑 git 命令,六处碰它
 (`skill_storage` 写、`skills.py:55` 读 SKILL.md、`skills.py:316` 打 zip、`official_import` 移动整棵树的
@@ -149,7 +163,9 @@ Developer 会被拒,所以"专用 Developer token"走不通。今天服务用的
 落在同一批文件上。
 
 0. ~~止血:`commit` 加 pathspec、push 写明分支名~~ **已完成**(`skill_storage.py:242`、`:115`)
-1. **切读**:下载、`_read_skill_md`、`official_import` 改走接口 + 缓存
+1. ~~**切读**:下载、`_read_skill_md`、`official_import` 改走接口 + 缓存~~ **已完成**
+   (!48 / !49 / !50)。`app/routers/skills.py` 里已无 `skill_repo_path`;`official_import` 不再移动
+   共享树的 HEAD。三处原来都没有测试覆盖,现补 22 条并逐条用 mutation 验证过会失败。
 2. **切写**:发布器取代 `skill_storage`
 3. **删干净**:两个挂载、`skill_repo_*` 配置、`SkillStorage`
 4. 收敛器加 manifest 补齐
