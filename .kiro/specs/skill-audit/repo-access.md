@@ -134,6 +134,7 @@ Developer 会被拒,所以"专用 Developer token"走不通。今天服务用的
 | 一次提交里混 create + delete | 成立 |
 | `update` 带正确 `last_commit_id` | 201 |
 | `update` 带过期 `last_commit_id` | **400 `The file has changed since you started editing it`** |
+| `last_commit_id` 到底跟什么比 | **按文件比,不按分支比**:问的是"这个文件在这个提交之后被改过吗"。文件自己的最后提交、当前分支头都成立;无关提交把分支头推走**不会**造成冲突(三次对照实测)。所以一个 `expect` 引用能覆盖这次要写的所有文件,不必逐文件查最后提交 —— 而"冲突只可能是同一个技能被并发改"这条推理成立,409 不重试是对的 |
 | `update` 不带 `last_commit_id` | 201,**静默覆盖** |
 | 内容完全相同的 `update` | 201,**产生空提交**(接口不幂等) |
 | `start_sha` | 只用于建分支;分支已存在报 "branch already exists"。**不是并发保护** |
@@ -166,7 +167,7 @@ Developer 会被拒,所以"专用 Developer token"走不通。今天服务用的
 1. ~~**切读**:下载、`_read_skill_md`、`official_import` 改走接口 + 缓存~~ **已完成**
    (!48 / !49 / !50)。`app/routers/skills.py` 里已无 `skill_repo_path`;`official_import` 不再移动
    共享树的 HEAD。三处原来都没有测试覆盖,现补 22 条并逐条用 mutation 验证过会失败。
-2. **切写**:发布器取代 `skill_storage`
+2. **切写**:发布器取代 `skill_storage`。`publish` 已落地并在真仓库上验过(新目录+切分支、相同内容不产生提交、改删增一次原子提交、过期引用报冲突、`files={}` 清空目录;探测分支已删)。剩下的是把 `store()` 接过来
 3. **删干净**:两个挂载、`skill_repo_*` 配置、`SkillStorage`
 4. 收敛器加 manifest 补齐
 
