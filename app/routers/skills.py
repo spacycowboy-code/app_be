@@ -234,17 +234,14 @@ def get_skill_markdown(skill_id: str, db: Session = Depends(get_db)) -> dict:
     return {"skillId": skill.id, "content": _read_skill_md(skill)}
 
 
-def _artifact_archive(folder: "Path | None") -> "Path | None":
-    """The uploaded artifact zip stored under ``artifacts/``, if any. This is
-    the author's original skill package and the source of truth for a
-    download's file layout."""
-    if not folder:
-        return None
-    art = folder / "artifacts"
-    if not art.is_dir():
-        return None
-    zips = sorted(p for p in art.glob("*.zip") if p.is_file())
-    return zips[0] if zips else None
+def _artifact_member(tree: "dict[str, bytes]") -> "bytes | None":
+    """作者上传的那个原始 zip(在 ``artifacts/`` 下),没有就返回 None。
+
+    "哪个文件算作者的原始包"是产品规则,不是存储事实,所以留在路由层:仓储只负责把这一版的文件
+    交出来,不判断它们各自是什么角色。
+    """
+    zips = sorted(k for k in tree if k.startswith("artifacts/") and k.endswith(".zip"))
+    return tree[zips[0]] if zips else None
 
 
 def _common_top_dir(members: list[zipfile.ZipInfo]) -> "str | None":
@@ -334,11 +331,19 @@ def download_skill(
         if is_official
         else sanitize_segment(skill.name, skill_id)
     )
-    folder = (
-        Path(settings.skill_repo_path) / skill.storage_path
-        if skill.storage_path
-        else None
-    )
+    if not skill.storage_path or not skill.repo_commit:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能没有记下内容在仓库里的位置或版本,无法下载",
+        )
+    try:
+        tree = skill_content.read_tree(skill.repo_commit, skill.storage_path)
+    except skill_content.ContentUnavailable as exc:
+        # 原来这里会用 skill.instructions 合成一个只有 SKILL.md 的 zip。那是同一份正文的第二份
+        # 副本,而且下载下来的包看不出它缺了脚本和附件 —— 用户会以为自己拿到了完整的技能。
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "暂时读不到技能内容,请稍后重试"
+        ) from exc
 
     buf = io.BytesIO()
     wrote_any = False
@@ -364,10 +369,10 @@ def download_skill(
         #    <name>/<name>/SKILL.md. The loose root SKILL.md is only the
         #    extracted definition; manifest.json / artifacts/ are marketplace-
         #    only and must not leak into the downloaded skill.
-        archive = _artifact_archive(folder) if not is_official else None
-        if archive is not None:
+        artifact = _artifact_member(tree) if not is_official else None
+        if artifact is not None:
             try:
-                with zipfile.ZipFile(archive) as src:
+                with zipfile.ZipFile(io.BytesIO(artifact)) as src:
                     members = [m for m in src.infolist() if not m.is_dir()]
                     top = _common_top_dir(members)
                     for m in members:
@@ -379,23 +384,18 @@ def download_skill(
 
         # 2) No usable artifact archive: ship the loose skill files, dropping
         #    the marketplace-only manifest.json and the artifacts/ directory.
-        if not wrote_any and folder and folder.is_dir():
-            for p in sorted(folder.rglob("*")):
-                if not p.is_file() or ".git" in p.parts:
-                    continue
-                rel = p.relative_to(folder)
-                if (rel.parts and rel.parts[0] == "artifacts") or p.name == "manifest.json":
-                    continue
-                _add(str(rel), p.read_bytes())
-
-        # 3) Nothing on disk: synthesize SKILL.md from the stored instructions.
         if not wrote_any:
-            content = skill.instructions or ""
-            if not content:
-                raise HTTPException(
-                    status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容"
-                )
-            _add("SKILL.md", content.encode("utf-8"))
+            for rel in sorted(tree):
+                parts = Path(rel).parts
+                if (parts and parts[0] == "artifacts") or Path(rel).name == "manifest.json":
+                    continue
+                _add(rel, tree[rel])
+
+        # 3) 仓库里那一版真的什么都没有:报错,不拿数据库里的副本凑一个包出来。
+        if not wrote_any:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "该 Skill 没有可下载的内容"
+            )
 
     buf.seek(0)
     _bump_downloads(db, skill, eid)

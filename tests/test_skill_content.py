@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import json
-import tarfile
+import zipfile
 
 import pytest
 
@@ -93,24 +93,40 @@ def test_list_files_walks_all_pages_and_keeps_only_blobs(monkeypatch):
     assert len(seen) == 2, "第二页没取"
 
 
-def test_archive_comes_back_as_a_readable_tar(monkeypatch):
+def test_read_tree_strips_both_the_gitlab_wrapper_and_the_skill_path(monkeypatch):
+    """归档里有两层前缀,调用方要的是"相对技能目录"的路径。"""
+    prefix = "team/probe_EXXX_Probe"
+    wrapper = f"rp-ai-skill-{'1' * 40}-{'1' * 40}-team-probe"
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        data = b"# md"
-        info = tarfile.TarInfo("skill-abc/SKILL.md")
-        info.size = len(data)
-        tf.addfile(info, io.BytesIO(data))
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(f"{wrapper}/{prefix}/SKILL.md", b"# md")
+        zf.writestr(f"{wrapper}/{prefix}/scripts/run.py", b"print(1)")
+        zf.writestr(f"{wrapper}/{prefix}/artifacts/orig.zip", b"PK\x03\x04zip")
     monkeypatch.setattr(skill_content, "_fetch",
-                        _fake_fetch({"archive.tar.gz": buf.getvalue()}, []))
-    raw = skill_content.archive("0" * 40, "x")
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as tf:
-        assert [m.name for m in tf if m.isfile()] == ["skill-abc/SKILL.md"]
+                        _fake_fetch({"archive.zip": buf.getvalue()}, []))
+    tree = skill_content.read_tree("1" * 40, prefix)
+    assert sorted(tree) == ["SKILL.md", "artifacts/orig.zip", "scripts/run.py"]
+    assert tree["SKILL.md"] == b"# md"
 
-def test_a_tree_that_never_ends_is_refused_instead_of_eating_memory(monkeypatch):
-    """上游一直返回满页时必须停下来。第一次写这个测试时它把容器 OOM 杀掉了。"""
-    full = [{"type": "blob", "path": f"x/f{i}"} for i in range(100)]
+
+def test_read_tree_refuses_a_corrupt_archive_instead_of_returning_nothing(monkeypatch):
     monkeypatch.setattr(skill_content, "_fetch",
-                        lambda _: json.dumps(full).encode())
-    monkeypatch.setattr(skill_content, "_MAX_TREE_PAGES", 3)
+                        _fake_fetch({"archive.zip": b"not a zip at all"}, []))
     with pytest.raises(skill_content.ContentUnavailable):
-        skill_content.list_files("9" * 40, "x")
+        skill_content.read_tree("2" * 40, "team/probe")
+
+
+def test_read_tree_is_one_request_even_for_many_files(monkeypatch):
+    """整棵子树一次拿回。逐文件读的话官方技能 63 个文件要 30 秒。"""
+    prefix = "official/anthropics/docx"
+    wrapper = "rp-ai-skill-abc-abc-official-anthropics-docx"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i in range(63):
+            zf.writestr(f"{wrapper}/{prefix}/f{i}.txt", b"x")
+    calls: list[str] = []
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"archive.zip": buf.getvalue()}, calls))
+    tree = skill_content.read_tree("3" * 40, prefix)
+    assert len(tree) == 63
+    assert len(calls) == 1

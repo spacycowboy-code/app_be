@@ -32,6 +32,19 @@ BACKDATE = timedelta(hours=2)
 
 
 @pytest.fixture
+def content_in_repo(monkeypatch):
+    """下载的字节来自技能那一行记着的引用,不再来自 ``instructions``。
+
+    这些测试关心的是下载计数与时间戳,不是内容,所以仓库那一版用最小的一份就够。
+    """
+    from app.repositories import skill_content
+
+    monkeypatch.setattr(
+        skill_content, "read_tree", lambda ref, prefix: {"SKILL.md": b"# Probe\n"}
+    )
+
+
+@pytest.fixture
 def client():
     return TestClient(app)
 
@@ -58,6 +71,8 @@ def _seed(*, versions: list[timedelta]) -> datetime:
                 status="approved",
                 version="1.0.0",
                 tags=[],
+                storage_path="team/content-updated-probe_EXXX_Probe",
+                repo_commit="c" * 40,
                 instructions="# Probe\n\nA skill body so the download has content.\n",
             )
         )
@@ -148,7 +163,7 @@ def test_a_re_upload_is_an_update(client):
     assert _is_update_on_home(row)
 
 
-def test_a_download_does_not_make_a_skill_an_update(client):
+def test_a_download_does_not_make_a_skill_an_update(client, content_in_repo):
     """The original bug, asserted through the field the feed actually reads."""
     _seed(versions=[timedelta(0)])
     before = _summary(client)

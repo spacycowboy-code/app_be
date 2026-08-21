@@ -14,12 +14,14 @@ GitLab 是这个内容存储今天的实现。厂商概念(project、`PRIVATE-TO
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import logging
 import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -149,9 +151,40 @@ def list_files(ref: str, prefix: str) -> list[str]:
     return json.loads(_cached(ref, f"tree:{prefix}", produce).decode())
 
 
-def archive(ref: str, prefix: str) -> bytes:
-    """取某一版里某个目录的 tar.gz。整目录一次拿回,逐文件读会慢一个数量级。"""
+def _strip_wrapper(names: list[str], prefix: str) -> dict[str, str]:
+    """把归档里的路径换算成"相对技能目录"。
+
+    归档带两层前缀:GitLab 自己的包装目录(`<项目>-<ref>-<ref>-<路径>/`),以及技能在仓库里的
+    完整路径。实测一条:
+        rp-ai-skill-<sha>-<sha>-radio-design-1-isolation…/radio-design-1/isolation…/SKILL.md
+    调用方要的是 `SKILL.md`,所以两层都要剥掉。
+    """
+    out: dict[str, str] = {}
+    for name in names:
+        if name.endswith("/"):
+            continue
+        rest = name.split("/", 1)[1] if "/" in name else name  # 剥 GitLab 的包装目录
+        marker = prefix.strip("/") + "/"
+        if marker in rest:
+            rest = rest.split(marker, 1)[1]
+        if rest:
+            out[name] = rest
+    return out
+
+
+def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
+    """取某一版里某个目录下的全部文件:{相对路径: 字节}。
+
+    一次归档请求拿回整棵子树。逐文件读会慢一个数量级 —— 官方技能有 63 个文件,单文件 0.5 秒。
+    zip 是这个实现的传输格式,不出这个模块:调用方拿到的是路径到字节的映射,自己决定怎么打包给用户。
+    """
     def produce() -> bytes:
-        return _fetch(f"archive.tar.gz?sha={urllib.parse.quote(ref, safe='')}"
+        return _fetch(f"archive.zip?sha={urllib.parse.quote(ref, safe='')}"
                       f"&path={urllib.parse.quote(prefix, safe='')}")
-    return _cached(ref, f"archive:{prefix}", produce)
+    blob = _cached(ref, f"tree-bytes:{prefix}", produce)
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            mapping = _strip_wrapper(zf.namelist(), prefix)
+            return {rel: zf.read(name) for name, rel in mapping.items()}
+    except zipfile.BadZipFile as exc:
+        raise ContentUnavailable(f"{prefix} 的归档不是有效的 zip") from exc
