@@ -168,6 +168,16 @@ Developer 会被拒,所以"专用 Developer token"走不通。今天服务用的
    (!48 / !49 / !50)。`app/routers/skills.py` 里已无 `skill_repo_path`;`official_import` 不再移动
    共享树的 HEAD。三处原来都没有测试覆盖,现补 22 条并逐条用 mutation 验证过会失败。
 2. **切写**:发布器取代 `skill_storage`。`publish` 已落地并在真仓库上验过(新目录+切分支、相同内容不产生提交、改删增一次原子提交、过期引用报冲突、`files={}` 清空目录;探测分支已删)。剩下的是把 `store()` 接过来
+   接线时三处调用方语义会变,都是这次重构要的方向:
+
+   * **`pushed` 恒为真。** 今天本地提交能成而推送能败,所以 `skills.py:578` 会把 `synced=False` 加一句
+     "改动已保存,但同步到 GitLab 失败"返给前端。改完没有本地提交,调用成功即内容在 GitLab 上,
+     那条分支不可达 —— 删掉,字段保留(前端在读)。
+   * **写失败要让请求失败,不能先写库再警告。** 今天 `pushed=False` 时数据库照常提交,于是市场里看得到
+     而远端 404。改完顺序是先 git 后数据库,写不成就不写库。
+   * **版本号从仓库里的 manifest 推**,不再 `bump_minor(current_version)` 从数据库加一 ——
+     两个并发发布从数据库加一会算出同一个版本号,而 tag 冲突时代码是默默跳过。
+
 3. **删干净**:两个挂载、`skill_repo_*` 配置、`SkillStorage`
 4. 收敛器加 manifest 补齐
 
