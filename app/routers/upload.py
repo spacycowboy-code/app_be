@@ -18,7 +18,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -40,6 +40,7 @@ from app.services.skill_storage import skill_storage
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
 from app.services.audit_engine import AuditResult, audit_skill, content_key
+from app.models.audit import RpAiSkillAuditRecord
 from app.services.skill_audit import gate
 from app.services.audit_report import build_checks
 from app.services import gitlab_mr
@@ -335,6 +336,19 @@ async def upload_skill(
     suspect = decision.needs_review
     review_branch = decision.review_branch
 
+    # 审计记录在写内容**之前**落库并提交。它是数据库自己拥有的事实("审计跑过、结论是什么"),
+    # 不是内容的投影,所以"先仓库后数据库"那条规矩不管它。原来它排在写内容之后,于是写失败时整条
+    # 丢掉:跑了几十秒的审计没有痕迹,健康端点的失败率也少算一次。被拒的内容那条路本来就是先记后提交。
+    # mr_url 这时还不知道(复核 MR 要等内容写完才开),等开完再补到这条记录上。
+    # `skill_id` 是指向技能表的外键,而新技能这时候还没有行,所以只有已存在的技能才填它 ——
+    # 被拒的内容那条路本来也是用 skill_id=None 记的。新技能的这一格等行建好之后补。
+    gate.record(
+        db, audit_ref, audit,
+        skill_id=resolved_id if existing else None,
+        skill_name=name, uploader_eid=eid,
+    )
+    db.commit()
+
     result = skill_storage.store(
         skill_id=resolved_id,
         eid=owner_eid or eid,
@@ -420,9 +434,15 @@ async def upload_skill(
                 cause=audit.cause,
             )
         )
-    gate.record(
-        db, audit_ref, audit,
-        skill_id=resolved_id, skill_name=name, uploader_eid=eid, mr_url=mr_url,
+    # 记录已经在写内容之前落库了。这里补上写完才知道的两格:技能那一行的 id(新技能才需要)、
+    # 以及复核 MR 的地址。
+    filled = {"skill_id": resolved_id}
+    if mr_url:
+        filled["mr_url"] = mr_url
+    db.execute(
+        update(RpAiSkillAuditRecord)
+        .where(RpAiSkillAuditRecord.id == audit_ref)
+        .values(**filled)
     )
 
     db.commit()

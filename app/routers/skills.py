@@ -579,7 +579,42 @@ async def update_skill(
 
 
 @router.delete("/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_skill(skill_id: str, db: Session = Depends(get_db)) -> None:
+def delete_skill(
+    skill_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> None:
+    """下架一个技能:把内容从仓库移掉,数据库那一行置成 archived。
+
+    **为什么不删那一行。** 它带着仓库里算不出来的门户事实:下载量、收藏、评价、审计记录。删掉它等于
+    为了跟仓库保持一致而销毁门户自己的记录。公开列表按 ``status == "approved"`` 过滤,所以置成
+    ``archived`` 之后它自然从市场消失,前端不用改。
+
+    **为什么要动仓库。** 只删数据库那一行的话,manifest 还在仓库里;收敛器补齐 manifest 那一步一上线,
+    这个技能会被重新扫回来。内容的权威在仓库,所以"删除"必须先在仓库里发生。
+
+    鉴权照 market 那边的规矩:身份取已验证的调用者(不是调用方能改的请求头),只有上传者本人和管理员
+    可以下架。原来这个接口**没有任何鉴权**,任何人可以删任何技能。
+    """
     skill = _get_skill_or_404(db, skill_id)
-    db.delete(skill)
+    requester = acting_eid(request, x_user_eid)
+    is_admin = requester == settings.audit_admin_eid
+    if not is_admin and skill.uploader_eid and requester != skill.uploader_eid:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "只有上传者本人或管理员可以下架这个技能"
+        )
+
+    if skill.storage_path and skill.repo_commit:
+        try:
+            skill_content.publish(
+                prefix=skill.storage_path,
+                files={},
+                expect=skill.repo_commit,
+                branch=settings.skill_repo_branch,
+                message=f"remove: {skill.name} (下架, 操作者 {requester})",
+            )
+        except skill_content.NotFound:
+            pass  # 仓库里已经没有了,这次下架只需要改状态
+    skill.status = "archived"
     db.commit()
