@@ -31,6 +31,19 @@ OWNER_EID = "EZHGMIO"
 BACKDATE = timedelta(hours=2)
 
 
+@pytest.fixture(autouse=True)
+def _content_in_repo(monkeypatch):
+    """详情接口与"只改元数据"的编辑都按引用从仓库读正文,所以测试要给一份。
+
+    这不是补丁:正文的权威在仓库,读不到就该失败。这些测试关心的是时间戳与审计,不是正文本身。
+    """
+    from app.repositories import skill_content
+
+    monkeypatch.setattr(
+        skill_content, "read_text",
+        lambda ref, path: "---\nname: Probe\ndescription: probe\n---\n\n# body\n")
+
+
 @pytest.fixture
 def content_in_repo(monkeypatch):
     """下载的字节来自技能那一行记着的引用,不再来自 ``instructions``。

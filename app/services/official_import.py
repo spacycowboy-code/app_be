@@ -75,7 +75,7 @@ def _apply_manifest(skill: RpAiSkill, manifest: dict, instructions: str | None, 
     skill.is_free = bool(manifest.get("isFree", True))
     skill.example_prompt = manifest.get("examplePrompt")
     skill.example_output = manifest.get("exampleOutput")
-    skill.instructions = instructions
+    # 官方技能的正文同样不落库:详情接口按引用读。
     skill.status = "approved"  # official = auto-approved, no review
     skill.image = OFFICIAL_IMAGE
     skill.storage_path = manifest.get("_storagePath")
