@@ -35,7 +35,6 @@ from app.services.skill_manifest import (
     build_manifest,
     has_name_and_description,
     parse_frontmatter,
-    render_skill_md,
     with_frontmatter,
 )
 from app.services.archives import common_top_dir
