@@ -200,41 +200,6 @@ def with_frontmatter(body: str, name: str, description: str | None) -> str:
     return fm + (body or "")
 
 
-def render_skill_md(skill: RpAiSkill) -> str:
-    """Return the skill definition markdown, guaranteed to carry frontmatter."""
-    if skill.instructions and skill.instructions.strip():
-        body = skill.instructions
-    else:
-        body = _generate_body(skill)
-    return with_frontmatter(body, skill.name, skill.description)
-
-
-def _generate_body(skill: RpAiSkill) -> str:
-    lines = [f"# {skill.name}", ""]
-    if skill.description:
-        lines += [skill.description, ""]
-    if skill.capability_full:
-        lines += ["## 能力说明", skill.capability_full, ""]
-    if skill.input_params:
-        lines += ["## 输入参数"]
-        for p in skill.input_params:
-            req = "必填" if p.required else "可选"
-            lines.append(f"- `{p.name}` ({p.type or 'string'}, {req}): {p.description or ''}")
-        lines.append("")
-    if skill.sub_skills:
-        lines += ["## 子能力"]
-        for s in skill.sub_skills:
-            lines.append(f"- **{s.name}**：{s.description or ''}")
-        lines.append("")
-    if skill.example_prompt or skill.example_output:
-        lines += ["## 示例"]
-        if skill.example_prompt:
-            lines += ["**Prompt**", "", f"> {skill.example_prompt}", ""]
-        if skill.example_output:
-            lines += ["**Output**", "", "```", skill.example_output, "```", ""]
-    return "\n".join(lines)
-
-
 def build_manifest(skill: RpAiSkill, eid: str, slug: str) -> dict:
     """Authored metadata written to manifest.json (camelCase).
 

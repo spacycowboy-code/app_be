@@ -27,11 +27,8 @@ class Settings(BaseSettings):
 
     # --- Skill storage repo -------------------------------------------------
     # Git-managed directory where uploaded skills are stored.
-    skill_repo_path: str = "/proj/radio_ivc_rvc_workspace/ezhgmio/rp-ai-skill"
     # Push to the git remote after each upload commit.
-    skill_repo_push: bool = True
     # Git remote/branch to push to.
-    skill_repo_remote: str = "origin"
     # --- 审计引擎(独立服务,仓库 rp-ai-miao/skill-audit)------------------------
     # 同一个 overlay 内按服务名访问;不发布端口,鉴权全靠 token。
     # 扫描器与判定器的那一批配置(模型、超时、策略文件、工作目录…)**不在这里** —— 它们跟着引擎
