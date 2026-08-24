@@ -1,0 +1,470 @@
+"""Agent 包(zip)上传:包进 GitLab,条目进市场,等人批准才可见。
+
+和 skill 上传的关系:形状一样(先体检、再发布),存储不一样。skill 全部落在一个 git 仓的
+子目录里;agent 每个包一个 GitLab 项目(`rp-ai/rp-ai-user-agents` 组下)。这样做的直接好处是
+门户已有的下载与安装令牌两条路径一行都不用改 —— 它们认 `gl-<项目id>`,而上传出来的条目
+正好就是这个形状。
+
+三条规矩,和这里的每个决定都有关:
+
+**审计只出结论,不拦。** 引擎的判断照记、照展示,但不改流向。于是**唯一的闸门是批准的人**,
+所以审核页必须给他足够的事实(文件清单、可执行文件、包会做什么、审计跑成了没有),否则
+批准就是盖章。
+
+**两件事例外,而它们不是审计。** 解不开的包(zip slip、符号链接)是我们自己会写到目录外面,
+必须退回;带明文凭据的包 GitLab 的 pre-receive 钩子必定拒收,不提前说的结果不是"放过",
+而是两分钟后给用户一句 GitLab 原文报错、组里还留下一个空项目。
+
+**上传者确认的启动命令是权威值。** 存进数据库(提示词读它)和包里的 portal-agent.yaml(给
+拿着 zip 离开门户的人)。README 一个字都不改:改了下一版会被上传者自己的包覆盖,而且发出去
+的包就不是审计过的那一个了。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import queue
+import shutil
+import tempfile
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from fastapi import Depends
+
+from app.config import get_settings
+from app.database import get_db
+from app.models.category import RpAiCategory
+from app.models.market import RpAiMarketItem
+from app.models.market_version import RpAiMarketItemVersion
+from app.models.user import RpAiPortal
+from app.services import agent_package as pkg
+from app.services import gitlab_projects as glw
+from app.services.audit_engine import AuditResult, audit_skill
+from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
+from app.services.eids import acting_eid
+from app.services.skill_storage import bump_minor
+
+log = logging.getLogger(__name__)
+settings = get_settings()
+
+router = APIRouter(prefix="/api/market/agent-upload", tags=["agent-upload"])
+
+
+# --- 共用 ------------------------------------------------------------------
+
+
+def _sse(event: str, payload: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+
+
+async def _read_zip(file: UploadFile | None) -> bytes:
+    if file is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请选择一个 zip 包")
+    data = await file.read()
+    if len(data) > settings.max_upload_bytes:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            f"包超过 {settings.max_upload_bytes // (1024 * 1024)} MB 上限",
+        )
+    return data
+
+
+def _unpack(data: bytes) -> tuple[Path, list[pkg.FileEntry], pkg.Inspection]:
+    """安全解包并体检。调用方负责删掉返回的临时目录。"""
+    tmp = Path(tempfile.mkdtemp(prefix="agent-pkg-"))
+    try:
+        entries = pkg.extract_safely(
+            data, tmp / "src", max_bytes=settings.max_upload_bytes
+        )
+    except pkg.PackageRejected as exc:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.detail) from exc
+    return tmp, entries, pkg.inspect(tmp / "src", entries)
+
+
+def _secret_stop(root: Path, entries: list[pkg.FileEntry]) -> None:
+    """带明文凭据就此为止 —— 不是我们的裁决,是 GitLab 一定会拒。"""
+    hits = pkg.scan_secrets(root, entries)
+    if not hits:
+        return
+    where = "、".join(f"{h['file']}:{h['line']}" for h in hits[:3])
+    raise HTTPException(
+        status.HTTP_400_BAD_REQUEST,
+        f"包里有明文凭据({where}),GitLab 不会接收这个包。请删掉凭据、改用环境变量或"
+        f"配置文件后重新上传。共命中 {len(hits)} 处。",
+    )
+
+
+def _audit_text(inspection: pkg.Inspection, launch: str | None) -> str:
+    """交给判定器的"作者自称这个包做什么"。
+
+    传 README,并把上传者确认的启动命令附在后面:用户即将被提示词引导去执行那一行,它是
+    整个包里风险最集中的一句,判定器理应看到。README 缺失时传一句明确的占位而不是空串 ——
+    空串会让"声明与实现不符"这类检查永远不命中,而结论看起来仍然是"通过"。
+    """
+    parts: list[str] = []
+    if inspection.readme_text:
+        parts.append(inspection.readme_text)
+    else:
+        parts.append("（本包未提供 README，没有作者自述可供对照）")
+    if launch:
+        parts.append(f"\n\n---\n上传者声明的启动命令：`{launch}`")
+    return "".join(parts)
+
+
+def _audit_json(audit: AuditResult) -> dict:
+    """存进版本行的审计留痕。
+
+    存的是"当时我们知道什么":结论、覆盖度、哪些分析器跑了、哪些没跑成、策略指纹。下一次
+    上传写的是新的一行,不会覆盖这一份。
+    """
+    return {
+        "state": audit.state,
+        "verdict": audit.verdict,
+        "coverage": audit.coverage,
+        "cause": audit.cause,
+        "retryable": audit.retryable,
+        "reason": audit.reason,
+        "degraded": list(audit.degraded),
+        "incomplete": list(audit.incomplete),
+        "analyzersUsed": list(audit.analyzers_used),
+        "judgeModel": audit.judge_model,
+        "scannerVersion": audit.scanner_version,
+        "policyFingerprint": audit.policy_fingerprint,
+        "contentSha": audit.content_sha,
+        "findings": [
+            {
+                "source": f.source,
+                "category": f.category,
+                "severity": f.severity,
+                "detail": f.detail,
+                "file": f.file,
+                "line": f.line,
+                "remediation": f.remediation,
+                "ruleId": f.rule_id,
+            }
+            for f in audit.findings
+        ],
+        # 判定器原文留档:结论怎么来的,事后只能靠它回答。
+        "raw": (audit.raw or "")[:20000],
+    }
+
+
+def _inspection_out(ins: pkg.Inspection, *, artifact_name: str | None) -> dict:
+    """确认屏与审核页共用的一份事实。两处渲染同一个结构,免得两边讲得不一样。"""
+    d = ins.declared
+    launch = d.launch
+    return {
+        "artifactName": artifact_name,
+        "totalBytes": ins.total_bytes,
+        "fileCount": len(ins.files),
+        "topDir": ins.top_dir,
+        "readmePath": ins.readme_path,
+        "readmeText": ins.readme_text,
+        "files": [{"path": f.path, "size": f.size} for f in ins.files[:500]],
+        "filesTruncated": len(ins.files) > 500,
+        "executables": ins.executables[:100],
+        "envFiles": ins.env_files,
+        "hasGitDir": ins.has_git_dir,
+        "declared": {
+            "launch": launch,
+            "runtime": d.runtime,
+            "keep": d.keep,
+            "sources": d.sources,
+        },
+        "launchCandidates": ins.launch_candidates,
+        # 唯一的自动可用性检查:启动命令提到的文件在不在包里。找不到不代表错(可能是装出来
+        # 的 entry point),所以只是提示。
+        "launchTargetFound": pkg.launch_target_exists(launch, ins.files) if launch else None,
+    }
+
+
+# --- 体检(带进度) ---------------------------------------------------------
+
+
+@router.post("/inspect")
+async def inspect_package(
+    request: Request,
+    eid: str = Form(""),
+    name: str = Form(""),
+    file: UploadFile | None = File(None),
+    x_user_eid: str | None = Header(None),
+) -> StreamingResponse:
+    """解包体检 + 跑一次审计,什么都不存。
+
+    走事件流的理由和 skill 那条一样:审计要几十秒到几分钟,固定动画会先跑完,留下一个
+    满格的进度条和什么都没发生。顺带一个真好处:同一份内容在发布时会命中引擎的缓存
+    (它按内容哈希缓存),所以这一次不是白跑的。
+    """
+    eid_norm = acting_eid(request, eid or x_user_eid)
+    data = await _read_zip(file)
+    artifact_name = file.filename if file else None
+    tmp, entries, ins = _unpack(data)
+    try:
+        _secret_stop(tmp / "src", entries)
+    except HTTPException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+    facts = _inspection_out(ins, artifact_name=artifact_name)
+    audit_name = name.strip() or (ins.top_dir or artifact_name or "agent")
+    skill_md = _audit_text(ins, ins.declared.launch)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    events: queue.Queue = queue.Queue()
+
+    def run() -> AuditResult:
+        return audit_skill(
+            name=audit_name, skill_md=skill_md, artifact_bytes=data,
+            artifact_filename=artifact_name, uploader_eid=eid_norm or None,
+            on_progress=events.put,
+        )
+
+    async def stream():
+        loop = asyncio.get_running_loop()
+        task = loop.run_in_executor(None, run)
+        # 先把体检结果发出去:它是立刻就有的,用户可以一边看文件清单一边等审计。
+        yield _sse("package", facts)
+        yield _sse("stage", {"stage": "deterministic"})
+        while not task.done():
+            try:
+                stage = await loop.run_in_executor(None, events.get, True, 1.0)
+            except queue.Empty:
+                yield _sse("ping", {})
+                continue
+            yield _sse("stage", {"stage": stage})
+        try:
+            audit: AuditResult = await task
+        except Exception as exc:  # noqa: BLE001
+            log.exception("agent 包审计失败: %s", audit_name)
+            # 审计跑不成不拦上传,但绝不能显示成"通过"。
+            yield _sse("audit", {
+                "state": "unknown", "coverage": "none",
+                "reason": "审计未能完成", "kind": exc.__class__.__name__,
+                "findings": [], "blocking": False,
+            })
+            return
+        yield _sse("audit", {**_audit_json(audit), "blocking": False})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
+
+
+# --- 发布 ------------------------------------------------------------------
+
+
+def _resolve_category(db: Session, eid: str, category_id: str | None) -> tuple[str, str]:
+    """和 skill 上传同一条规则:空则按部门归组,未知/伪分类一律拒。"""
+    cid = (category_id or "").strip()
+    if not cid:
+        cid = group_for_eid(db, eid) or ""
+    if not cid:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "请选择一个分组:你的部门没有对应的分组。",
+        )
+    if cid in PSEUDO_CATEGORY_IDS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"'{cid}' 不是可上传的分组。")
+    row = db.get(RpAiCategory, cid)
+    if row is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"未知分组 '{cid}'。")
+    return cid, row.label
+
+
+def _ensure_user(db: Session, eid: str) -> None:
+    if db.get(RpAiPortal, eid) is None:
+        db.add(RpAiPortal(eid=eid))
+        db.flush()
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def publish_package(
+    request: Request,
+    db: Session = Depends(get_db),
+    eid: str = Form(""),
+    name: str = Form(...),
+    description: str | None = Form(None),
+    category_id: str | None = Form(None, alias="categoryId"),
+    tags: str | None = Form(None),
+    launch: str = Form(...),
+    runtime: str = Form("oneshot"),
+    keep: str | None = Form(None, description="JSON 数组或换行分隔"),
+    item_id: str | None = Form(None, alias="itemId"),
+    file: UploadFile | None = File(None),
+    x_user_eid: str | None = Header(None),
+) -> dict:
+    """建项目(或复用已有的)、推一版、写市场条目与版本行。
+
+    条目一律 `pending`:除上传者与 admin,别人看不到,也拿不到安装令牌。这是"审计不拦"之后
+    唯一真实的闸门,所以它必须是真的。
+    """
+    # 身份:签名的 JWT 优先(生产),表单字段与请求头只在 auth_enabled=false 时兜底。两者都收,
+    # 是因为市场那边的接口用头、skill 上传用表单字段,而这个端点同时被两种调用方式碰到。
+    acting = acting_eid(request, eid or x_user_eid)
+    if not acting:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少上传者身份")
+    if not settings.gitlab_user_agents_token:
+        # 早点说清楚:凭据没配的时候,包收下来也无处存,答 503 比收下再丢掉诚实。
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "上传 Agent 包所需的 GitLab 凭据未配置,请联系管理员。",
+        )
+    launch = launch.strip()
+    if not launch:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请填写启动命令")
+    if runtime not in pkg.RUNTIMES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"runtime 只能是 {pkg.RUNTIMES}")
+
+    data = await _read_zip(file)
+    artifact_name = file.filename if file else None
+    tmp, entries, ins = _unpack(data)
+    try:
+        _secret_stop(tmp / "src", entries)
+
+        existing = db.get(RpAiMarketItem, item_id) if item_id else None
+        if existing is not None and existing.creator and existing.creator != acting:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "只有原上传者可以上传这个 Agent 的新版本"
+            )
+        cid, category_label = _resolve_category(db, acting, category_id)
+        keep_list = _parse_keep(keep)
+        declared = pkg.Declared(launch=launch, runtime=runtime, keep=keep_list)
+
+        # 审计:结论只记录,不改流向。内容没变时会命中引擎缓存(体检那一步已经跑过)。
+        audit = audit_skill(
+            name=name, skill_md=_audit_text(ins, launch), artifact_bytes=data,
+            artifact_filename=artifact_name, uploader_eid=acting,
+        )
+
+        version = bump_minor(existing.version if existing else None)
+
+        # 自描述文件在 push 之前写进工作目录 —— 审的是上传的原始内容,发布的是它加这一个
+        # 文件。顺序反过来(审完再改包)意味着发出去的包不是审过的那一个。
+        src = tmp / "src"
+        sidecar_dir = src / ins.top_dir if ins.top_dir else src
+        (sidecar_dir / pkg.SIDECAR_NAME).write_text(
+            pkg.render_sidecar(declared, name=name, version=version), encoding="utf-8"
+        )
+
+        if existing is not None and existing.id.startswith("gl-"):
+            project = glw.ProjectRef(
+                id=int(existing.id[3:]),
+                path_with_namespace="",
+                web_url=existing.repo_url or "",
+                http_url=_http_url_from_web(existing.repo_url or ""),
+            )
+        else:
+            project = glw.create_project(
+                slug=_slug(name), name=name, description=description or None
+            )
+
+        try:
+            sha, tag = glw.publish_tree(
+                project, src, version=version,
+                message=f"{'upload' if existing is None else 'update'}({cid}): {name} v{version}",
+                tmp_root=tmp,
+            )
+        except glw.GitLabWriteError as exc:
+            if existing is None:
+                # 项目建好了但内容没推上去 —— 留下一个空项目会让下次同名上传撞路径,而且
+                # 没人看得出它是半成品。归档掉,让失败干净地结束。
+                try:
+                    glw.archive_project(project.id)
+                except glw.GitLabWriteError:
+                    log.warning("推送失败后归档项目 %s 也失败了", project.id)
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY if not isinstance(exc, glw.CredentialExpired)
+                else status.HTTP_503_SERVICE_UNAVAILABLE,
+                exc.detail,
+            ) from exc
+
+        _ensure_user(db, acting)
+        item = existing
+        if item is None:
+            item = RpAiMarketItem(id=project.item_id)
+            db.add(item)
+            item.creator = acting
+            item.source = "upload"
+            item.item_type = "agent"
+            # 上传出来的条目**就是**一个 code 服务:它有真实的仓库地址。"zip" 是它怎么来的,
+            # 不是它是什么 —— 所以那个轴上是 source,不是 service_type。这也让市场里
+            # 每一处 `serviceType === 'code' ? repoUrl : serviceUrl` 照旧成立。
+            item.service_type = "code"
+            item.repo_url = project.web_url
+            item.status = "pending"
+        item.name = name
+        if description is not None:
+            item.description = description
+        item.category_id = cid
+        item.category = category_label
+        item.tags = _parse_tags(tags)
+        item.author = item.author or acting
+        item.version = version
+        db.flush()
+
+        db.add(RpAiMarketItemVersion(
+            item_id=item.id, version=version, commit_sha=sha, tag=tag,
+            uploader_eid=acting, artifact_name=artifact_name, artifact_bytes=len(data),
+            metadata_json={"launch": launch, "runtime": runtime, "keep": keep_list},
+            audit_json=_audit_json(audit),
+        ))
+        db.commit()
+        db.refresh(item)
+
+        return {
+            "id": item.id,
+            "status": item.status,
+            "version": version,
+            "tag": tag,
+            "commitSha": sha,
+            "repoUrl": item.repo_url,
+            "reviewPath": f"/market/{item.id}/review",
+            "audit": {"state": audit.state, "coverage": audit.coverage,
+                      "findings": len(audit.findings), "blocking": False},
+        }
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _http_url_from_web(web_url: str) -> str:
+    return f"{web_url.rstrip('/')}.git" if web_url and not web_url.endswith(".git") else web_url
+
+
+def _slug(name: str) -> str:
+    import re
+
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    return (slug or f"agent-{uuid.uuid4().hex[:8]}")[:60]
+
+
+def _parse_tags(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(t).strip() for t in parsed if str(t).strip()]
+        except json.JSONDecodeError:
+            pass
+    return [t.strip() for t in raw.replace("，", ",").split(",") if t.strip()]
+
+
+def _parse_keep(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(k).strip() for k in parsed if str(k).strip()]
+        except json.JSONDecodeError:
+            pass
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+

@@ -1,5 +1,6 @@
-"""Agent市场 endpoints: list, manual create, GitLab sync, download, delete."""
+"""Agent市场 endpoints: list, manual create, GitLab sync, download, review, delete."""
 import io
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
@@ -11,10 +12,20 @@ from app.database import get_db
 from app.models.market import RpAiMarketItem
 from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
-from app.schemas.market import MarketItemCreate, MarketItemRead, MarketSyncResult
+from app.models.market_version import RpAiMarketItemVersion
+from app.models.user import RpAiPortal
+from app.schemas.market import (
+    MarketItemCreate,
+    MarketItemRead,
+    MarketItemVersionRead,
+    MarketReviewDecision,
+    MarketReviewRead,
+    MarketSyncResult,
+)
+from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.auth_tokens import create_scoped_token
-from app.services.eids import normalize_eid
+from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
     GitLabError,
@@ -53,13 +64,25 @@ def _norm_repo(url: str | None) -> str:
 
 @router.get("", response_model=list[MarketItemRead])
 def list_items(
+    request: Request,
     db: Session = Depends(get_db),
     category_id: str | None = Query(None, alias="categoryId"),
     item_type: str | None = Query(None, alias="itemType"),
     service_type: str | None = Query(None, alias="serviceType"),
     q: str | None = Query(None),
+    x_user_eid: str | None = Header(None),
 ) -> list[RpAiMarketItem]:
+    """列出市场条目,只包含请求者看得到的那些。
+
+    上传的 agent 包在被批准之前是 ``pending``:除上传者和 admin,任何人都看不到。审计只出
+    结论不拦截之后,这条规则**就是**唯一的闸门,所以它必须落在数据层,而不是靠界面不显示。
+    """
     stmt = select(RpAiMarketItem)
+    requester = acting_eid(request, x_user_eid)
+    if requester != settings.audit_admin_eid:
+        stmt = stmt.where(
+            (RpAiMarketItem.status == "approved") | (RpAiMarketItem.creator == requester)
+        )
     if category_id and category_id != "all":
         stmt = stmt.where(RpAiMarketItem.category_id == category_id)
     if item_type:
@@ -74,6 +97,22 @@ def list_items(
     items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
     _attach_stats(db, items)
     return items
+
+
+def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
+    """待审核的包只有上传者与 admin 能取。
+
+    这道闸门在两个地方都要有(打包下载、发安装令牌),因为它们是两条独立的取件路径。列表里
+    看不见不算闸门:条目 id 是可猜的(``gl-<项目id>``),而"看不见"和"取不到"是两件事。
+    """
+    if item.status == "approved":
+        return
+    if requester and (requester == item.creator or requester == settings.audit_admin_eid):
+        return
+    raise HTTPException(
+        status.HTTP_403_FORBIDDEN,
+        "这个 Agent 还在等待审核,通过之后才能安装。",
+    )
 
 
 def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
@@ -144,8 +183,8 @@ def record_download(
     # Identity comes from the JWT (set by the auth middleware), falling back to
     # the query param only when auth is off in dev. The middleware's whole point
     # is that handlers stop trusting a client-supplied eid.
-    caller_eid = getattr(request.state, "eid", None) or eid
-    downloader = normalize_eid(caller_eid) or None
+    downloader = acting_eid(request, eid)
+    _require_installable(item, downloader)
     db.add(
         RpAiMarketDownload(
             item_id=item_id,
@@ -193,6 +232,7 @@ def create_install_token(
     item_id: str,
     request: Request,
     db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
 ) -> dict:
     """Mint a short-lived token that can fetch **this one** archive and nothing else.
 
@@ -222,7 +262,10 @@ def create_install_token(
             "该项目不是从 GitLab 同步来的，没有可下载的代码包；请改用它的仓库地址",
         )
 
-    eid = getattr(request.state, "eid", None)
+    # 身份走 acting_eid:签名的 JWT 优先,客户端声明只在 auth_enabled=false 时兜底。此前这里
+    # 只读 request.state,于是在那个模式下**谁都没有身份**,连上传者也取不到自己那份待审的包。
+    eid = acting_eid(request, x_user_eid)
+    _require_installable(item, eid)
     project_id = item.id[3:]
 
     # The path is built here, from the item we just loaded — it is never taken
@@ -232,6 +275,22 @@ def create_install_token(
     # leave the browser and live in shell history and agent transcripts.
     path = f"{router.prefix}/{item.id}/download"
     token, expires_in = create_scoped_token(eid or "", path, method="POST")
+
+    # 上传的包有确认过的启动信息,同步来的没有。
+    #
+    # 这一段是安装提示词的来源。此前提示词让对方的 agent 去 README 里"原样抄"启动命令,并写
+    # 明"找不到就问我,不要猜" —— 因为同步来的仓库我们确实不知道怎么启动它。上传这条路上
+    # 我们是知道的:上传者在确认屏里核对过。把它原文带上,猜错这件事就不存在了。
+    #
+    # `runtime` 同理:提示词原来无条件写"跑起来会弹出浏览器窗口、不要关掉",那对一次性脚本
+    # 是错的,而错在这种地方的提示会让人怀疑整段说明。
+    latest = db.scalars(
+        select(RpAiMarketItemVersion)
+        .where(RpAiMarketItemVersion.item_id == item.id)
+        .order_by(RpAiMarketItemVersion.id.desc())
+        .limit(1)
+    ).first()
+    meta = (latest.metadata_json or {}) if latest else {}
     return {
         "token": token,
         "expiresIn": expires_in,
@@ -240,19 +299,32 @@ def create_install_token(
         # Lets a re-install skip the whole unpack when the code has not changed.
         # ``None`` when GitLab could not be asked — the caller then reinstalls,
         # which is the pre-existing behaviour, so this never blocks anything.
-        "version": fetch_head_commit_sha(project_id),
+        # 上传的包用语义版本(1.1.0),那也是写进 .installed-version 的值 —— 一个人看得懂的
+        # 版本号,而不是一串 sha。
+        "version": (latest.version if latest else None) or fetch_head_commit_sha(project_id),
+        "launch": meta.get("launch") or None,
+        "runtime": meta.get("runtime") or None,
+        "keep": meta.get("keep") or [],
     }
 
 
 @router.post("", response_model=MarketItemRead, status_code=status.HTTP_201_CREATED)
 def create_item(
     payload: MarketItemCreate,
+    request: Request,
     db: Session = Depends(get_db),
     x_user_eid: str | None = Header(None),
 ) -> RpAiMarketItem:
-    """Manual upload: Code (repo url) or Cloud (service url), Tool or Agent."""
-    creator = normalize_eid(x_user_eid)
-    if payload.item_type == "ai-platform" and creator != "ADMINMM":
+    """Manual upload: Code (repo url) or Cloud (service url), Tool or Agent.
+
+    Identity via ``acting_eid``: the signed token decides and the header is only
+    the fallback for ``auth_enabled=false``. Reading the header directly (what
+    this did) meant any signed-in user could send ``X-User-Eid: ADMINMM`` and
+    take the admin branch — the gate validated a token and then authorised on a
+    value the caller typed.
+    """
+    creator = acting_eid(request, x_user_eid)
+    if payload.item_type == "ai-platform" and creator != settings.audit_admin_eid:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "只有管理员可以创建 AI Platform 类型"
         )
@@ -294,14 +366,17 @@ def create_item(
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_item(
     item_id: str,
+    request: Request,
     db: Session = Depends(get_db),
     x_user_eid: str | None = Header(None),
 ) -> None:
     item = db.get(RpAiMarketItem, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
-    requester = normalize_eid(x_user_eid)
-    is_admin = requester == "ADMINMM"
+    # Same reason as create_item: authorise on the verified identity, not on a
+    # header the caller controls.
+    requester = acting_eid(request, x_user_eid)
+    is_admin = requester == settings.audit_admin_eid
     if not is_admin and item.creator and requester != item.creator:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admin or creator can delete")
     db.delete(item)
@@ -312,6 +387,7 @@ def delete_item(
 def update_item(
     item_id: str,
     payload: MarketItemCreate,
+    request: Request,
     db: Session = Depends(get_db),
     x_user_eid: str | None = Header(None),
 ) -> RpAiMarketItem:
@@ -320,8 +396,8 @@ def update_item(
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
 
-    requester = normalize_eid(x_user_eid)
-    is_admin = requester == "ADMINMM"
+    requester = acting_eid(request, x_user_eid)
+    is_admin = requester == settings.audit_admin_eid
     if not is_admin and item.creator and requester != item.creator:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "只有创建者本人可以编辑")
 
@@ -375,6 +451,127 @@ def _upsert_project(
     if not item.version:
         item.version = "1.0"
     return created
+
+
+@router.get("/{item_id}/versions", response_model=list[MarketItemVersionRead])
+def list_item_versions(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> list[RpAiMarketItemVersion]:
+    """Version history of an uploaded agent package, newest first."""
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    requester = acting_eid(request, x_user_eid)
+    # Same rule as the list: a package awaiting review is nobody else's business.
+    if item.status != "approved" and requester not in (
+        item.creator, settings.audit_admin_eid
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+    rows = list(
+        db.scalars(
+            select(RpAiMarketItemVersion)
+            .where(RpAiMarketItemVersion.item_id == item_id)
+            .order_by(RpAiMarketItemVersion.id.desc())
+        ).all()
+    )
+    return rows
+
+
+@router.get("/{item_id}/review", response_model=MarketReviewRead)
+def get_review(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> MarketReviewRead:
+    """Assemble what a reviewer needs to decide.
+
+    The audit does not block anything, so the person reading this page is the
+    only gate. That is why the file list comes from GitLab live and the compare
+    link is real: an approval based on a summary someone else wrote is a rubber
+    stamp. What is *not* real yet is the scored review — there is no reviewing
+    backend, and the page says so rather than showing an empty verdict.
+    """
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    requester = acting_eid(request, x_user_eid)
+    if item.status != "approved" and requester not in (
+        item.creator, settings.audit_admin_eid
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+
+    versions = list(
+        db.scalars(
+            select(RpAiMarketItemVersion)
+            .where(RpAiMarketItemVersion.item_id == item_id)
+            .order_by(RpAiMarketItemVersion.id.desc())
+        ).all()
+    )
+    files: list[dict] = []
+    files_error: str | None = None
+    compare: str | None = None
+    if item.id.startswith("gl-") and versions:
+        ref = versions[0].tag or "HEAD"
+        try:
+            files = [
+                {"path": e.get("path"), "name": e.get("name")}
+                for e in glw.list_tree(item.id[3:], ref)
+            ]
+        except glw.GitLabWriteError as exc:
+            # Say why instead of showing an empty list: "this package has no
+            # files" and "we could not ask GitLab" must not look the same to
+            # someone deciding whether to publish it.
+            files_error = exc.detail
+        if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
+            compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
+
+    uploader = db.get(RpAiPortal, item.creator) if item.creator else None
+    _attach_stats(db, [item])
+    return MarketReviewRead(
+        item=MarketItemRead.model_validate(item, from_attributes=True),
+        versions=[
+            MarketItemVersionRead.model_validate(v, from_attributes=True) for v in versions
+        ],
+        files=files,
+        files_error=files_error,
+        compare_url=compare,
+        project_url=item.repo_url,
+        uploader_name=(uploader.display_name if uploader else None) or item.creator,
+    )
+
+
+@router.post("/{item_id}/review", response_model=MarketItemRead)
+def decide_review(
+    item_id: str,
+    payload: MarketReviewDecision,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiMarketItem:
+    """Approve or reject an uploaded package. Admin only, and recorded.
+
+    This is the interim mechanism: there is no reviewing workflow yet, so one
+    person flips the state. Recording *who* and *when* is the part that must not
+    wait for that workflow — with the audit reporting only, this decision is the
+    whole gate, and "who let this in" has to be answerable afterwards.
+    """
+    requester = acting_eid(request, x_user_eid)
+    if requester != settings.audit_admin_eid:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "只有管理员可以审核")
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
+    item.status = payload.status
+    item.reviewed_by = requester
+    item.reviewed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    _attach_stats(db, [item])
+    return item
 
 
 @router.post("/sync", response_model=MarketSyncResult)

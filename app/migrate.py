@@ -40,6 +40,12 @@ COLUMNS = [
     ("rp_ai_skill_finding", "line", "INT NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),
     ("rp_ai_market_item", "creator", "VARCHAR(64) NULL"),
+    # Review gate for uploaded packages. DEFAULT 'approved' on purpose: the
+    # column is new, every existing item was already in the market, and a
+    # default of 'pending' would empty it on the next deploy.
+    ("rp_ai_market_item", "status", "VARCHAR(16) NOT NULL DEFAULT 'approved'"),
+    ("rp_ai_market_item", "reviewed_by", "VARCHAR(64) NULL"),
+    ("rp_ai_market_item", "reviewed_at", "DATETIME NULL"),
     ("rp_ai_skill_download", "eid", "VARCHAR(64) NULL"),
     # Department snapshots for group-level reporting (see services/usage.py).
     ("rp_ai_skill_download", "department", "VARCHAR(64) NULL"),

@@ -64,6 +64,18 @@ class Settings(BaseSettings):
     # Subgroup full paths whose projects become Agents / Tools respectively.
     gitlab_agents_group: str = "rp-ai/rp-ai-agents"
     gitlab_tools_group: str = "rp-ai/rp-ai-tools"
+
+    # --- GitLab (用户上传的 Agent 包) ----------------------------------------
+    # 每个上传的 agent 在这个组下有自己的项目。**独立于上面那个 token**:上面那个是
+    # 个人 PAT、全域读写、要读 sync 的两个组;这个是该组的 group access token
+    # (Owner + api,write_repository),作用域只有这一个组。合成一个的代价是给"上传
+    # agent"配上全域写权限,而分开的代价只是多一个变量。
+    gitlab_user_agents_group: str = "rp-ai/rp-ai-user-agents"
+    # 空 = 关闭 zip 上传(端点答 503 并说明原因,而不是把包丢掉)。
+    gitlab_user_agents_token: str = ""
+    # 该 token 的到期日,只用于提前提醒。GitLab 强制 group token 有到期日,所以这是
+    # 一个**已知的将来故障**:不预告的话,那天上传会突然 401,而现象离原因很远。
+    gitlab_user_agents_token_expires: str = "2027-08-20"
     # Verify TLS when calling the GitLab API (internal certs may be self-signed).
     gitlab_verify_tls: bool = False
 

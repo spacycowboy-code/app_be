@@ -12,6 +12,7 @@ from app.version import __version__
 from app.services.auth_tokens import TokenError, check_token_scope, decode_token
 from app.services.audit_engine import BundleTooLarge
 from app.routers import (
+    agent_upload,
     audit,
     auth,
     categories,
@@ -171,6 +172,7 @@ app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
 app.include_router(market.router)
+app.include_router(agent_upload.router)
 app.include_router(usage.router)
 
 

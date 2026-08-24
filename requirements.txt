@@ -9,6 +9,9 @@ pydantic-settings==2.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20
 detect-secrets==1.5.0
+# 读/写 agent 包里的 portal-agent.yaml(自描述文件)。此前是 detect-secrets 的
+# 传递依赖,既然直接 import 就直接声明:传递依赖会随上游改动消失。
+PyYAML==6.0.3
 # LDAP (Active Directory) authentication + JWT session tokens.
 ldap3==2.9.1
 PyJWT==2.10.1
