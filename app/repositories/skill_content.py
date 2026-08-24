@@ -310,6 +310,11 @@ def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
         return _fetch(f"archive.zip?sha={urllib.parse.quote(ref, safe='')}"
                       f"&path={urllib.parse.quote(prefix, safe='')}")
     blob = _cached(ref, f"tree-bytes:{prefix}", produce)
+    if not blob:
+        # 实测:归档接口对不存在的目录返回 **HTTP 200 + 空响应体**,不是 404(tree 接口才返回 404)。
+        # 空响应体是无歧义的,有效 zip 不可能是 0 字节 —— 所以这里能安全地区分"不存在"和"坏了",
+        # 而调用方要靠这个区分"技能被删了"和"上游故障"。
+        raise NotFound(f"{prefix} 在 {ref[:12]} 下不存在")
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
             mapping = _strip_wrapper(zf.namelist(), prefix)
