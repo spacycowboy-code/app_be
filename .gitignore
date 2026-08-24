@@ -13,6 +13,13 @@ env/
 
 # Environment / secrets
 .env
+# 编辑器的交换/备份文件。这一条不是洁癖:vim 编辑 .env 时会在同目录留下 .env.swp,里面是
+# 那个文件的完整内容 —— 也就是同一批密钥,只是文件名不同。`.env` 被忽略而它没有,一次
+# `git add -A` 就能把密钥提交上去。
+*.swp
+*.swo
+*~
+*.bak
 
 # IDE
 .idea/

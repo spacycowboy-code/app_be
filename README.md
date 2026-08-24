@@ -96,6 +96,24 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 
 ## 构建与部署
 
+## 提交前扫一遍密钥
+
+```bash
+.venv/bin/python -m detect_secrets scan --baseline .secrets.baseline
+```
+
+`.secrets.baseline` 记着**已经看过、确认不是密钥**的那 8 处,所以这条命令只会报新出现的东西。
+远端还有一道 pre-receive 扫描,但它目前只警告不拒绝 —— 一个没人处理的警告,就是下一次真泄露被放过
+的方式,所以在本地先挡一层。
+
+那 8 处逐行核对过,都是示例或测试夹具:`.gitlab-ci.yml` 里 CI 一次性数据库的 `ci:ci@localhost`、
+`app/config.py` 注释里的 `user:pass@host` 格式示例、以及 6 处测试用的签名密钥与请求体里的
+`"password": "pw"` 之类。**baseline 不会掩盖新的密钥**:验证过,往仓里放一个 AWS key 格式的字符串,
+带 baseline 复扫照样报出来。
+
+写测试用的假凭据时,把它拼出来而不是写成字面量(`"glpat-" + "…"`):否则扫描器会拦下这次提交,而它
+拦的恰好是"验证凭据检测"的那个测试。
+
 本仓不含 Dockerfile 与 compose:流水线来自共享模板,部署由环境描述决定。
 
 | 我要做什么 | 去哪 |

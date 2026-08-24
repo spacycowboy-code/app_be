@@ -10,7 +10,7 @@ closed, which means each failure of the audit *itself* is paid for by a reviewer
 One such failure is an incident; a steady stream is our outage — and on a single record the two
 look identical. This is the query that tells them apart.
 """
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.audit import RpAiSkillAuditRecord
-from app.services import audit_engine
+from app.services import audit_engine, reporting_windows
 from app.services.skill_audit.reconcile import reconcile_all
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
@@ -59,7 +59,14 @@ def health(
       forgot to set them. Counted separately rather than folded into a bucket, because a
       growing number here means the measurement itself is degrading.
     """
-    since = datetime.utcnow() - timedelta(days=days)
+    # 窗口边界要用**库的时钟**算。`created_at` 由数据库写(`server_default=func.now()`),存的是
+    # DB 服务器本地时间的 naive 值 —— 而这台库的时钟是 UTC+2(`db_utc_offset()`)。原来这里用
+    # `datetime.utcnow()`,于是拿一个 UTC 边界去比 DB 本地的时间戳,窗口整体偏两小时:七天的统计
+    # 里不显眼,但这个端点存在的意义就是把"审计过得怎么样"变成数字,而偏移过的数字比没有更糟。
+    #
+    # 同仓已有约定,`usage.py` 的同类端点就是这么写的;顺带也去掉了 utcnow() 的弃用警告
+    # (Python 3.12 起弃用,将来会被移除)。
+    since = reporting_windows.db_now() - timedelta(days=days)
     rows = db.execute(
         select(RpAiSkillAuditRecord.state, RpAiSkillAuditRecord.coverage,
                RpAiSkillAuditRecord.cause, func.count())
