@@ -305,3 +305,22 @@ def test_a_server_error_is_not_reported_as_missing(monkeypatch):
     with pytest.raises(skill_content.ContentUnavailable) as e:
         skill_content.read("a" * 40, "team/x/SKILL.md")
     assert not isinstance(e.value, skill_content.NotFound), "502 被当成了不存在"
+
+
+def test_an_empty_archive_body_means_the_path_does_not_exist(monkeypatch):
+    """实测:归档接口对不存在的目录返回 HTTP 200 + 空响应体,不是 404。
+
+    验收时撞出来的:`store()` 靠 NotFound 判断"这是新建",而空响应体原来被当成"坏掉的 zip"抛
+    ContentUnavailable,于是新技能第一次上传就失败。空响应体无歧义 —— 有效 zip 不可能 0 字节。
+    """
+    monkeypatch.setattr(skill_content, "_fetch", _fake_fetch({"archive.zip": b""}, []))
+    with pytest.raises(skill_content.NotFound):
+        skill_content.read_tree("e" * 40, "team/nope")
+
+
+def test_a_non_empty_non_zip_body_is_still_reported_as_broken(monkeypatch):
+    monkeypatch.setattr(skill_content, "_fetch",
+                        _fake_fetch({"archive.zip": b"<html>oops</html>"}, []))
+    with pytest.raises(skill_content.ContentUnavailable) as e:
+        skill_content.read_tree("f" * 40, "team/x")
+    assert not isinstance(e.value, skill_content.NotFound), "坏掉的归档被当成了不存在"

@@ -381,8 +381,8 @@ async def upload_skill(
     skill.image = _category_image(category_id)
     if parsed_tags:
         skill.tags = parsed_tags
-    if definition is not None:
-        skill.instructions = definition
+    # 不再写 instructions 这一列:正文的权威在仓库,详情接口按引用读。留着写会长出第二份会漂的
+    # 副本,而且没有任何重算路径。列本身等一次迁移再删。
     skill.version = result.version
     skill.storage_path = result.storage_path
     skill.repo_commit = result.commit_sha

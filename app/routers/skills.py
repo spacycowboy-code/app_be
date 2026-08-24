@@ -36,6 +36,7 @@ from app.services.skill_manifest import (
     has_name_and_description,
     parse_frontmatter,
     render_skill_md,
+    with_frontmatter,
 )
 from app.services.archives import common_top_dir
 from app.services.skill_storage import sanitize_segment, skill_storage
@@ -208,7 +209,7 @@ def list_skills(
 
 
 @router.get("/{skill_id}", response_model=SkillRead)
-def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
+def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill = _get_skill_or_404(db, skill_id)
     skill.favorite_count = db.scalar(
         select(func.count())
@@ -224,7 +225,16 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> RpAiSkill:
     skill.content_updated_at = _content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
-    return skill
+    # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
+    #
+    # 先把模型构出来再改字段,不给 ORM 对象赋值:`instructions` 是真列,赋值会把 session 弄脏,
+    # 有可能被写回数据库。
+    #
+    # 读不到就 503,和 `/markdown` 一致:这时候页面本来也显示不出正文(它走的就是 `/markdown`),
+    # 而把这一格填成空会让复核界面把"读不到"算成"这个技能没写文档"。
+    out = SkillRead.model_validate(skill)
+    out.instructions = _read_skill_md(skill) if skill.storage_path else None
+    return out
 
 
 @router.get("/{skill_id}/markdown")
@@ -459,10 +469,19 @@ async def update_skill(
             skill.name = fm_name
         if fm_desc is not None:
             skill.description = fm_desc
-        skill.instructions = content
+        # 同上:不再写 instructions。
         md_content = content
     else:
-        md_content = render_skill_md(skill)
+        # 只改了元数据:正文取仓库里现有的那一份,按引用读。
+        #
+        # 原来这里用 `render_skill_md(skill)`,它读 `skill.instructions`;那一列不再写之后它会
+        # 走到"用 name/description 合成一个正文"的回落上 —— 于是这次审计审的是一份合成出来的东西,
+        # 而不是仓库里真正存着的内容,审计结论也就不对应任何真实内容。
+        md_content = _read_skill_md(skill)
+        if not has_name_and_description(md_content):
+            # 仓库里那份没有 frontmatter(老内容):补上当前的 name/description 再送审,
+            # 与上传路径的处理一致。
+            md_content = with_frontmatter(md_content, skill.name, skill.description)
 
     db.flush()  # make edited fields/children visible for manifest building
 
