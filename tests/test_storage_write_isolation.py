@@ -113,10 +113,26 @@ def test_rejected_content_is_never_written(published):
     assert seen == {}, "审计拒绝的内容却发出了写请求"
 
 
-def test_an_existing_skill_is_written_with_the_ref_it_was_read_at(published):
-    """已存在的技能必须带前置条件:不带就是静默覆盖。"""
-    storage, seen = published
-    _store(storage, existing_storage_path="cat/s1_EUSER_Some_Skill")
+def test_content_that_already_exists_is_written_with_the_ref_it_was_read_at(monkeypatch):
+    """仓库里已经有内容时必须带前置条件:不带就是静默覆盖。
+
+    判断依据是仓库里有没有,不是数据库有没有那一行 —— 见
+    `test_whether_it_is_a_create_or_an_update_follows_the_repo`。
+    """
+    seen: dict = {}
+    monkeypatch.setattr(skill_content, "head_ref", lambda branch=None: "h" * 40)
+    monkeypatch.setattr(skill_content, "read_tree",
+                        lambda ref, prefix: {"SKILL.md": "# there\n".encode()})
+    monkeypatch.setattr(skill_content, "tag", lambda **kw: True)
+
+    def fake_publish(*, prefix, files, expect, branch, message, start_branch=None):
+        seen.update(expect=expect)
+        return "n" * 40
+
+    monkeypatch.setattr(skill_content, "publish", fake_publish)
+    monkeypatch.setattr(
+        "app.services.skill_storage.settings.skill_repo_branch", LIVE, raising=False)
+    _store(SkillStorage(), existing_storage_path="cat/s1_EUSER_Some_Skill")
     assert seen["expect"] == "h" * 40
 
 
@@ -124,3 +140,31 @@ def test_a_brand_new_skill_has_nothing_to_base_on(published):
     storage, seen = published
     _store(storage)
     assert seen["expect"] is None
+
+def test_whether_it_is_a_create_or_an_update_follows_the_repo(monkeypatch):
+    """仓库里已经有这个目录时,即使数据库没有那一行,也要按更新写。
+
+    今天之前被删过的技能就是这种情形:那时的删除只删数据库那一行,内容留在仓库里。按新建去写会撞上
+    400 "A file with this name already exists",而调用方看到的是"暂时无法读写技能仓",找不到真实原因。
+    """
+    seen: dict = {}
+    monkeypatch.setattr(skill_content, "head_ref", lambda branch=None: "h" * 40)
+    monkeypatch.setattr(skill_content, "read_tree",
+                        lambda ref, prefix: {"SKILL.md": "# already there\n".encode()})
+    monkeypatch.setattr(skill_content, "tag", lambda **kw: True)
+
+    def fake_publish(*, prefix, files, expect, branch, message, start_branch=None):
+        seen.update(expect=expect, start_branch=start_branch)
+        return "n" * 40
+
+    monkeypatch.setattr(skill_content, "publish", fake_publish)
+    monkeypatch.setattr(
+        "app.services.skill_storage.settings.skill_repo_branch", LIVE, raising=False)
+
+    SkillStorage().store(
+        skill_id="s1", eid="EUSER", name="Some Skill", category_slug="cat",
+        manifest={"name": "Some Skill"}, instructions="# new\n",
+        artifact_bytes=None, artifact_filename=None, current_version=None,
+        existing_storage_path=None,
+        audit=AuditResult(state="pass", verdict="pass"))
+    assert seen["expect"] == "h" * 40, "仓库里已经有内容,却按新建写(不带前置条件)"

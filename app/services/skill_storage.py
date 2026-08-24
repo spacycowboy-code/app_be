@@ -123,7 +123,14 @@ class SkillStorage:
         # "把这期间合入的东西全 revert 掉" —— GitLab 要么报冲突(运气好),要么干净地合并并悄悄
         # 撤掉已经复核通过的工作。
         base = skill_content.head_ref(live)
-        before = skill_content.read_tree(base, rel) if existing_storage_path else {}
+        # 这是新建还是更新,**看仓库里有没有,不看数据库有没有那一行**。内容的权威在仓库:
+        # 数据库说没有而仓库里有(例如今天之前被删过的技能 —— 那时只删行、内容留着),按"新建"
+        # 去写会撞上 400 "A file with this name already exists",而调用方看到的是"暂时无法读写
+        # 技能仓",找不到真实原因。
+        try:
+            before = skill_content.read_tree(base, rel)
+        except skill_content.NotFound:
+            before = {}
 
         # 版本号从**仓库里那份 manifest** 推,不从数据库加一:两个并发发布从数据库加一会算出同一个
         # 版本号,而 tag 冲突时代码是默默跳过 —— 两份不同内容共用一个版本号,没人知道。
@@ -190,7 +197,7 @@ class SkillStorage:
         sha = skill_content.publish(
             prefix=rel,
             files=files,
-            expect=base if existing_storage_path else None,
+            expect=base if before else None,
             branch=target_branch if on_branch else live,
             message=commit_msg,
             start_branch=live if on_branch else None,
