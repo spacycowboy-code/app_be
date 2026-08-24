@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from app.config import get_settings
 from app.database import SessionLocal
 from app.models.market import RpAiMarketItem
 from app.models.market_version import RpAiMarketItemVersion
@@ -84,7 +85,14 @@ def test_download_refuses_pending_for_others(client) -> None:
 
 
 def test_owner_can_install_own_pending_package(client, monkeypatch) -> None:
-    """上传者得能装自己那份待审的包 —— 不然他没法验证自己传上去的东西。"""
+    """上传者得能装自己那份待审的包 —— 不然他没法验证自己传上去的东西。
+
+    这里要显式给一个签名密钥:发安装令牌要签 JWT。不给的话,本地会静默借用开发机 `.env` 里的
+    `AUTH_JWT_SECRET` 而通过,在 CI 上(没有 `.env`)则 `RuntimeError: auth_jwt_secret is not
+    configured` —— 一个"在我机器上是好的"的测试比没有这个测试更糟。
+    """
+    monkeypatch.setenv("AUTH_JWT_SECRET", "review-gate-test-secret")
+    get_settings.cache_clear()
     _seed()
     monkeypatch.setattr(
         "app.routers.market.fetch_head_commit_sha", lambda *a, **k: "deadbeef"
@@ -92,6 +100,8 @@ def test_owner_can_install_own_pending_package(client, monkeypatch) -> None:
     r = client.post(f"/api/market/{ITEM_ID}/install-token", headers={"X-User-Eid": OWNER})
     assert r.status_code == 200
     assert r.json()["path"] == f"/api/market/{ITEM_ID}/download"
+    # 设过的 settings 不留给后面的测试:缓存里那份带着这里的密钥。
+    get_settings.cache_clear()
 
 
 def test_versions_are_owner_or_admin_only_while_pending(client) -> None:

@@ -14,11 +14,28 @@ from types import SimpleNamespace
 from app.services import gitlab_projects as glw
 
 
+PROXY_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+
+
 def test_proxy_variables_are_dropped(monkeypatch) -> None:
-    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY"):
+    for var in PROXY_VARS:
         monkeypatch.setenv(var, "http://http-proxy.example:8080")
     env = glw._git_env()
-    assert not [k for k in env if "proxy" in k.lower()], "代理变量必须清掉,否则推不上去"
+    # 按名字逐个断言,而不是"任何含 proxy 的键都不许有":GitLab 的 runner 会导出
+    # CI_DEPENDENCY_PROXY_*(容器镜像代理,和 git 的 HTTP 代理无关),那条宽泛的断言在 CI 上
+    # 必然失败 —— 本地能过只是因为本地没有那些变量。
+    left = [v for v in PROXY_VARS if v in env]
+    assert not left, f"这些代理变量必须清掉,否则推不上去:{left}"
+
+
+def test_unrelated_variables_named_proxy_are_left_alone(monkeypatch) -> None:
+    """只清真正会影响 git 的那几个,别顺手清掉别人的东西。
+
+    CI 上 `CI_DEPENDENCY_PROXY_PASSWORD` 之类是 runner 给的,拉基础镜像要用;git 用不到它们,
+    但把它们抹掉是替别人做决定。
+    """
+    monkeypatch.setenv("CI_DEPENDENCY_PROXY_SERVER", "gitlab.example:443")
+    assert glw._git_env()["CI_DEPENDENCY_PROXY_SERVER"] == "gitlab.example:443"
 
 
 def test_the_rest_of_the_environment_survives(monkeypatch) -> None:
