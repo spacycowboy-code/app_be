@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import get_settings
@@ -136,7 +135,6 @@ class SkillStorage:
                 version_in_repo = json.loads(raw_manifest.decode("utf-8")).get("version")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 version_in_repo = None
-        version = bump_minor(version_in_repo or current_version)
 
         # 声明这个目录**应有的全部内容**:先带上原有的文件,再覆盖这次要改的。不这么做的话,
         # publish 会把没出现的文件(作者的脚本、参考资料)当成"要删掉"。
@@ -156,6 +154,26 @@ class SkillStorage:
             kept = sorted(k for k in files if k.startswith("artifacts/"))
             artifact_name = Path(kept[0]).name if kept else None
 
+        # 内容没变就不发新版本。
+        #
+        # 判断只看**作者可见的内容**(SKILL.md 与附件),不看 manifest:manifest 里带着这次要写的版本号,
+        # 拿它一起比永远不相等,于是重传一次同样的内容也会涨一格版本、多一个提交。
+        # `publish` 里那道"内容一样就不提交"的闸因此永远够不到 —— 闸要放在算版本号之前。
+        def _authored(d: dict[str, bytes]) -> dict[str, bytes]:
+            return {k: v for k, v in d.items() if k != "manifest.json"}
+
+        if version_in_repo and _authored(before) == _authored(files):
+            return StoreResult(
+                storage_path=rel,
+                version=version_in_repo,
+                commit_sha=base,
+                tag=None,
+                artifact_name=artifact_name,
+                pushed=True,
+            )
+
+        version = bump_minor(version_in_repo or current_version)
+
         full_manifest = {
             **manifest,
             "id": skill_id,
@@ -163,7 +181,6 @@ class SkillStorage:
             "uploaderEid": eid,
             "categorySlug": category_slug,
             "artifactName": artifact_name,
-            "storedAt": datetime.now(timezone.utc).isoformat(),
         }
         files["manifest.json"] = json.dumps(
             full_manifest, ensure_ascii=False, indent=2
