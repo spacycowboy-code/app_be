@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from datetime import datetime
 
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.org_snapshot import RpAiOrgSnapshot
+from app.services.usage_report import graph_walk
 from app.services.usage_report import OrgSnapshotMissing, build_html
 
 logger = logging.getLogger(__name__)
@@ -113,19 +115,27 @@ def put_org_snapshot(
     reporting line would still render a report — one with plausible-looking head
     counts that are wrong, which is worse than no report.
     """
+    return _store_snapshot(db, payload, captured_at or datetime.now(), eid)
+
+
+def _store_snapshot(
+    db: Session, payload: dict, captured: datetime, eid: str
+) -> dict:
+    """Validate a walk and make it the one the report counts by.
+
+    Validated before anything is replaced. A snapshot that parses but has no
+    reporting line still renders a report — one with plausible head counts that are
+    wrong, which is worse than the report being unavailable. And a failed refresh
+    must leave the previous organisation in place: the reader would rather see
+    last week's structure than none.
+    """
     from app.services.usage_report import org_tree as org_tree_mod
 
-    # When the directory was read, not when it reached us. The report prints this
-    # and a reader uses it to judge how much the org structure may have moved since;
-    # stamping the upload time would have made a snapshot walked last week look like
-    # it was taken today.
-    captured = captured_at or datetime.now()
     try:
         tree = org_tree_mod.build(payload, captured)
     except Exception as exc:  # noqa: BLE001 - the payload is external input
         raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            f"这份快照解析不了：{exc}",
+            status.HTTP_422_UNPROCESSABLE_ENTITY, f"这份快照解析不了：{exc}"
         ) from exc
 
     people = tree.get("people") or {}
@@ -135,12 +145,12 @@ def put_org_snapshot(
             "这份快照里没有人。期望的是 Graph 的对象 id 到用户记录的映射，"
             "每条带 onPremisesSamAccountName、department、branch 和 manager_id。",
         )
-    placed = sum(1 for rec in people.values() if rec.get("branch"))
+    placed = sum(1 for record in people.values() if record.get("branch"))
     if not placed:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             f"这份快照里 {len(people)} 个人都没有 branch，无法归到任何二级部门。"
-            "抓取时应该记下汇报树走到的分支（见 tools/fetch_graph_tree.py）。",
+            "抓取时应该记下汇报树走到的分支。",
         )
 
     # Replaced, not appended: there is one current organisation, and a report that
@@ -156,13 +166,97 @@ def put_org_snapshot(
     )
     db.commit()
     logger.info("Org snapshot replaced by %s: %d people", eid, len(people))
-    # Echoed back so whoever pushed it can see the walk landed whole, rather than
-    # finding out from the report that it was short a few hundred people.
     return {
         "capturedAt": captured.isoformat(timespec="minutes"),
         "people": len(people),
         "placed": placed,
         "departments": sorted(
-            {str(rec["branch"]) for rec in people.values() if rec.get("branch")}
+            {str(r["branch"]) for r in people.values() if r.get("branch")}
         ),
     }
+
+
+@router.get(
+    "/department-report/org-snapshot",
+    summary="Which org structure the report is currently counting by",
+)
+def get_org_snapshot(
+    db: Session = Depends(get_db),
+    _eid: str = Depends(require_dashboard_eid),
+) -> dict:
+    """Metadata only. The page shows this next to the Sync button.
+
+    Without it the reader cannot tell whether a head count is from this morning or
+    from last quarter, which is the one thing about this report that goes stale.
+    """
+    row = (
+        db.query(RpAiOrgSnapshot).order_by(RpAiOrgSnapshot.id.desc()).limit(1).first()
+    )
+    if row is None:
+        settings = get_settings()
+        path = Path(settings.usage_report_org_snapshot or "")
+        if path.is_file():
+            return {
+                "present": True,
+                "source": "file",
+                "capturedAt": datetime.fromtimestamp(path.stat().st_mtime).isoformat(
+                    timespec="minutes"
+                ),
+                "people": None,
+                "uploadedBy": None,
+            }
+        return {"present": False, "source": None, "capturedAt": None, "people": None}
+    return {
+        "present": True,
+        "source": "database",
+        "capturedAt": row.captured_at.isoformat(timespec="minutes"),
+        "people": row.people,
+        "uploadedBy": row.uploaded_by,
+    }
+
+
+@router.post(
+    "/department-report/org-snapshot/refresh",
+    summary="Walk Graph now with a supplied token and store the result",
+)
+def refresh_org_snapshot(
+    body: dict = Body(..., description='{"token": "<a Graph access token>"}'),
+    db: Session = Depends(get_db),
+    eid: str = Depends(require_dashboard_eid),
+) -> dict:
+    """Read the organisation from Graph and make it the report's structure.
+
+    The token is supplied per request and used in memory only: it is a bearer
+    credential for the whole directory, so it is never stored, never logged, and
+    never accepted in the query string, where nginx would write it to an access log.
+
+    Synchronous. The walk takes one to two minutes against a real organisation,
+    which fits inside the 300s the API proxy allows, and the alternative — a task
+    table and polling — is a lot of machinery for a button pressed once a month.
+    """
+    token = str(body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "需要一个 Graph access token。可以在 Graph Explorer 的 Access token 页复制。",
+        )
+
+    settings = get_settings()
+    started = datetime.now()
+    try:
+        people = graph_walk.walk(token, settings.usage_report_org_root_id)
+    except graph_walk.GraphTokenRejected as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Graph 不接受这个 token。它大约一小时过期，请重新复制一个；"
+            "另外它需要能读目录（User.Read.All 或 Directory.Read.All）。",
+        ) from exc
+    except graph_walk.GraphWalkFailed as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"读取组织结构没有完成，原有快照保持不变：{exc}",
+        ) from exc
+
+    result = _store_snapshot(db, people, started, eid)
+    result["tookSeconds"] = round((datetime.now() - started).total_seconds(), 1)
+    return result

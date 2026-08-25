@@ -27,6 +27,7 @@ from app.models.download import RpAiSkillDownload
 from app.models.org_snapshot import RpAiOrgSnapshot
 from app.models.user import RpAiPortal
 from app.services.auth_tokens import create_token
+from app.services.usage_report import graph_walk
 
 SECRET = "usage-report-test-secret"
 
@@ -408,3 +409,126 @@ def test_the_report_shows_when_the_directory_was_read_not_when_it_was_uploaded(
 
     body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
     assert "2026-08-01 09:30" in body
+
+
+# --- syncing from Graph on request ------------------------------------------
+
+
+def test_sync_walks_graph_and_makes_the_result_the_report_structure(
+    client, monkeypatch
+):
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/x.json")
+    get_settings.cache_clear()
+    _seed_people()
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 503
+
+    seen: dict[str, str] = {}
+
+    def fake_walk(token: str, root_id: str, timeout: int = 120) -> dict:
+        seen["token"] = token
+        seen["root"] = root_id
+        return SNAPSHOT
+
+    monkeypatch.setattr(graph_walk, "walk", fake_walk)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "a-graph-token"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 200, response.text
+    assert seen["token"] == "a-graph-token"
+    assert response.json()["people"] == len(SNAPSHOT)
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 200
+
+
+def test_an_expired_token_says_so_and_keeps_the_old_structure(client, monkeypatch):
+    """The reader would rather see last week's departments than none."""
+    _seed_people()
+    client.put(
+        "/api/department-report/org-snapshot", json=SNAPSHOT, headers=_headers("EZHGMIO")
+    )
+
+    def rejected(token: str, root_id: str, timeout: int = 120) -> dict:
+        raise graph_walk.GraphTokenRejected("nope")
+
+    monkeypatch.setattr(graph_walk, "walk", rejected)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "stale"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 400
+    assert "过期" in response.json()["detail"]
+    # Still there, still usable.
+    with SessionLocal() as db:
+        assert db.query(RpAiOrgSnapshot).count() == 1
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 200
+
+
+def test_a_walk_that_breaks_partway_does_not_replace_anything(client, monkeypatch):
+    _seed_people()
+    client.put(
+        "/api/department-report/org-snapshot", json=SNAPSHOT, headers=_headers("EZHGMIO")
+    )
+    before = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+
+    def broken(token: str, root_id: str, timeout: int = 120) -> dict:
+        raise graph_walk.GraphWalkFailed("$batch failed after 4 attempts: HTTP 429")
+
+    monkeypatch.setattr(graph_walk, "walk", broken)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "x"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 502
+    assert "保持不变" in response.json()["detail"]
+    after = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    # Same organisation as before: only the generation timestamp may differ.
+    assert after.count("<h2") == before.count("<h2")
+
+
+def test_sync_needs_a_token(client):
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 422
+    assert "Graph access token" in response.json()["detail"]
+
+
+def test_only_the_configured_readers_may_sync(client):
+    assert (
+        client.post(
+            "/api/department-report/org-snapshot/refresh",
+            json={"token": "x"},
+            headers=_headers("ESOMEONE"),
+        ).status_code
+        == 403
+    )
+
+
+def test_the_page_can_report_which_structure_it_is_using(client, monkeypatch):
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/x.json")
+    get_settings.cache_clear()
+    empty = client.get(
+        "/api/department-report/org-snapshot", headers=_headers("EZHGMIO")
+    ).json()
+    assert empty["present"] is False
+
+    client.put(
+        "/api/department-report/org-snapshot?capturedAt=2026-08-20T08:00",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    got = client.get(
+        "/api/department-report/org-snapshot", headers=_headers("EZHGMIO")
+    ).json()
+    assert got == {
+        "present": True,
+        "source": "database",
+        "capturedAt": "2026-08-20T08:00",
+        "people": len(SNAPSHOT),
+        "uploadedBy": "EZHGMIO",
+    }
