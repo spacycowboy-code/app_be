@@ -58,13 +58,6 @@ def short_unit(name: object) -> str:
     return text_[len(SCOPE) + 1:] if text_.startswith(SCOPE + " ") else text_
 
 
-def db_url() -> str:
-    for line in (BACKEND / ".env").read_text().splitlines():
-        if line.startswith("DATABASE_URL="):
-            return line.split("=", 1)[1].strip()
-    raise SystemExit("DATABASE_URL not found in backend .env")
-
-
 # --------------------------------------------------------------------------
 # people
 # --------------------------------------------------------------------------
