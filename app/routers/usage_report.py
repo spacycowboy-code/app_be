@@ -20,7 +20,7 @@ import logging
 
 from datetime import datetime
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
@@ -93,6 +93,12 @@ def usage_report(
 )
 def put_org_snapshot(
     payload: dict = Body(..., description="The Graph walk, keyed by object id"),
+    captured_at: datetime | None = Query(
+        None,
+        alias="capturedAt",
+        description="When the directory was actually read. Defaults to now, which "
+        "is only right when the walk was just done.",
+    ),
     db: Session = Depends(get_db),
     eid: str = Depends(require_dashboard_eid),
 ) -> dict:
@@ -109,8 +115,13 @@ def put_org_snapshot(
     """
     from app.services.usage_report import org_tree as org_tree_mod
 
+    # When the directory was read, not when it reached us. The report prints this
+    # and a reader uses it to judge how much the org structure may have moved since;
+    # stamping the upload time would have made a snapshot walked last week look like
+    # it was taken today.
+    captured = captured_at or datetime.now()
     try:
-        tree = org_tree_mod.build(payload, datetime.now())
+        tree = org_tree_mod.build(payload, captured)
     except Exception as exc:  # noqa: BLE001 - the payload is external input
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -138,7 +149,7 @@ def put_org_snapshot(
     db.add(
         RpAiOrgSnapshot(
             payload=json.dumps(payload, ensure_ascii=False),
-            captured_at=datetime.now(),
+            captured_at=captured,
             uploaded_by=eid,
             people=len(people),
         )
@@ -148,6 +159,7 @@ def put_org_snapshot(
     # Echoed back so whoever pushed it can see the walk landed whole, rather than
     # finding out from the report that it was short a few hundred people.
     return {
+        "capturedAt": captured.isoformat(timespec="minutes"),
         "people": len(people),
         "placed": placed,
         "departments": sorted(

@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import requests
@@ -39,10 +40,14 @@ def main() -> int:
         print("  that file is not a Graph walk (expected a JSON object of users)")
         return 1
 
+    # The file's own timestamp, not now: the report tells its reader how old the org
+    # structure is, and uploading a week-old walk must not make it look fresh.
+    captured = datetime.fromtimestamp(path.stat().st_mtime)
     url = args.portal.rstrip("/") + "/api/department-report/org-snapshot"
     response = requests.put(
         url,
         json=payload,
+        params={"capturedAt": captured.isoformat(timespec="seconds")},
         headers={"Authorization": "Bearer " + args.portal_token},
         timeout=300,
     )
@@ -58,6 +63,7 @@ def main() -> int:
 
     got = response.json()
     print(f"  uploaded {len(payload)} records to {url}")
+    print(f"    walked at {got['capturedAt']} (from the file's timestamp)")
     print(f"    portal stored {got['people']} people, {got['placed']} placed")
     print(f"    departments: {' '.join(got['departments'])}")
     print("  the report will use this from now on; no file needed on the server.")

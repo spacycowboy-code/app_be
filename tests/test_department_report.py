@@ -387,3 +387,24 @@ def test_a_snapshot_with_no_reporting_line_is_refused(client):
     )
     assert response.status_code == 422
     assert "branch" in response.json()["detail"]
+
+
+def test_the_report_shows_when_the_directory_was_read_not_when_it_was_uploaded(
+    client,
+):
+    """A week-old walk must not be presented as today's organisation.
+
+    The footer is what a reader uses to judge how far the org structure may have
+    moved since, so stamping the upload time would overstate how current it is.
+    """
+    _seed_people()
+    uploaded = client.put(
+        "/api/department-report/org-snapshot?capturedAt=2026-08-01T09:30:00",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["capturedAt"].startswith("2026-08-01T09:30")
+
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert "2026-08-01 09:30" in body
