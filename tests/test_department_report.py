@@ -24,6 +24,7 @@ from app.database import SessionLocal
 from app.main import app
 from app.models.skill import RpAiSkill
 from app.models.download import RpAiSkillDownload
+from app.models.org_snapshot import RpAiOrgSnapshot
 from app.models.user import RpAiPortal
 from app.services.auth_tokens import create_token
 
@@ -302,3 +303,87 @@ def test_every_chapter_can_be_folded_and_starts_open(client):
     assert body.count('<details class="sec" open>') == body.count("</details>")
     assert body.count("<summary>") == body.count("</summary>")
     assert body.count("<summary>") == body.count("<h2")
+
+
+# --- the snapshot in the database -------------------------------------------
+
+
+def test_an_uploaded_snapshot_removes_the_need_for_a_file(client, monkeypatch):
+    """The deployed case: no volume, no file, and the report still works."""
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/graph_tree.json")
+    get_settings.cache_clear()
+    _seed_people()
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 503
+
+    uploaded = client.put(
+        "/api/department-report/org-snapshot",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["people"] == len(SNAPSHOT)
+    assert sorted(uploaded.json()["departments"]) == ["PEU", "RD1", "SWD"]
+
+    response = client.get("/api/department-report", headers=_headers("EZHGMIO"))
+    assert response.status_code == 200
+    assert ">5</div>" in response.text
+
+
+def test_the_uploaded_snapshot_wins_over_the_file(client, snapshot):
+    """One organisation, one answer. A file left behind must not shadow it."""
+    _seed_people()
+    smaller = {k: v for k, v in SNAPSHOT.items() if k in {"id-head", "id-boss"}}
+    client.put(
+        "/api/department-report/org-snapshot", json=smaller, headers=_headers("EZHGMIO")
+    )
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert ">2</div>" in body  # the upload, not the five in the file
+
+
+def test_uploading_replaces_rather_than_accumulates(client):
+    _seed_people()
+    for _ in range(3):
+        client.put(
+            "/api/department-report/org-snapshot",
+            json=SNAPSHOT,
+            headers=_headers("EZHGMIO"),
+        )
+    with SessionLocal() as db:
+        assert db.query(RpAiOrgSnapshot).count() == 1
+
+
+def test_only_the_configured_readers_may_upload(client):
+    """Whoever can replace this decides every head count in the report."""
+    assert (
+        client.put(
+            "/api/department-report/org-snapshot",
+            json=SNAPSHOT,
+            headers=_headers("ESOMEONE"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put("/api/department-report/org-snapshot", json=SNAPSHOT).status_code
+        == 401
+    )
+
+
+def test_a_snapshot_with_nobody_in_it_is_refused(client):
+    response = client.put(
+        "/api/department-report/org-snapshot", json={}, headers=_headers("EZHGMIO")
+    )
+    assert response.status_code == 422
+    assert "没有人" in response.json()["detail"]
+
+
+def test_a_snapshot_with_no_reporting_line_is_refused(client):
+    """It would render — with head counts that are wrong and look fine."""
+    flat = {
+        key: {**rec, "branch": None}
+        for key, rec in SNAPSHOT.items()
+    }
+    response = client.put(
+        "/api/department-report/org-snapshot", json=flat, headers=_headers("EZHGMIO")
+    )
+    assert response.status_code == 422
+    assert "branch" in response.json()["detail"]

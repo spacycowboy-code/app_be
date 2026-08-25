@@ -7,6 +7,8 @@ Teams and the reader compares the report against Teams.
 
     python fetch_graph_tree.py                  # token from GRAPH_TOKEN or ./graph_token
     python fetch_graph_tree.py --token-file /path/to/token
+    python fetch_graph_tree.py --token-file t \\
+        --push https://portal.internal --portal-token <your portal JWT>
 
 Getting a token, in order of preference:
 
@@ -185,11 +187,47 @@ def walk(session: requests.Session) -> dict:
     return people
 
 
+def push(base_url: str, portal_token: str, people: dict) -> None:
+    """Upload the walk to the portal, which keeps it in its own database.
+
+    Pushed rather than fetched by the service: this walk needs a Graph token, takes
+    minutes, and the service holds neither. Storing it server-side means a deploy
+    does not need a mounted file and a redeploy does not lose it.
+    """
+    url = base_url.rstrip("/") + "/api/department-report/org-snapshot"
+    response = requests.put(
+        url,
+        json=people,
+        headers={"Authorization": "Bearer " + portal_token},
+        timeout=300,
+    )
+    if response.status_code != 200:
+        raise SystemExit(
+            f"  upload failed: HTTP {response.status_code} {response.text[:400]}"
+        )
+    got = response.json()
+    print(f"\n  uploaded to {url}")
+    print(f"    portal stored {got['people']} people, {got['placed']} placed")
+    print(f"    departments: {' '.join(got['departments'])}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--token-file")
+    ap.add_argument("--token-file", help="File holding a Graph access token")
     ap.add_argument("--out", default=str(CACHE))
+    ap.add_argument(
+        "--push",
+        metavar="PORTAL_URL",
+        help="Also upload to the portal, e.g. https://rp-ai-portal.internal",
+    )
+    ap.add_argument(
+        "--portal-token",
+        help="Your portal session token (the JWT the browser sends). Required "
+        "with --push; must belong to an EID on the Dashboard list.",
+    )
     args = ap.parse_args()
+    if args.push and not args.portal_token:
+        ap.error("--push needs --portal-token")
 
     session = requests.Session()
     session.headers.update(
@@ -209,6 +247,9 @@ def main() -> None:
     print(f"\n  wrote {args.out}: {len(people)} people, {disabled} disabled")
     for code, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         print(f"    {code:<6} {n}")
+
+    if args.push:
+        push(args.push, args.portal_token, people)
 
 
 if __name__ == "__main__":

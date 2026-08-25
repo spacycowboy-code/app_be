@@ -985,27 +985,60 @@ RP 内有 <b>{off_column} 人</b>只做过这些没有列的动作，所以横�
 class OrgSnapshotMissing(RuntimeError):
     """No org snapshot, so there is no head count and no percentage to report.
 
-    Raised rather than falling back to grouping by the portal's own ``department``
-    column. That column is free text copied at sign-in and only covers people who
-    have signed in, so a report built from it would put a different number under
-    the same heading as the org chart and give no sign that it had changed
-    definition.
+    Raised rather than falling back to anything. Two fallbacks were considered and
+    both were rejected by measurement:
+
+    Grouping by the portal's own ``department`` column — free text copied at
+    sign-in, and only for people who have signed in, so it cannot say how many
+    people a department has at all.
+
+    Walking the reporting line over LDAP, which the service already has
+    credentials for. Tried: it returns 961 people against Graph's 945, and differs
+    per department by up to seven (PO 70 against 63). Graph is what the Teams org
+    chart draws, and a report that cannot be reconciled against the chart the
+    reader has open gets discarded whatever its numbers say. It also took 119
+    seconds, which is not a request.
     """
+
+
+def load_org_tree(conn: Connection, snapshot_path: Path | str | None) -> dict:
+    """The org structure: from the database if it has been pushed, else from a file.
+
+    Database first so a deployed service needs no volume and survives a redeploy.
+    The file is kept for local work, where running the fetch tool and pointing at
+    its output is quicker than uploading.
+    """
+    from app.services.usage_report import org_tree as org_tree_mod
+
+    row = conn.execute(
+        text(
+            "select payload, captured_at from rp_ai_org_snapshot "
+            "order by id desc limit 1"
+        )
+    ).first()
+    if row is not None:
+        import json
+
+        captured = row[1]
+        if isinstance(captured, str):
+            captured = datetime.fromisoformat(captured)
+        return org_tree_mod.build(json.loads(row[0]), captured)
+
+    if snapshot_path:
+        path = Path(snapshot_path)
+        if path.is_file():
+            return org_tree_mod.load(path)
+    raise OrgSnapshotMissing(str(snapshot_path or ""))
 
 
 def build_html(
     conn: Connection,
-    org_snapshot: Path | str,
+    org_snapshot: Path | str | None = None,
     identities_snapshot: Path | str | None = None,
     bind_account: str = "",
 ) -> str:
     """Render the whole report. Reads the database; writes nothing."""
-    from app.services.usage_report import org_tree as org_tree_mod
-
-    snapshot = Path(org_snapshot)
-    if not snapshot.is_file():
-        raise OrgSnapshotMissing(str(snapshot))
-    tree = org_tree_mod.load(snapshot)
+    tree = load_org_tree(conn, org_snapshot)
 
     identities: dict[str, dict] = {}
     if identities_snapshot:
