@@ -119,11 +119,32 @@ class Settings(BaseSettings):
     scoped_token_ttl_minutes: int = 10
 
     # --- Sign-in statistics access (Dashboard) ------------------------------
-    # EIDs allowed to read /api/login-stats, i.e. the active-user counts and the
+    # EIDs allowed to read /api/login-stats and /api/department-report — the
+    # active-user counts, the signums behind them, and the per-person report.
     # signums behind them. Enforced in the endpoint: the sidebar also hides the
     # Dashboard from everyone else, but hiding a link is not access control.
     # Comma-separated; compared uppercase.
-    dashboard_eids: str = "EZHGMIO,ADMINMM,EBAOXUE"
+    # EZHGMIO Miao Zhang M, ADMINMM the break-glass admin, EHUIWUU Vivie Wu A,
+    # EBAOXUE Baosheng Xue. Also gates the department usage report, which names
+    # individuals.
+    dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE"
+    # --- Department usage report ---------------------------------------------
+    # Snapshot of the Microsoft Graph reporting tree — the same graph the Teams org
+    # chart draws. Every head count and every percentage in the report is derived
+    # from it, so without it the report is refused rather than computed from the
+    # portal's own free-text department column, which covers only people who have
+    # signed in and would put a different number under the same heading.
+    #
+    # Kept as a file path outside the repository on purpose: it holds the name,
+    # title and department of everyone in the organisation, which is not something
+    # to commit. Refreshed out of band by tools/fetch_graph_tree.py.
+    usage_report_org_snapshot: str = "/var/lib/rp-ai-portal/graph_tree_cache.json"
+    # Optional. Identifies the handful of portal accounts that are not on the tree —
+    # colleagues from other organisations, and functional accounts. Without it those
+    # accounts are classified from their own portal row, which cannot tell a
+    # colleague who has never signed in from a leftover test row.
+    usage_report_identity_snapshot: str = ""
+
     # Time zone whose midnight starts a "day" for the active-user counts. This
     # must be the *users'* zone, not the database server's: the DB runs on UTC+2
     # while the team is in UTC+8, so counting from the DB's midnight would file

@@ -26,6 +26,7 @@ from app.routers import (
     skills,
     upload,
     usage,
+    usage_report,
     users,
 )
 
@@ -174,6 +175,7 @@ app.include_router(categories.router)
 app.include_router(market.router)
 app.include_router(agent_upload.router)
 app.include_router(usage.router)
+app.include_router(usage_report.router)
 
 
 @app.get("/health", tags=["health"])
