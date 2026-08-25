@@ -24,6 +24,7 @@ from app.models.market_download import RpAiMarketDownload
 from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.models.login_event import RpAiLoginEvent
 from app.models.usage_event import RpAiUsageEvent
+from app.models.org_snapshot import RpAiOrgSnapshot  # noqa: F401
 
 __all__ = [
     "RpAiPortal",

@@ -24,8 +24,10 @@ from app.database import SessionLocal
 from app.main import app
 from app.models.skill import RpAiSkill
 from app.models.download import RpAiSkillDownload
+from app.models.org_snapshot import RpAiOrgSnapshot
 from app.models.user import RpAiPortal
 from app.services.auth_tokens import create_token
+from app.services.usage_report import graph_walk
 
 SECRET = "usage-report-test-secret"
 
@@ -302,3 +304,231 @@ def test_every_chapter_can_be_folded_and_starts_open(client):
     assert body.count('<details class="sec" open>') == body.count("</details>")
     assert body.count("<summary>") == body.count("</summary>")
     assert body.count("<summary>") == body.count("<h2")
+
+
+# --- the snapshot in the database -------------------------------------------
+
+
+def test_an_uploaded_snapshot_removes_the_need_for_a_file(client, monkeypatch):
+    """The deployed case: no volume, no file, and the report still works."""
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/graph_tree.json")
+    get_settings.cache_clear()
+    _seed_people()
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 503
+
+    uploaded = client.put(
+        "/api/department-report/org-snapshot",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["people"] == len(SNAPSHOT)
+    assert sorted(uploaded.json()["departments"]) == ["PEU", "RD1", "SWD"]
+
+    response = client.get("/api/department-report", headers=_headers("EZHGMIO"))
+    assert response.status_code == 200
+    assert ">5</div>" in response.text
+
+
+def test_the_uploaded_snapshot_wins_over_the_file(client, snapshot):
+    """One organisation, one answer. A file left behind must not shadow it."""
+    _seed_people()
+    smaller = {k: v for k, v in SNAPSHOT.items() if k in {"id-head", "id-boss"}}
+    client.put(
+        "/api/department-report/org-snapshot", json=smaller, headers=_headers("EZHGMIO")
+    )
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert ">2</div>" in body  # the upload, not the five in the file
+
+
+def test_uploading_replaces_rather_than_accumulates(client):
+    _seed_people()
+    for _ in range(3):
+        client.put(
+            "/api/department-report/org-snapshot",
+            json=SNAPSHOT,
+            headers=_headers("EZHGMIO"),
+        )
+    with SessionLocal() as db:
+        assert db.query(RpAiOrgSnapshot).count() == 1
+
+
+def test_only_the_configured_readers_may_upload(client):
+    """Whoever can replace this decides every head count in the report."""
+    assert (
+        client.put(
+            "/api/department-report/org-snapshot",
+            json=SNAPSHOT,
+            headers=_headers("ESOMEONE"),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.put("/api/department-report/org-snapshot", json=SNAPSHOT).status_code
+        == 401
+    )
+
+
+def test_a_snapshot_with_nobody_in_it_is_refused(client):
+    response = client.put(
+        "/api/department-report/org-snapshot", json={}, headers=_headers("EZHGMIO")
+    )
+    assert response.status_code == 422
+    assert "没有人" in response.json()["detail"]
+
+
+def test_a_snapshot_with_no_reporting_line_is_refused(client):
+    """It would render — with head counts that are wrong and look fine."""
+    flat = {
+        key: {**rec, "branch": None}
+        for key, rec in SNAPSHOT.items()
+    }
+    response = client.put(
+        "/api/department-report/org-snapshot", json=flat, headers=_headers("EZHGMIO")
+    )
+    assert response.status_code == 422
+    assert "branch" in response.json()["detail"]
+
+
+def test_the_report_shows_when_the_directory_was_read_not_when_it_was_uploaded(
+    client,
+):
+    """A week-old walk must not be presented as today's organisation.
+
+    The footer is what a reader uses to judge how far the org structure may have
+    moved since, so stamping the upload time would overstate how current it is.
+    """
+    _seed_people()
+    uploaded = client.put(
+        "/api/department-report/org-snapshot?capturedAt=2026-08-01T09:30:00",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["capturedAt"].startswith("2026-08-01T09:30")
+
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert "2026-08-01 09:30" in body
+
+
+# --- syncing from Graph on request ------------------------------------------
+
+
+def test_sync_walks_graph_and_makes_the_result_the_report_structure(
+    client, monkeypatch
+):
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/x.json")
+    get_settings.cache_clear()
+    _seed_people()
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 503
+
+    seen: dict[str, str] = {}
+
+    def fake_walk(token: str, root_id: str, timeout: int = 120) -> dict:
+        seen["token"] = token
+        seen["root"] = root_id
+        return SNAPSHOT
+
+    monkeypatch.setattr(graph_walk, "walk", fake_walk)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "a-graph-token"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 200, response.text
+    assert seen["token"] == "a-graph-token"
+    assert response.json()["people"] == len(SNAPSHOT)
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 200
+
+
+def test_an_expired_token_says_so_and_keeps_the_old_structure(client, monkeypatch):
+    """The reader would rather see last week's departments than none."""
+    _seed_people()
+    client.put(
+        "/api/department-report/org-snapshot", json=SNAPSHOT, headers=_headers("EZHGMIO")
+    )
+
+    def rejected(token: str, root_id: str, timeout: int = 120) -> dict:
+        raise graph_walk.GraphTokenRejected("nope")
+
+    monkeypatch.setattr(graph_walk, "walk", rejected)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "stale"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 400
+    assert "过期" in response.json()["detail"]
+    # Still there, still usable.
+    with SessionLocal() as db:
+        assert db.query(RpAiOrgSnapshot).count() == 1
+    assert client.get("/api/department-report", headers=_headers("EZHGMIO")).status_code == 200
+
+
+def test_a_walk_that_breaks_partway_does_not_replace_anything(client, monkeypatch):
+    _seed_people()
+    client.put(
+        "/api/department-report/org-snapshot", json=SNAPSHOT, headers=_headers("EZHGMIO")
+    )
+    before = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+
+    def broken(token: str, root_id: str, timeout: int = 120) -> dict:
+        raise graph_walk.GraphWalkFailed("$batch failed after 4 attempts: HTTP 429")
+
+    monkeypatch.setattr(graph_walk, "walk", broken)
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={"token": "x"},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 502
+    assert "保持不变" in response.json()["detail"]
+    after = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    # Same organisation as before: only the generation timestamp may differ.
+    assert after.count("<h2") == before.count("<h2")
+
+
+def test_sync_needs_a_token(client):
+    response = client.post(
+        "/api/department-report/org-snapshot/refresh",
+        json={},
+        headers=_headers("EZHGMIO"),
+    )
+    assert response.status_code == 422
+    assert "Graph access token" in response.json()["detail"]
+
+
+def test_only_the_configured_readers_may_sync(client):
+    assert (
+        client.post(
+            "/api/department-report/org-snapshot/refresh",
+            json={"token": "x"},
+            headers=_headers("ESOMEONE"),
+        ).status_code
+        == 403
+    )
+
+
+def test_the_page_can_report_which_structure_it_is_using(client, monkeypatch):
+    monkeypatch.setenv("USAGE_REPORT_ORG_SNAPSHOT", "/nonexistent/x.json")
+    get_settings.cache_clear()
+    empty = client.get(
+        "/api/department-report/org-snapshot", headers=_headers("EZHGMIO")
+    ).json()
+    assert empty["present"] is False
+
+    client.put(
+        "/api/department-report/org-snapshot?capturedAt=2026-08-20T08:00",
+        json=SNAPSHOT,
+        headers=_headers("EZHGMIO"),
+    )
+    got = client.get(
+        "/api/department-report/org-snapshot", headers=_headers("EZHGMIO")
+    ).json()
+    assert got == {
+        "present": True,
+        "source": "database",
+        "capturedAt": "2026-08-20T08:00",
+        "people": len(SNAPSHOT),
+        "uploadedBy": "EZHGMIO",
+    }

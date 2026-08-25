@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     # accounts are classified from their own portal row, which cannot tell a
     # colleague who has never signed in from a leftover test row.
     usage_report_identity_snapshot: str = ""
+    # Whose reporting tree the report covers: this person and everyone under them.
+    # Configurable because the post-holder changes and the id does not say who it is,
+    # so a successor would otherwise have to find it in the source to understand why
+    # the report still describes the previous organisation.
+    usage_report_org_root_id: str = "7055e248-9d31-44a6-a44e-e06415abfff8"
 
     # Time zone whose midnight starts a "day" for the active-user counts. This
     # must be the *users'* zone, not the database server's: the DB runs on UTC+2

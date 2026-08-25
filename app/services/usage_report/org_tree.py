@@ -65,7 +65,16 @@ def load(cache_path: Path) -> dict:
     # Recorded here rather than stat()-ed at render time: the reader needs to know how
     # old the org structure is, and the renderer should not have to know where the
     # snapshot lives to tell them.
-    as_of = datetime.fromtimestamp(path.stat().st_mtime)
+    return build(raw, datetime.fromtimestamp(path.stat().st_mtime))
+
+
+def build(raw: dict, as_of: datetime) -> dict:
+    """Shape an already-parsed Graph walk. Same work as :func:`load`, no file.
+
+    Split out because the snapshot normally comes from the database rather than
+    from disk — a file on the host means a mounted volume and a copy step at every
+    release, and the report answering 503 the first time one is forgotten.
+    """
 
     by_id = raw
     people: dict[str, dict] = {}
