@@ -204,14 +204,13 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 | 查某个令牌配在哪、到期、失效了什么会坏 | [platform-ci CREDENTIALS.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/CREDENTIALS.md) |
 | 为什么这样分工、集群、备份恢复 | [platform-ci PLATFORM.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/PLATFORM.md) |
 
-合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rvc/rp-ai/rp-ai-portal-be:<commit sha>`;
+合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rp-ps-ai/rp-ai-portal-be:<commit sha>`;
 发布就是在环境描述里把镜像标签改成它。
 
-**现在构建和部署是停着的**:`proj-rvc` 是别人项目的 Artifactory 空间,推镜像用的也是别人的服务账号,
-那套凭据已于 2026-08-26 删除。换成我们自己的账号后,上面那个镜像前缀也要一起改。
-恢复的三步见 CREDENTIALS.md 开头。已经在跑的容器不受影响。
+镜像空间 2026-08-26 换成了我们自己的 `proj-rp-ps-ai`(原来的 `proj-rvc` 是 RVC 项目的空间)。
+当前推镜像用的是个人账号而不是服务账号,细节与待办见 CREDENTIALS.md。
 
-本仓产出**一个**镜像 `proj-rvc/rp-ai/rp-ai-portal-be:<sha>`(对账器用同一个镜像,只换 entrypoint)。
+本仓产出**一个**镜像 `proj-rp-ps-ai/rp-ai-portal-be:<sha>`(对账器用同一个镜像,只换 entrypoint)。
 
 审计能力已经拆到 `rp-ai-miao/skill-audit`,那个仓产出引擎 `skill-audit` 与判定器 `skill-audit-judge`。
 本仓不再装第三方扫描器、也不再构建判定器;审计通过一次 HTTP 调用完成,客户端是
