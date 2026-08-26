@@ -207,8 +207,7 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rp-ps-ai/rp-ai-portal-be:<commit sha>`;
 发布就是在环境描述里把镜像标签改成它。
 
-镜像空间 2026-08-26 换成了我们自己的 `proj-rp-ps-ai`(原来的 `proj-rvc` 是 RVC 项目的空间)。
-当前推镜像用的是个人账号而不是服务账号,细节与待办见 CREDENTIALS.md。
+镜像在我们自己的空间 `proj-rp-ps-ai`。推镜像用的账号不是服务账号,细节与待办见 CREDENTIALS.md。
 
 本仓产出**一个**镜像 `proj-rp-ps-ai/rp-ai-portal-be:<sha>`(对账器用同一个镜像,只换 entrypoint)。
 
