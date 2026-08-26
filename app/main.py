@@ -104,6 +104,38 @@ AUTH_WHITELIST = {
 }
 
 
+async def _discard_body(request: Request) -> None:
+    """把请求体读掉,再回错误码。
+
+    直接回 401 会让用户看到 502。链路是这样的:本服务一响应就关连接,而前端 nginx
+    还在往这边推 body —— 它的 sendfile() 拿到 EPIPE,于是没法把这个 401 转达给
+    浏览器,只能自己报 502:
+
+        [error] sendfile() failed (32: Broken pipe) while sending request to
+        upstream, upstream: "http://.../api/skills/upload"
+
+    症状因此是"上传大技能包时会话过期,界面弹 502",而不是"请重新登录" —— 前端拿不到
+    401,就没法给出有用的提示。实测 5 MB 触发、1 MB 不触发:小 body 能在 401 到达之前
+    发完,所以这是个竞态而非必现,别按"复现不了就没问题"处理。
+
+    用 stream() 逐块丢弃而不是 ``await request.body()``:后者会把整个 body 收进内存,
+    而走到这条路径上的调用方恰恰是**没通过鉴权**的。读多少由反代的
+    client_max_body_size 决定(前端 nginx 是 50m),这里不会比它读得更多。
+
+    没有 body 就不读:GET 占绝大多数,不该为它们白走一次 receive。
+    """
+    if not (
+        request.headers.get("content-length")
+        or request.headers.get("transfer-encoding")
+    ):
+        return
+    try:
+        async for _ in request.stream():
+            pass
+    except Exception:  # noqa: BLE001 - 客户端先断开就不必再管
+        pass
+
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     """Site-wide auth: any /api request (bar the whitelist) needs a valid JWT.
@@ -139,6 +171,7 @@ async def auth_gate(request: Request, call_next):
         claims = decode_token(token)
         check_token_scope(claims, path, request.method)
     except TokenError:
+        await _discard_body(request)
         return JSONResponse(
             status_code=401,
             content={
