@@ -41,6 +41,43 @@ def _enforce_sqlite_foreign_keys(dbapi_connection, _record):
 
 
 @pytest.fixture(autouse=True)
+def _never_reach_real_gitlab(monkeypatch):
+    """测试不许连真的 GitLab。
+
+    起因是生产技能仓里积了 66 个空壳复核 MR:三个测试固件名各 22 次。机制是两件事叠起来 ——
+    这里原来不清 `gitlab_token`,而有几条测试没给 `gitlab_mr.review_suspect` 打桩;于是谁的机器上
+    有真令牌(比如开发机的 `.env`),跑一次测试套件就往**生产**技能仓开 3 个真 MR,并给默认复核人
+    发 3 条通知。实测 GitLab 允许用不存在的源分支开 MR(201),所以连"写没成功"都挡不住它。
+
+    代价在内容改成按引用读写之后更高:以前测试真走到写会因为没有工作副本而失败,现在 `publish`
+    直接调 API,**会真的往生产仓写内容**。8-18 那次被人手工 revert 的 `audit-smoke` 上传就是同一类。
+
+    所以这里做两件事,而不是逐处打桩(漏一处就复发):
+    1. 把令牌清空、项目名指到一个明显假的值;
+    2. 把出网的那两个口(仓储层与 MR 客户端)换掉,任何尝试直接让测试失败。
+    """
+    from app.config import get_settings
+    from app.repositories import skill_content
+    from app.services import gitlab_mr
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "gitlab_token", "", raising=False)
+    monkeypatch.setattr(settings, "audit_mr_project", "tests/not-a-real-project", raising=False)
+
+    def refuse(*a, **kw):
+        # 用 pytest.fail 而不是 assert:它抛的是 BaseException 的子类,`except Exception` 抓不到。
+        # 这一点是实测出来的 —— `gitlab_mr.review_suspect` 用一个兜底的 `except Exception` 吞掉所有
+        # 异常并返回 None,所以第一版守卫抛 AssertionError 时被它吃掉,那条故意漏打桩的测试照样通过。
+        pytest.fail("测试试图连真的 GitLab。要么给这一处打桩,要么说明为什么它必须出网。")
+
+    # 守卫放在真正的出网口(`_opener`),不放在 `_fetch` / `_post` / `_request` 上:
+    # 有两条测试是**故意**验证 `_fetch` 怎么处理 404 与 502 的,它们自己换掉 `_opener`。
+    # 把上层函数整个换掉,那两条就没法测了;换最底层则它们自然覆盖掉这道守卫。
+    monkeypatch.setattr(skill_content, "_opener", refuse)
+    monkeypatch.setattr(gitlab_mr, "_opener", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_db():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
