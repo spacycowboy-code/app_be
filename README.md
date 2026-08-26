@@ -27,6 +27,71 @@ backed by MySQL.
 A user's **uploaded** skills are `rp_ai_skill` rows where `uploader_eid`
 matches their EID; their **collected** skills live in `rp_ai_user_favorite`.
 
+上表只是核心几张。`app/models/` 下实际有 **21** 张 `rp_ai_` 表,除上面 8 张之外还有:
+
+```
+rp_ai_skill_version           技能版本(发布历史)
+rp_ai_skill_comment           评论
+rp_ai_skill_download          下载记录
+rp_ai_skill_audit_record      审计记录(事实,不可重算)
+rp_ai_skill_finding           审计发现(命中项)
+rp_ai_activity                活动流
+rp_ai_login_event             登录事件
+rp_ai_usage_event             用量事件
+rp_ai_org_snapshot            组织树快照(部门用量报表用)
+rp_ai_market_item             市场条目
+rp_ai_market_item_version     市场条目版本
+rp_ai_market_download         市场下载
+rp_ai_market_favorite         市场收藏
+```
+
+**表名的 `rp_ai_` 前缀是硬要求**:每天的备份按这个前缀在运行时取表,不写死表名。新表不带这个前缀
+就不会被备份,而且生产库里还有别的团队的 29 张表,前缀也是区分依据。
+
+## 建表与加列
+
+`create_all` **只建缺的表,不给已有表加列**。加列走 `app/migrate.py`:
+
+```bash
+python -m app.migrate     # 幂等,可重复跑
+```
+
+容器启动时 `docker-entrypoint.sh` 会先跑它,失败就不启动服务。所以模型加了字段之后,要在
+`app/migrate.py` 里补上对应的 `ALTER TABLE`,否则线上那张表不会有这一列,而本地新建的库看不出问题。
+
+## 本地管理员登录是个后门,默认口令没改
+
+`app/config.py` 里:
+
+```
+local_admin_enabled   默认 True
+local_admin_username  默认 adminmm
+local_admin_password  默认 adminmm
+```
+
+它的用途是 AD 不可用时仍能进后台。**默认值等于用户名口令相同的公开后门**,生产上必须用环境变量
+覆盖成强口令,或者把 `local_admin_enabled` 关掉。测试环境反过来依赖它 —— 那套环境没有配 AD 凭据,
+只能用这个账号登录,所以关它之前先确认测试环境怎么登。
+
+`ADMINMM` 同时是 `audit_admin_eid` 的默认值,即审计管理员的 EID。两者名字相近但是两回事:
+一个是登录凭据,一个是权限判定用的 EID。
+
+## 部门用量报表依赖一份组织树快照
+
+用量报表要按部门汇总,部门树来自 MS Graph,取回后存成快照:
+
+| 东西 | 在哪 |
+|---|---|
+| 快照文件 | `usage_report_org_snapshot`,默认 `/var/lib/rp-ai-portal/graph_tree_cache.json`,**不在 git 里** |
+| 快照表 | `rp_ai_org_snapshot` |
+| 组织树根 | `usage_report_org_root_id`(config.py 里的默认值) |
+| 取回 | `tools/fetch_graph_tree.py` |
+| 灌入 | `tools/push_org_snapshot.py` |
+
+快照丢了,部门维度的报表就出不来。重建是跑 `fetch_graph_tree.py` 再 `push_org_snapshot.py`,
+前提是有 MS Graph 的凭据 —— 那份凭据不在本仓的配置里,要向报表的需求方确认从哪拿。
+
+
 ## Setup
 
 Requires Python 3.11+.
