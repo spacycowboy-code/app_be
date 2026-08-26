@@ -231,7 +231,7 @@ Office 文档(docx/pptx/xlsx)的密级标签由 Microsoft Purview / AIP 写成�
 
 要补三件:
 
-1. **管理员改成配置名单** `audit_admin_eids`,`market.py` 那 4 处字面量换成同一个判断,并把 `ezhgmio` 加进名单。现在改管理员要改代码。
+1. **管理员改成配置名单** `audit_admin_eids`(复数)。`market.py` 里的 4 处字面量已经换成 `settings.audit_admin_eid`,但那仍是**单个** EID,要加第二个管理员还得改配置项本身。
 2. **白名单写入端点用共享密钥保护** `X-Admin-Token`,与已有的 `AUDIT_WEBHOOK_TOKEN` 同一模式。SSO 之前,密钥能证明"确实是管理员做的",EID 头只表示"声称是谁";两者都记录。
 3. **不做 RBAC 框架。** 两种能力(看全部、维护白名单)用一个 `is_admin(eid)` 加一个密钥就够。身份不可验证时,权限模型不构成控制,所以角色分层等 SSO。
 
