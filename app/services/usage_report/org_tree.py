@@ -29,7 +29,7 @@ keep whatever testing they have had.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -65,7 +65,9 @@ def load(cache_path: Path) -> dict:
     # Recorded here rather than stat()-ed at render time: the reader needs to know how
     # old the org structure is, and the renderer should not have to know where the
     # snapshot lives to tell them.
-    return build(raw, datetime.fromtimestamp(path.stat().st_mtime))
+    # Zoned, not bare: the container's clock is UTC, and a naive stamp would leave the
+    # report unable to tell "recorded here" apart from a wall clock an uploader typed.
+    return build(raw, datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
 
 
 def build(raw: dict, as_of: datetime) -> dict:

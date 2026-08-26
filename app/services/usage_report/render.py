@@ -26,6 +26,7 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from app.services.reporting_windows import reporting_tz
 from app.services.usage_report.departments import (
     NON_PERSON,
     UNKNOWN,
@@ -43,6 +44,27 @@ SCOPE = "BNEW RTE RP"
 # with the number of users and disagree with its own caption.
 SIGNIN_KEYS = {"ever_signed_in", "login_events"}
 SCOPE_KEY = "BNEW/RTE/RP/"
+
+
+def local_time(stamp: object) -> str:
+    """An ISO timestamp printed in the reporting zone — Beijing time.
+
+    An aware timestamp is moved into that zone. The service runs in a container whose
+    clock is UTC, so a moment recorded there reads eight hours behind the clock on the
+    wall of everybody the report is for. A naive one is a wall clock somebody typed
+    when uploading a snapshot, and is shown as given: there is nothing to convert it
+    from, and guessing a zone would move a time the uploader meant literally.
+    """
+    text_ = str(stamp or "").strip()
+    if not text_:
+        return "—"
+    try:
+        when = datetime.fromisoformat(text_)
+    except ValueError:
+        return text_.replace("T", " ")
+    if when.tzinfo is not None:
+        when = when.astimezone(reporting_tz())
+    return when.strftime("%Y-%m-%d %H:%M")
 
 
 def short_unit(name: object) -> str:
@@ -615,7 +637,7 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
            provenance, big_head, tree,
            contrib, gaps, ids, placement,
            off_roster) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(reporting_tz()).strftime("%Y-%m-%d %H:%M")
 
     def _units(d: dict, verb: str) -> str:
         """Turn {'PO': 6, 'QA': 3} into readable Chinese, built from the data.
@@ -768,18 +790,7 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     inside = sum(g.users for g in small.values())
     outside = len(people) - inside
 
-    # The one department whose figure differs from the org chart, and the person it
-    # differs by. Checked against Teams by hand: the account exists in the directory,
-    # which is why the API counts it, and the chart has not picked it up yet. Written
-    # out from the data rather than typed in, so nobody has to remember to update the
-    # sentence when the lag clears.
-    QA_LAG_EID = "EFAAIXN"
-    d_qa = big.get("QA").real if big.get("QA") else 0
-    _lag = tree.get("people", {}).get(QA_LAG_EID, {})
-    qa_lag_name = str(_lag.get("name") or QA_LAG_EID)
-    if _lag.get("title"):
-        qa_lag_name += f"（{_lag['title']}）"
-    tree_as_of = str(tree.get("as_of") or "—").replace("T", " ")
+    tree_as_of = local_time(tree.get("as_of"))
 
 
     # How many rows in the small-department table are a department's own level. Stated
@@ -882,7 +893,7 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
 <style>{CSS}</style></head><body><div class="wrap">
 
 <h1>RP AI Portal 使用情况报告</h1>
-<p class="sub">范围 BNEW RTE RP · 按小部门与大部门（二级部门）分组 · 生成于 {now}<br>
+<p class="sub">范围 BNEW RTE RP · 按小部门与大部门（二级部门）分组 · 生成于 {now}（北京时间）<br>
 数据来自门户数据库 <span class="code">vem-staging</span>；部门归属与部门人数来自
 Microsoft Graph（<span class="code">manager</span> / <span class="code">directReports</span>），
 也就是 Teams 组织架构图的同一个数据源</p>
@@ -892,12 +903,6 @@ Microsoft Graph（<span class="code">manager</span> / <span class="code">directR
 按能登录的 {scope_real - tree.get("disabled", 0)} 人算，全组织是
 {inside / max(scope_real - tree.get("disabled", 0), 1) * 100:.1f}%，而不是
 {inside / scope_real * 100:.1f}%。</div>
-
-<div class="note warn"><b>已知的一处差异：QA。</b>本报告 QA
-{d_qa} 人，Teams 显示 {d_qa - 1} 人，差的是
-<b>{esc(qa_lag_name)}</b> —— 目录里已经建号，Teams 的人数还没更新。
-新建账号进 Teams 组织图有延迟，所以两边偶尔差一两个人，看的是哪一天的快照。
-本报告抓取于 {tree_as_of}。</div>
 
 <div class="cards">
   <div class="card"><div class="n">{scope_real}</div><div class="k">RP 组织在职人数</div>
@@ -974,7 +979,7 @@ RP 内有 <b>{off_column} 人</b>只做过这些没有列的动作，所以横�
 
 <p class="small" style="margin-top:26px">使用数据每次打开都重新查库，所以上面的数字就是此刻的。
 组织结构（谁在哪个部门、每个部门多少人）来自 Microsoft Graph 汇报树的快照，
-抓取于 {tree_as_of}，由 <span class="code">tools/fetch_graph_tree.py</span> 单独刷新 ——
+抓取于 {tree_as_of}（北京时间），由 <span class="code">tools/fetch_graph_tree.py</span> 单独刷新 ——
 生成这个页面本身不连任何目录服务。口径定义见
 <span class="code">app/services/usage_report/</span>。</p>
 
