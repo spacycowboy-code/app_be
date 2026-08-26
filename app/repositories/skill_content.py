@@ -300,6 +300,25 @@ def tag(*, name: str, ref: str, message: str) -> bool:
         return False
 
 
+def delete_branch(branch: str) -> bool:
+    """删掉一个分支。删不掉返回 False —— 调用方据此决定是不是还得报警。
+
+    用途:复核 MR 开不出来时把刚推的复核分支收回去,让"内容在复核分支上 ⇒ 一定有 MR"这条不变量成立。
+    """
+    settings = get_settings()
+    project = urllib.parse.quote(str(settings.audit_mr_project), safe="")
+    url = (f"{settings.gitlab_url.rstrip('/')}/api/v4/projects/{project}"
+           f"/repository/branches/{urllib.parse.quote(branch, safe='')}")
+    req = urllib.request.Request(url, method="DELETE",
+                                 headers={"PRIVATE-TOKEN": settings.gitlab_token})
+    try:
+        with _opener().open(req, timeout=_TIMEOUT):
+            return True
+    except Exception as exc:
+        log.warning("could not delete branch %s: %s", branch, exc)
+        return False
+
+
 def read_tree(ref: str, prefix: str) -> dict[str, bytes]:
     """取某一版里某个目录下的全部文件:{相对路径: 字节}。
 

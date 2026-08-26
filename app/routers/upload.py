@@ -43,6 +43,7 @@ from app.services.audit_engine import AuditResult, audit_skill, content_key
 from app.models.audit import RpAiSkillAuditRecord
 from app.services.skill_audit import gate
 from app.services.audit_report import build_checks
+from app.repositories import skill_content
 from app.services import gitlab_mr
 from fastapi.concurrency import run_in_threadpool
 
@@ -418,22 +419,32 @@ async def upload_skill(
     if existing is not None:
         notify_version_update(db, skill, result.version, actor_eid=eid)
 
-    # Suspect -> open a Draft MR for review (best-effort); then record the audit.
+    # 可疑内容要开一张 Draft MR 供人复核。**不是 best-effort**:开不出来就当这次发布没成功。
     mr_url = None
     if suspect:
-        mr_url = await run_in_threadpool(
-            lambda: gitlab_mr.review_suspect(
-                source_branch=review_branch,
-                target_branch=settings.skill_repo_branch,
-                skill_name=name,
-                findings=audit.findings,
-                audit_ref=audit_ref,
-                uploader=gate._uploader_label(db, eid),
-                reason=audit.reason,
-                coverage=audit.coverage,
-                cause=audit.cause,
+        try:
+            mr_url = await run_in_threadpool(
+                lambda: gitlab_mr.review_suspect(
+                    source_branch=review_branch,
+                    target_branch=settings.skill_repo_branch,
+                    skill_name=name,
+                    findings=audit.findings,
+                    audit_ref=audit_ref,
+                    uploader=gate._uploader_label(db, eid),
+                    reason=audit.reason,
+                    coverage=audit.coverage,
+                    cause=audit.cause,
+                )
             )
-        )
+        except gitlab_mr.ReviewRequestFailed as exc:
+            # 复核 MR 开不出来就当这次发布没成功:把刚推的复核分支收回去,让请求失败。
+            # 否则内容留在分支上、数据库那一行是 pending,而没有人被通知、也没有东西可复核 ——
+            # 上传者看到的"等待复核"是假的。数据库还没提交,所以这里抛出去不会留下半个状态。
+            skill_content.delete_branch(review_branch)
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "内容需要人工复核,但复核单没能创建,本次未保存,请稍后重试。",
+            ) from exc
     # 记录已经在写内容之前落库了。这里补上写完才知道的两格:技能那一行的 id(新技能才需要)、
     # 以及复核 MR 的地址。
     filled = {"skill_id": resolved_id}

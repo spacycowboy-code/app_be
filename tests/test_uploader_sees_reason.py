@@ -19,6 +19,23 @@ EID = "EYINCNG"
 NO_REPORT = "审计没有产出结果:Error loading skill: SKILL.md missing required field: name"
 
 
+@pytest.fixture(autouse=True)
+def _review_mr_stubbed(monkeypatch):
+    """开复核 MR 这一步打桩。
+
+    不打桩的话:在有真令牌的机器上它会往**生产**技能仓开真 MR(生产仓因此积过 66 个空壳 MR);
+    而在没有令牌的环境里它现在会抛 ReviewRequestFailed,把这些测试关心的响应变成 503。
+    这些测试关心的是响应里的措辞与字段,不是 MR 本身。
+    """
+    from app.routers import upload as upload_mod
+    from app.routers import skills as skills_mod
+
+    for mod in (upload_mod, skills_mod):
+        monkeypatch.setattr(mod.gitlab_mr, "review_suspect",
+                            lambda **kw: "http://gitlab.invalid/-/merge_requests/1",
+                            raising=False)
+
+
 @pytest.fixture()
 def client(monkeypatch):
     settings = get_settings()
