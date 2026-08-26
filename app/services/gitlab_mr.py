@@ -180,6 +180,18 @@ def _findings_markdown(skill_name: str, findings: list[Finding],
     return "\n".join(lines)
 
 
+class ReviewRequestFailed(RuntimeError):
+    """复核 MR 没开出来。
+
+    不能当成"最好能开就开"的小事:内容已经写在复核分支上,而数据库那一行是 pending。没有 MR 就没有人
+    被通知、没有东西可复核,而收敛器靠 MR 状态推进 —— 那一行会永远停在"等待复核",上传者看到的是假的。
+
+    按"每个投影都要有一条真能跑的重算路径"这条判据,"复核 MR 存在"是投影(能从复核分支 + 审计 ref +
+    pending 状态算出来)。在那条重算路径做出来之前,这里选择让不变量成立:**内容在复核分支上 ⇒ 一定有
+    MR**。开不出来就当这次发布没成功,由调用方删掉分支并让请求失败。
+    """
+
+
 def review_suspect(
     *, source_branch: str, target_branch: str, skill_name: str,
     findings: list[Finding], audit_ref: str, uploader: str | None = None,
@@ -217,8 +229,9 @@ def review_suspect(
         log.info("opened Draft MR for suspect skill '%s': %s", skill_name, mr_url)
         return mr_url
     except Exception as exc:
+        # 不再吞掉。原来这里返回 None,于是内容留在复核分支上而没有 MR,那一行永远停在 pending。
         log.warning("Draft MR creation failed for '%s': %s", skill_name, exc)
-        return None
+        raise ReviewRequestFailed(str(exc)) from exc
 
 
 def mr_state(mr_url: str) -> str | None:

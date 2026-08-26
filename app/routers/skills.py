@@ -567,19 +567,29 @@ async def update_skill(
     # they can read it: same Draft MR as an upload takes.
     mr_url = None
     if decision.needs_review:
-        mr_url = await run_in_threadpool(
-            lambda: gitlab_mr.review_suspect(
-                source_branch=decision.review_branch,
-                target_branch=settings.skill_repo_branch,
-                skill_name=skill.name,
-                findings=audit.findings,
-                audit_ref=decision.ref,
-                uploader=gate._uploader_label(db, editor),
-                reason=audit.reason,
-                coverage=audit.coverage,
-                cause=audit.cause,
+        try:
+            mr_url = await run_in_threadpool(
+                lambda: gitlab_mr.review_suspect(
+                    source_branch=decision.review_branch,
+                    target_branch=settings.skill_repo_branch,
+                    skill_name=skill.name,
+                    findings=audit.findings,
+                    audit_ref=decision.ref,
+                    uploader=gate._uploader_label(db, editor),
+                    reason=audit.reason,
+                    coverage=audit.coverage,
+                    cause=audit.cause,
+                )
             )
-        )
+        except gitlab_mr.ReviewRequestFailed as exc:
+            # 复核 MR 开不出来就当这次发布没成功:把刚推的复核分支收回去,让请求失败。
+            # 否则内容留在分支上、数据库那一行是 pending,而没有人被通知、也没有东西可复核 ——
+            # 上传者看到的"等待复核"是假的。数据库还没提交,所以这里抛出去不会留下半个状态。
+            skill_content.delete_branch(decision.review_branch)
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "内容需要人工复核,但复核单没能创建,本次未保存,请稍后重试。",
+            ) from exc
     gate.record(db, decision.ref, audit, skill_id=skill.id,
                 skill_name=skill.name, uploader_eid=editor, mr_url=mr_url)
 

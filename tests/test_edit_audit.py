@@ -178,6 +178,11 @@ def test_an_author_side_failure_still_fails_closed(client, monkeypatch):
     monkeypatch.setattr(skills_mod, "audit_skill",
                         lambda **kw: AuditResult(state="suspect", coverage="none",
                                                  cause="bundle_unloadable", retryable=False))
+    # 开复核 MR 这一步打桩:它现在开不出来会答 503(内容在分支上而没有 MR 就等于卡死的 pending),
+    # 而这条测试的主题是判定怎么路由,不是 MR 机制。两个性质是叠加的:503 只在**平台**失败时出现,
+    # 作者侧的失败仍然 fail closed。
+    monkeypatch.setattr(skills_mod.gitlab_mr, "review_suspect",
+                        lambda **kw: "http://gitlab.invalid/-/merge_requests/1")
 
     r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
     assert r.status_code != 503, "作者侧的失败不该让人重试"

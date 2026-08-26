@@ -190,17 +190,26 @@ class TestReviewSuspectPassesTheReason:
         note = next(p for m, path, p in sent if path.endswith("/notes"))
         assert REASON_NO_REPORT in note["body"], "the Discussion tab needs it too"
 
-    def test_a_failure_to_open_the_mr_is_not_fatal(self, monkeypatch):
-        """Unchanged behaviour, asserted because the reason plumbing runs through here."""
+    def test_a_failure_to_open_the_mr_is_reported_not_swallowed(self, monkeypatch):
+        """开不出 MR 必须抛出来。
+
+        契约改过一次。原来这里返回 None,调用方当成"最好能开就开",结果是:内容已经写在复核分支上、
+        数据库那一行是 pending,而没有 MR、没有人被通知、也没有东西可复核 —— 上传者看到的"等待复核"
+        是假的,而收敛器靠 MR 状态推进,那一行会永远停在那里。
+
+        现在的不变量是:**内容在复核分支上 ⇒ 一定有 MR**。开不出来就当这次发布没成功,由调用方把分支
+        收回去并让请求失败(见 upload/edit 两处的 ReviewRequestFailed 处理)。
+        """
         def boom(*_a, **_k):
             raise RuntimeError("gitlab down")
 
         monkeypatch.setattr(gitlab_mr, "_request", boom)
         settings = gitlab_mr.get_settings()
         monkeypatch.setattr(settings, "audit_review_enabled", True, raising=False)
-        assert gitlab_mr.review_suspect(
-            source_branch="b", target_branch="main", skill_name="s", findings=[],
-            audit_ref="r", reason="x") is None
+        with pytest.raises(gitlab_mr.ReviewRequestFailed):
+            gitlab_mr.review_suspect(
+                source_branch="b", target_branch="main", skill_name="s", findings=[],
+                audit_ref="r", reason="x")
 
 
 def test_an_unreachable_engine_tells_the_reviewer_what_to_do():
