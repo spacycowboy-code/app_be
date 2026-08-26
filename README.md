@@ -120,10 +120,15 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 |---|---|
 | 发布、回滚、查现在跑的是什么、排查失败 | [platform-ci 操作手册](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/README.md) |
 | 改本服务的端口、环境变量、挂载目录 | [platform-ci `deploy/`](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/tree/main/deploy) |
-| 为什么这样分工 | [platform-ci DESIGN.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/DESIGN.md) |
+| 查某个令牌配在哪、到期、失效了什么会坏 | [platform-ci CREDENTIALS.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/CREDENTIALS.md) |
+| 为什么这样分工、集群、备份恢复 | [platform-ci PLATFORM.md](https://gitlab.internal.ericsson.com/rp-ai-miao/platform-ci/-/blob/main/PLATFORM.md) |
 
 合并到 `main` 后流水线产出镜像 `armdocker.rnd.ericsson.se/proj-rvc/rp-ai/rp-ai-portal-be:<commit sha>`;
 发布就是在环境描述里把镜像标签改成它。
+
+**现在构建和部署是停着的**:`proj-rvc` 是别人项目的 Artifactory 空间,推镜像用的也是别人的服务账号,
+那套凭据已于 2026-08-26 删除。换成我们自己的账号后,上面那个镜像前缀也要一起改。
+恢复的三步见 CREDENTIALS.md 开头。已经在跑的容器不受影响。
 
 本仓产出**一个**镜像 `proj-rvc/rp-ai/rp-ai-portal-be:<sha>`(对账器用同一个镜像,只换 entrypoint)。
 
@@ -139,4 +144,25 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 
 本地跑测试用 `pytest`(判定器可在测试里替换)。要跑起整套服务用验收环境,不要在本仓再造一份
 compose——那会与环境描述各说各话。
+
+## 这个仓的设计文档
+
+都在 `.kiro/specs/skill-audit/`,按"读了能干什么"排:
+
+| 文档 | 讲什么 | 状态 |
+|---|---|---|
+| `repo-access.md` | 门户怎么读写技能内容:不持有可变副本,按不可变引用读,发布是带前置条件的原子写。删除的两个方向。实测过的接口行为 | 已实现并在生产验过。剩一步:收敛器补 manifest 扫描 |
+| `service-split.md` | 审计为什么拆成独立服务、边界怎么画、失败语义 | 已实现,引擎在 `rp-ai-miao/skill-audit` |
+| `security-compliance.md` | 安全合规维度:查什么、怎么设计、实测效果 | 已实现 |
+| `data-compliance.md` | 数据合规维度 | **只有设计,一行没实现**;它依据的那份数据决定 2026 年 9 月到期 |
+| `duplication.md` | 重复性(查重)维度 | 设计写在实现之前,实际实现见 !47 / 前端 !22 / skill-audit !1(尚未评审) |
+
+## 还剩的活
+
+| 事 | 说明 |
+|---|---|
+| 收敛器补 manifest 扫描 | 规格在 `repo-access.md` 末尾,前置条件(删除语义)已满足。同时要兜住"复核 MR 存在"这条投影的重算 |
+| `instructions` 列的迁移删除 | 这一列现在既没有写者也没有读者(唯一的读者随 `export_skills.py` 一起删了)。生产库里还有 22 行非空数据,删列前先确认没有别的消费方 |
+| 那三个查重 MR 的评审 | !47(本仓,76 处改动)、前端 !22(10 处)、skill-audit !1(26 处),都还是 opened |
+| 评审时注意探针脚本 | `feature/dup-portal-integration` 上有 `skill_audit/dup_probes/` 六十多个脚本和 jsonl 结果。**main 上目前是干净的**,评审时别让它们合进来 |
 
