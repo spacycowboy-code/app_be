@@ -96,6 +96,22 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 
 ## 构建与部署
 
+## 本地跑测试碰不到真仓库,别把这道守卫拆了
+
+`tests/conftest.py` 里有一个 autouse 固件:清空 `gitlab_token`、把技能仓项目名指成假值、
+并换掉 `skill_content` 与 `gitlab_mr` 的 `_opener`。任何真实的出网调用都会让那条测试直接失败。
+
+为什么必须有它:原来 conftest 不清 `gitlab_token`,而有几条测试没给 `gitlab_mr.review_suspect`
+打桩。后果是谁的机器上配了真令牌,跑一次测试就往**生产**技能仓开三个真 MR。生产技能仓因此累积了
+66 个垃圾 MR,已全部关闭。
+
+两个实现细节不要改:
+
+* 守卫放在 `_opener`(真正的出网口),不放在 `_fetch` / `_post` 上 —— 有两条测试**故意**验证
+  `_fetch` 怎么处理 404 与 502,它们自己换掉 `_opener`。
+* 用 `pytest.fail` 而不是 `assert`。`AssertionError` 会被 `review_suspect` 的 `except Exception`
+  吃掉,守卫就失效了。
+
 ## 提交前扫一遍密钥
 
 ```bash
@@ -162,7 +178,7 @@ compose——那会与环境描述各说各话。
 | 事 | 说明 |
 |---|---|
 | 收敛器补 manifest 扫描 | 规格在 `repo-access.md` 末尾,前置条件(删除语义)已满足。同时要兜住"复核 MR 存在"这条投影的重算 |
-| `instructions` 列的迁移删除 | 这一列现在既没有写者也没有读者(唯一的读者随 `export_skills.py` 一起删了)。生产库里还有 22 行非空数据,删列前先确认没有别的消费方 |
+| `instructions` 列的迁移删除 | 详情接口的正文改成按引用读之后,这一列**没有读者**了;写者还剩一个 `app/seed.py`(灌种子数据时写)。注意 `upload.py` 与 `skills.py` 里的 `instructions=` 是 `store()` 的入参,不是这一列。生产库里还有 22 行非空数据,删列前先确认没有别的消费方 |
 | 那三个查重 MR 的评审 | !47(本仓,76 处改动)、前端 !22(10 处)、skill-audit !1(26 处),都还是 opened |
 | 评审时注意探针脚本 | `feature/dup-portal-integration` 上有 `skill_audit/dup_probes/` 六十多个脚本和 jsonl 结果。**main 上目前是干净的**,评审时别让它们合进来 |
 
