@@ -177,6 +177,15 @@ def _inspection_out(ins: pkg.Inspection, *, artifact_name: str | None) -> dict:
             "sources": d.sources,
         },
         "launchCandidates": ins.launch_candidates,
+        # 每条候选的来源和"错了看不看得出来"。确认屏靠 certain 决定要不要把它当成已核对的
+        # 值来显示 —— 结构化推导出来的可以,从 README 猜的必须显式标成待核对。
+        "launchGuesses": [
+            {"command": g.command, "source": g.source, "certain": g.certain}
+            for g in ins.launch_guesses
+        ],
+        # 结构化来源命中了没有。留这一项是为了在决定"要不要上大模型兜底"之前先有数据:
+        # 如果绝大多数包都能确定推导出来,那个兜底就不值得建。
+        "launchCertain": bool(ins.launch_guesses and ins.launch_guesses[0].certain),
         # 唯一的自动可用性检查:启动命令提到的文件在不在包里。找不到不代表错(可能是装出来
         # 的 entry point),所以只是提示。
         "launchTargetFound": pkg.launch_target_exists(launch, ins.files) if launch else None,
