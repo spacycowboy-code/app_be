@@ -224,6 +224,25 @@ The API speaks **camelCase** JSON to match the Angular frontend.
 本地跑测试用 `pytest`(判定器可在测试里替换)。要跑起整套服务用验收环境,不要在本仓再造一份
 compose——那会与环境描述各说各话。
 
+## 上传或编辑技能报 503 时,按这个顺序查
+
+503 只有一种含义:**内容没写进技能仓**。门户不再有本地副本,所以写不成就是写不成,不会出现
+"页面说保存成功但市场里点不开"。按代价从低到高查:
+
+1. **是不是所有技能都失败,还是只有某一个**。只有某一个失败,先看它的名字或目录是不是与已存在的
+   冲突 —— 被下架过的技能重传会撞 `A file with this name already exists`。
+2. **令牌**。生产是 `AUDIT_PROD_ENV` 里的 `GITLAB_TOKEN`(项目访问令牌 `portal-skill-repo-prod`),
+   到期或被吊销都会让所有写失败。到期时间见 platform-ci 的 `CREDENTIALS.md`。
+   令牌还必须在技能仓 `main` 的推送白名单里 —— 吊销重发之后白名单授权不会自动跟着回来。
+3. **能不能开复核 MR**。可疑内容要先建复核分支再开 Draft MR;开不出 MR 时会删掉分支并返回 503,
+   不会留下没有 MR 的孤立分支。这一类失败的原因通常是 `AUDIT_MR_PROJECT` 指错了仓。
+4. **审计引擎**。引擎不可达时是审计失败而不是写失败,报的不是 503;但两者都会让上传停下,
+   所以确认一下 `AUDIT_ENGINE_TOKEN` 两边是否同值、引擎容器是否 healthy。
+5. **GitLab 本身**。读也失败(市场里点不开任何技能正文)就是 GitLab 侧的问题,等它恢复。
+
+日志在容器的 stdout 与轮转文件里(`log_conf.yaml` 里三个 logger 都同时挂这两个),
+`docker logs ai-portal-be-backend` 能直接看到。
+
 ## 这个仓的设计文档
 
 都在 `.kiro/specs/skill-audit/`,按"读了能干什么"排:
