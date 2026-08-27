@@ -532,3 +532,150 @@ def test_the_page_can_report_which_structure_it_is_using(client, monkeypatch):
         "people": len(SNAPSHOT),
         "uploadedBy": "EZHGMIO",
     }
+
+
+# --- what a cell in the table actually says ---------------------------------
+#
+# 这一组存在的理由是一次真实的误读:一个人上传了三个 agent,而"上传 agent"那一格显示
+# 1 —— 那是人数。列标题写着"上传 agent"、指标单位写着"个 agent",于是读的人合理地把 1
+# 读成"一个 agent",看不出这个部门交了三个。改之前那 29 个测试全过,因为**没有一个测试
+# 断言过格子里显示什么**,这正是它能上线的原因。
+
+
+def _cell(body: str, column_label: str, row_label: str) -> str:
+    """从渲染出来的大部门表里取一个格子的文本。
+
+    按表头的位置找列,而不是按写死的下标:列的顺序会变,而"第 8 个 td"这种断言在顺序变
+    了之后仍然通过,只是它测的已经是另一列了。
+    """
+    table = re.search(r'<table class="sortable">.*?</table>', body, re.S).group(0)
+    head = re.search(r"<thead>(.*?)</thead>", table, re.S).group(1)
+    headers = [
+        " ".join(re.sub(r"<[^>]+>", " ", th).split())
+        for th in re.findall(r"<th[^>]*>(.*?)</th>", head, re.S)
+    ]
+    idx = next(i for i, h in enumerate(headers) if h.startswith(column_label))
+    for row in re.findall(r"<tr>(.*?)</tr>", table, re.S):
+        cells = [
+            " ".join(re.sub(r"<[^>]+>", " ", td).split())
+            for td in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+        ]
+        if cells and cells[0] == row_label:
+            return cells[idx]
+    raise AssertionError(f"表里没有 {row_label} 这一行")
+
+
+def _seed_market_agents(creator: str, how_many: int) -> None:
+    from app.models.market import RpAiMarketItem
+
+    with SessionLocal() as db:
+        for n in range(how_many):
+            db.add(
+                RpAiMarketItem(
+                    id=f"agent-{creator.lower()}-{n}",
+                    name=f"Agent {n}",
+                    item_type="agent",
+                    service_type="code",
+                    source="upload",
+                    category_id="public",
+                    creator=creator,
+                    status="approved",
+                )
+            )
+        db.commit()
+
+
+def test_three_agents_from_one_person_do_not_read_as_one(client):
+    """一个人交三个,格子要说 3,不能只说"有一个人交过"。
+
+    这是这一列的全部价值:同一个人交第二个、第三个 agent 时,一个只数人的列一个数字都
+    不会变,而"传了但报告没动"看起来完全像一个 bug。
+    """
+    _seed_people()
+    _seed_market_agents("EDEV", 3)
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert _cell(body, "上传 agent", "SWD") == "1 / 3"
+
+
+def test_one_item_still_shows_both_numbers(client):
+    """人数与件数相等时也要两个都写。
+
+    原来相等就省掉后缀,于是同一列里的 "1" 有两种意思(一人一件、一人多件),而读者分不出
+    是哪一种。省掉的那点噪音换来的是一列有两种读法。
+    """
+    _seed_people()
+    _seed_market_agents("EDEV", 1)
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert _cell(body, "上传 agent", "SWD") == "1 / 1"
+
+
+def test_a_zero_stays_a_single_zero(client):
+    """0 人必然 0 件,没有歧义,而这张表里零很多。"""
+    _seed_people()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert _cell(body, "上传 agent", "SWD") == "0"
+
+
+def test_uploaded_skills_are_counted_the_same_way(client):
+    """skill 和 agent 是同一个口径。
+
+    两列曾经都只显示人数,但同表的另外几列显示「人数 / 次数」,于是看起来像 skill 那边有
+    件数、agent 这边没有 —— 两列一起改,免得再长出第二种读法。
+    """
+    _seed_people()
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                RpAiSkill(id="s-a", name="A", category_id="public", uploader_eid="EDEV"),
+                RpAiSkill(id="s-b", name="B", category_id="public", uploader_eid="EDEV"),
+            ]
+        )
+        db.commit()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert _cell(body, "上传 skill", "SWD") == "1 / 2"
+
+
+def test_every_column_says_how_to_read_it(client):
+    """表头写出这一列是人数还是「人数 / 件数」。
+
+    两种形态并存而表头不说,读者只能猜 —— 这次就是这么猜错的。
+    """
+    _seed_people()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    table = re.search(r'<table class="sortable">.*?</table>', body, re.S).group(0)
+    head = re.search(r"<thead>(.*?)</thead>", table, re.S).group(1)
+    for label, how in [
+        ("上传 agent", "人数 / 个 agent"),
+        ("上传 skill", "人数 / 个 skill"),
+        ("近期登录", "人数 / 次登录"),
+    ]:
+        th = next(
+            t for t in re.findall(r"<th[^>]*>(.*?)</th>", head, re.S) if label in t
+        )
+        assert how in " ".join(re.sub(r"<[^>]+>", " ", th).split()), (label, th)
+
+
+def test_the_appendix_counts_items_not_times(client):
+    """附录里用指标自己的单位,不写死「次」。
+
+    "另有 1 个非个人账号、共 7 次" 读起来像它下载了 7 次,而实际是它交了 7 个 skill。
+    """
+    _seed_people()
+    with SessionLocal() as db:
+        db.add(RpAiPortal(eid="RP-AI-BOT", display_name="RP AI Bot"))
+        db.flush()
+        db.add_all(
+            [
+                RpAiSkill(
+                    id=f"bot-{n}",
+                    name=f"Bot {n}",
+                    category_id="public",
+                    uploader_eid="RP-AI-BOT",
+                )
+                for n in range(2)
+            ]
+        )
+        db.commit()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert "共 2 个 skill，未计入" in body
+    assert "共 2 次，未计入" not in body

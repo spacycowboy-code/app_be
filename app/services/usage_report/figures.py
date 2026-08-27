@@ -35,8 +35,22 @@ class Metric:
     per_eid: dict[str, int] = field(default_factory=dict)
     first_seen: str | None = None
     last_seen: str | None = None
-    #: True when the count is a number of events; False when the row *is* the
-    #: thing (a skill, a market item) and counting events would be meaningless.
+    #: True when the per-person number is worth showing next to the head count:
+    #: the same person uploading a second agent is a second agent, and a column
+    #: that only counts people cannot show it.
+    #:
+    #: This used to read "False when the row *is* the thing (a skill, a market
+    #: item) and counting events would be meaningless", and the upload metrics were
+    #: all False on that reasoning. The effect was that a department which had
+    #: uploaded three agents by one person showed ``1`` — the same as a department
+    #: with one agent — and the reader had no way to tell. The prose "共 25 次上传"
+    #: is indeed odd for items, but that is a wording problem, fixed by using each
+    #: metric's own ``unit``; it is not a reason to drop the number.
+    #:
+    #: False is now for metrics where the count genuinely carries nothing beyond
+    #: "this person did it": ever_signed_in (per person it is always 1) and the two
+    #: favourite metrics, where the report cares about how many people keep things,
+    #: not how long anyone's list is.
     countable: bool = True
     #: Rows that belong to this metric but carry no person, so they are real
     #: activity that cannot be placed in a department. Stated rather than
@@ -199,7 +213,6 @@ def collect(conn: Connection) -> list[Metric]:
                 "select uploader_eid, count(*) from rp_ai_skill "
                 "where uploader_eid is not null group by uploader_eid",
             ),
-            countable=False,
         ),
         "rp_ai_skill",
     )
@@ -302,7 +315,6 @@ def collect(conn: Connection) -> list[Metric]:
                 "select creator, count(*) from rp_ai_market_item "
                 "where item_type = 'agent' and creator is not null group by creator",
             ),
-            countable=False,
         ),
         "rp_ai_market_item",
     )
@@ -317,7 +329,6 @@ def collect(conn: Connection) -> list[Metric]:
                 "select creator, count(*) from rp_ai_market_item "
                 "where creator is not null group by creator",
             ),
-            countable=False,
             unattributed=int(
                 conn.execute(
                     text(
