@@ -128,6 +128,14 @@ _DERIVED_IGNORES = frozenset({
 #: keep 候选最多给这么多。再多上传者就不会逐条看了,而这个清单的价值全在他逐条看。
 _KEEP_LIMIT = 8
 
+#: 一体式安装脚本。发现它就只出这一条 —— 这类脚本的约定是"整个安装都归我"
+#: (report-manhour 的 setup.ps1 自己查 Python、装依赖、装浏览器、自检),再并列几条我们
+#: 猜出来的步骤会和它抢同一件事,而冲突的表现是脚本跑一半失败、报错指向别处。
+_SETUP_SCRIPTS = ("setup.ps1",)
+
+#: `requires-python = ">=3.12"` 里的那个次版本号。
+_PY_FLOOR = re.compile(r">=\s*3\.(\d+)")
+
 
 class PackageRejected(Exception):
     """这个 zip 我们处理不了,或者 GitLab 一定会拒收。
@@ -166,12 +174,30 @@ class LaunchGuess:
 
 
 @dataclass
+class InstallStep:
+    """一条安装命令,以及它为什么需要。
+
+    `note` 不是装饰。读提示词的是使用者的 agent,它遇到阻碍会自己发明变通做法,而这类步骤
+    的变通做法恰好都是错的(改机器的执行策略而不是单次绕过、跳过 `playwright install`
+    因为 pip 已经"装好了" playwright)。把理由写出来,它就不必猜。
+    """
+
+    command: str
+    note: str | None = None
+
+
+@dataclass
 class Declared:
-    """包对自己的描述。三项都可能是空的,空就是"要问上传者"。"""
+    """包对自己的描述。每项都可能是空的,空就是"要问上传者"。"""
 
     launch: str | None = None
     runtime: str | None = None
     keep: list[str] = field(default_factory=list)
+    #: 开始装之前使用者必须知道的事:独占资源、要先登出的会话、要先申请的权限。
+    #: **不推导** —— 这类知识不在代码里(report-manhour 的"SAP 工号是排他锁,先 Exit +
+    #: Log off,否则锁挂 30 分钟到 2 小时"只以散文形式存在于 README 和 agent 的 prompt 里),
+    #: 只能来自 sidecar 或上传者手填。
+    prerequisites: list[str] = field(default_factory=list)
     #: 每一项从哪来:sidecar / readme / form。确认屏要把来源写给上传者看 —— 一个自己填好
     #: 的值,如果看不出是哪来的、能不能改,比空着更让人不安。
     sources: dict[str, str] = field(default_factory=dict)
@@ -192,6 +218,9 @@ class Inspection:
     #: 候选的完整形态:每条带来源和"错了看不看得出来"。`launch_candidates` 是它的命令列表,
     #: 保留是因为确认屏和审核页都在读那个形状。
     launch_guesses: list[LaunchGuess] = field(default_factory=list)
+    #: 装依赖那几步。提示词第 4 步原来只有一句泛泛的"按 README 安装",于是使用者的 agent
+    #: 要自己读 README 再自己决定怎么装 —— 而 Windows 上那几步每一步都有一个坑。
+    install_steps: list[InstallStep] = field(default_factory=list)
 
     @property
     def executables(self) -> list[str]:
@@ -570,6 +599,100 @@ def derive_runtime(root: Path, entries: list[FileEntry]) -> str | None:
     return "long-running" if any(dep in blob for dep in _LONG_RUNNING_DEPS) else None
 
 
+def _has(entries: list[FileEntry], rel: str) -> bool:
+    """包根有没有这个文件(按 `_prefixes` 的规则)。"""
+    by_path = {e.path for e in entries}
+    return any(f"{prefix}{rel}" in by_path for prefix in _prefixes(entries))
+
+
+def _python_floor(root: Path, entries: list[FileEntry]) -> str | None:
+    """`requires-python` 声明的最低次版本,例如 "3.12"。声明不出来返回 None。
+
+    有这个值才敢出 `winget install Python.Python.3.X` 那一步:版本号猜错的表现不是装不上,
+    而是装了一个能用但不是作者测过的解释器。
+    """
+    text = _read_text(root, entries, "pyproject.toml")
+    if not text:
+        return None
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project")
+    spec = project.get("requires-python") if isinstance(project, dict) else None
+    if not isinstance(spec, str):
+        return None
+    m = _PY_FLOOR.search(spec)
+    return f"3.{m.group(1)}" if m else None
+
+
+def derive_install_steps(root: Path, entries: list[FileEntry]) -> list[InstallStep]:
+    """按包里实际有什么,给出装依赖的精确命令。
+
+    这一步存在的理由是提示词第 4 步原来只写"按仓库里的 README 安装(若有 setup.ps1 就跑
+    它)"。那句话把判断推给了使用者的 agent,而 Windows 上这几步每一步都有一个只有 Windows
+    用户会踩的坑:默认执行策略拦下 `.ps1`;`winget` 装完 Python 后当前终端的 PATH 还是旧的;
+    `python` 与 `py -3.12` 两种入口取决于安装时勾了什么。照文档敲会一个个踩,而这些坑
+    可以直接从包里的文件推出来、提前写进命令里。
+
+    推不出来就返回空,提示词退回原来那句 —— 那是一句诚实的兜底,不是失败。
+    """
+    for script in _SETUP_SCRIPTS:
+        if _has(entries, script):
+            return [InstallStep(
+                command=f"powershell -ExecutionPolicy Bypass -File .\\{script}",
+                note=(
+                    f"`-ExecutionPolicy Bypass` 不能省:Windows 客户端默认策略是 Restricted,"
+                    f"直接敲 `.\\{script}` 会报 \"running scripts is disabled on this "
+                    f"system\"。这里用的是单次调用的绕过,**不要**去改机器的策略设置。"
+                    f"这个脚本负责整个安装(查 Python、装依赖、自检),所以不要再另外装一遍;"
+                    f"它报错就把原文告诉我,不要绕过它自己想办法。"
+                ),
+            )]
+
+    steps: list[InstallStep] = []
+    floor = _python_floor(root, entries)
+    py = f"py -{floor}" if floor else "py -3"
+    needs_python = _has(entries, "requirements.txt") or _has(entries, "pyproject.toml")
+
+    if needs_python and floor:
+        steps.append(InstallStep(
+            command=f"winget install Python.Python.{floor}",
+            note=(
+                f"只在还没装 Python {floor} 时需要。**装完必须开一个新终端**:PATH 是终端"
+                f"启动时读的,当前窗口里 `python` 仍然找不到 —— 这一点每个人都会踩一次,"
+                f"而它看起来像\"装失败了\"。"
+            ),
+        ))
+
+    if _has(entries, "requirements.txt"):
+        steps.append(InstallStep(
+            command=f"{py} -m pip install -r requirements.txt",
+            note=(
+                "用 `py` 启动器而不是 `python`:python.org 的安装包两者都给,但 PATH 上有"
+                "哪个取决于安装时勾了什么,而那个勾选框默认不勾。"
+            ),
+        ))
+    elif _has(entries, "pyproject.toml"):
+        steps.append(InstallStep(command=f"{py} -m pip install -e .", note=None))
+    elif _has(entries, "package.json"):
+        steps.append(InstallStep(
+            command="npm ci",
+            note="用 `ci` 而不是 `install`:它照 lock 文件装,装出来和作者测过的是同一套版本。",
+        ))
+
+    if any(dep in _runtime_deps(root, entries) for dep in ("playwright", "pyppeteer")):
+        steps.append(InstallStep(
+            command="playwright install chromium",
+            note=(
+                "pip 装的只是 playwright 这个库,浏览器本身要另外下。**不做这一步不会在"
+                "安装时报错**,而是等程序真的去开浏览器时才失败,那时的报错指向别处。"
+            ),
+        ))
+
+    return steps
+
+
 def derive_keep(root: Path, entries: list[FileEntry]) -> list[str]:
     """`.gitignore` 里被忽略的**本机状态** → 升级时要从 .bak 搬过来的候选。
 
@@ -667,6 +790,9 @@ def read_sidecar(root: Path, entries: list[FileEntry]) -> Declared:
         keep = data.get("keep") or []
         if isinstance(keep, str):
             keep = [keep]
+        prereq = data.get("prerequisites") or []
+        if isinstance(prereq, str):
+            prereq = [prereq]
         src = {}
         if launch:
             src["launch"] = f"{SIDECAR_NAME}"
@@ -674,10 +800,13 @@ def read_sidecar(root: Path, entries: list[FileEntry]) -> Declared:
             src["runtime"] = f"{SIDECAR_NAME}"
         if keep:
             src["keep"] = f"{SIDECAR_NAME}"
+        if prereq:
+            src["prerequisites"] = f"{SIDECAR_NAME}"
         return Declared(
             launch=launch,
             runtime=runtime if runtime in RUNTIMES else None,
             keep=[str(k) for k in keep if str(k).strip()],
+            prerequisites=[str(p).strip() for p in prereq if str(p).strip()],
             sources=src,
         )
     return Declared()
@@ -720,6 +849,7 @@ def inspect(root: Path, entries: list[FileEntry]) -> Inspection:
         declared=declared,
         launch_candidates=candidates,
         launch_guesses=guesses,
+        install_steps=derive_install_steps(root, entries),
         env_files=[e.path for e in entries if PurePosixPath(e.path).name in (".env", ".env.local")],
         has_git_dir=any(p.path.startswith(".git/") or "/.git/" in p.path for p in entries),
     )
@@ -762,6 +892,7 @@ def render_sidecar(declared: Declared, *, name: str, version: str) -> str:
     修改被无声覆盖),而且发布出去的包就不是审计过的那一个了。
     """
     keep = declared.keep or []
+    prereq = declared.prerequisites or []
     lines = [
         "# 由 RP AI Portal 生成:安装提示词按这里的字段生成,不再去 README 里猜。",
         "# 这一份是给拿着 zip 离开门户的人看的;门户自己读的是数据库里那份(两者同时写入)。",
@@ -772,6 +903,8 @@ def render_sidecar(declared: Declared, *, name: str, version: str) -> str:
         "keep:" if keep else "keep: []",
     ]
     lines += [f"  - {json_safe(k)}" for k in keep]
+    lines.append("prerequisites:" if prereq else "prerequisites: []")
+    lines += [f"  - {json_safe(p)}" for p in prereq]
     return "\n".join(lines) + "\n"
 
 

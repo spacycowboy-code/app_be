@@ -305,6 +305,12 @@ def create_install_token(
         "launch": meta.get("launch") or None,
         "runtime": meta.get("runtime") or None,
         "keep": meta.get("keep") or [],
+        # 提示词第 4 步原来只有一句泛泛的"按 README 安装(若有 setup.ps1 就跑它)",把判断
+        # 推给了对方的 agent。这两项让它不必判断:install 是门户从包里推出来的精确命令,
+        # prerequisites 是上传者点名的、开始装之前必须知道的事(独占资源、要先登出的会话)。
+        # 都可能是空的 —— 空就退回原来那句,那是诚实的兜底。
+        "install": meta.get("install") or [],
+        "prerequisites": meta.get("prerequisites") or [],
     }
 
 
