@@ -30,8 +30,12 @@ def _manifest_from_repo(monkeypatch):
     )
 
 
-def _broken_skill(sid="replir", versions=2) -> None:
-    """造出 bug 留下的那种行:技能行被改成了没过审的那份,status=pending。"""
+def _broken_skill(sid="replir", versions=2, status="pending") -> None:
+    """造出 bug 留下的那种行:技能行被改成了没过审的那份,status 不是 approved。
+
+    ``status`` 两种都要能造:复核人还没动那张 MR 时是 ``pending``,把 MR 关掉之后收敛器会把它
+    推到 ``rejected``。两者是同一个坏行的两个时刻。
+    """
     with SessionLocal() as db:
         if db.get(RpAiCategory, "public") is None:
             db.add(RpAiCategory(id="public", label="Public"))
@@ -44,7 +48,7 @@ def _broken_skill(sid="replir", versions=2) -> None:
             id=sid, name="Replir Allocation Tool (sudo)", description="now with sudo",
             category_id="public", category="Public", uploader_eid="TESTER",
             author="TESTER", version="1.1.0", repo_commit="suspectsha",
-            storage_path="public/replir", status="pending", audit_state="suspect",
+            storage_path="public/replir", status=status, audit_state="suspect",
             tags=["alloc", "sudo"],
         ))
         db.flush()
@@ -102,3 +106,46 @@ def test_a_skill_that_never_published_is_left_alone(capsys) -> None:
     with SessionLocal() as db:
         assert db.get(RpAiSkill, "replir").status == "pending"
     assert "没有发布过的版本" in capsys.readouterr().out
+
+
+def test_a_refused_update_is_repaired_too() -> None:
+    """复核人把那张 MR 关掉之后,收敛器已经把这一行推到 ``rejected``。
+
+    这是实际发生的那一种:人看到"这次更新不该上线"就关了 MR,不知道关掉的同时把**旧版本**也一起
+    从市场上除名了。只认 ``pending`` 的话,修复脚本在真正需要它的场景下一行都匹配不到。
+    """
+    _broken_skill(status="rejected")
+    with SessionLocal() as db:
+        assert [s.id for s in repair_mod._candidates(db, None)] == ["replir"]
+        assert repair_mod.repair(db, db.get(RpAiSkill, "replir"), apply=True) is True
+        db.commit()
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, "replir")
+        assert (skill.status, skill.version) == ("approved", "1.0.0")
+
+
+def test_the_repair_survives_the_next_reconcile_sweep(monkeypatch) -> None:
+    """修完之后收敛器不能把它又藏回去。
+
+    那条可疑结论说的是没过审的那次更新,不是恢复回去的这一版。不把它标成 ``replaces_published``,
+    下一轮收敛会把它当成当前这一版的结论:MR 已关 -> ``rejected``,技能几分钟后再次消失 ——
+    修复自己撤销掉,而且看起来像是脚本没生效。
+    """
+    from app.services.skill_audit import reconcile as reconcile_mod
+
+    _broken_skill(status="rejected")
+    with SessionLocal() as db:
+        repair_mod.repair(db, db.get(RpAiSkill, "replir"), apply=True)
+        db.commit()
+
+    monkeypatch.setattr(reconcile_mod.gitlab_mr, "mr_state", lambda url: "closed")
+    for _ in range(3):
+        with SessionLocal() as db:
+            reconcile_mod.reconcile_all(db)
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, "replir")
+        assert skill.status == "approved", "修复被收敛器撤销了"
+        assert skill.version == "1.0.0"
+        # 而作者仍然看得到那次更新被否了 —— 暂存行留着,状态是 rejected。
+        assert skill.pending_update is not None
+        assert skill.pending_update.outcome == "rejected"
