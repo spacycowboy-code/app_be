@@ -49,8 +49,13 @@ MANIFEST_FIELDS = {
 
 
 def _candidates(db, only: str | None) -> list[RpAiSkill]:
+    # ``rejected`` 和 ``pending`` 都要认。复核人把那张复核 MR 关掉之后,收敛器就把这一行从
+    # ``pending`` 推到了 ``rejected`` —— 同一个坏掉的行,换了个状态,而这恰好是实际发生的那一种:
+    # 人看到"这次更新不该上线"就关了 MR,却不知道关掉的同时把**旧版本**也一起从市场上除名了。
+    # 只认 pending 的话,修复脚本会在真正需要它的那个场景下一行都匹配不到。
     stmt = select(RpAiSkill).where(
-        RpAiSkill.status == "pending", RpAiSkill.audit_state == "suspect"
+        RpAiSkill.status.in_(("pending", "rejected")),
+        RpAiSkill.audit_state == "suspect",
     )
     if only:
         stmt = stmt.where(RpAiSkill.id == only)
@@ -92,7 +97,7 @@ def repair(db, skill: RpAiSkill, *, apply: bool) -> bool:
     print(f"  修 {skill.id}")
     print(f"    版本   {skill.version} -> {published.version}")
     print(f"    提交   {skill.repo_commit} -> {published.commit_sha}")
-    print(f"    状态   pending -> approved")
+    print(f"    状态   {skill.status} -> approved")
     for key, column in MANIFEST_FIELDS.items():
         if key in manifest and manifest[key] != getattr(skill, column):
             print(f"    {column:16} {getattr(skill, column)!r} -> {manifest[key]!r}")
@@ -127,6 +132,11 @@ def repair(db, skill: RpAiSkill, *, apply: bool) -> bool:
     skill.status = "approved"
     skill.audit_state = "pass"
     skill.audit_ref = None
+    # 那条可疑结论说的是**这次没过审的更新**,不是恢复回去的这一版。不翻这一格,收敛器下一轮
+    # 会把它当成"当前这一版的结论":MR 已关 -> rejected,技能又被藏起来 —— 修复在几分钟内自己
+    # 撤销掉,而且看起来像是修复没生效。这一格是整个脚本里唯一让结果稳定下来的东西。
+    if record is not None:
+        record.replaces_published = True
     db.delete(unpublished)      # 这一版没发布过,它的历史现在由暂存行承担
     return True
 
@@ -142,7 +152,7 @@ def main() -> int:
         if not skills:
             print("没有需要修的行。")
             return 0
-        print(f"待检查 {len(skills)} 个 pending+suspect 的技能:")
+        print(f"待检查 {len(skills)} 个待复核状态卡住的技能:")
         fixed = sum(repair(db, s, apply=args.apply) for s in skills)
         if args.apply:
             db.commit()
