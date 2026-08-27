@@ -209,3 +209,438 @@ def test_git_dir_and_env_files_are_surfaced(tmp_path: Path) -> None:
     assert ins.has_git_dir is True
     assert ins.env_files == ["a/.env"]
     assert "a/main.py" in ins.executables
+
+
+# --- 启动命令的结构化推导 ---------------------------------------------------
+#
+# 这一组钉住的是**来源的优先级**,而不是"能不能推出来"。理由:每个来源单独看都能给出一条
+# 像样的命令,错的只是选了哪一条 —— 而选错的表现是用户粘贴后启动了另一个程序,那行命令
+# 看起来完全正常。
+
+
+def inspect_zip(files: dict[str, str], tmp_path: Path) -> pkg.Inspection:
+    data = mkzip(files)
+    entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
+    return pkg.inspect(tmp_path / "src", entries)
+
+
+KIRO_AGENT = '{"name": "timesheet", "description": "报工时助手", "tools": ["read"]}'
+
+
+def test_kiro_agent_config_beats_readme_and_pyproject(tmp_path: Path) -> None:
+    """report-manhour 的真实形状:三个来源同时存在,只有一个是市场里的人要的那条。
+
+    `pyproject.toml` 的 `timesheet` 是给这个工具的开发者用的底层 CLI;README 的
+    `python -m timesheet ...` 同理。用户要的是那个交互式会话,只有 `.kiro/agents/` 知道。
+    """
+    ins = inspect_zip({
+        "report-manhour/README.md": (
+            "# 自动报工时\n\n## 启动\n```\npython -m timesheet --input x.xlsx\n```\n"
+        ),
+        "report-manhour/pyproject.toml": (
+            '[project]\nname = "timesheet"\n\n'
+            '[project.scripts]\ntimesheet = "timesheet.cli:main"\n'
+        ),
+        "report-manhour/.kiro/agents/timesheet.json": KIRO_AGENT,
+    }, tmp_path)
+
+    assert ins.declared.launch == "kiro-cli chat --agent timesheet"
+    # 确定推导出来的,确认屏可以当已核对的值显示 —— 所以来源里不该出现"待核对"。
+    assert ins.launch_guesses[0].certain is True
+    assert "待核对" not in ins.declared.sources["launch"]
+    assert ".kiro/agents/timesheet.json" in ins.declared.sources["launch"]
+    # 别的来源仍然作为候选留着,只是排在后面。
+    assert "timesheet" in ins.launch_candidates
+
+
+def test_readme_placeholder_line_is_not_prefilled(tmp_path: Path) -> None:
+    """回归:`--input "..."` 这种模板行曾被排到第一位并预填进确认屏。
+
+    它不装依赖、也在"启动"标题下面,所以前面两道过滤都放它过去了。粘贴出去的结果是找不到
+    名叫 `...` 的文件,而那行命令看起来完全正常。
+    """
+    ins = inspect_zip({
+        "a/README.md": (
+            "## 启动\n```\n"
+            'python -m timesheet --input "..." --force-rewrite\n'
+            "python -m timesheet --survey\n"
+            "```\n"
+        ),
+    }, tmp_path)
+
+    assert '"..."' not in (ins.declared.launch or "")
+    assert ins.declared.launch == "python -m timesheet --survey"
+    assert not any("..." in c for c in ins.launch_candidates)
+
+
+def test_multiple_kiro_agents_are_not_prefilled_as_certain(tmp_path: Path) -> None:
+    """替人选一个,他点下一步时不会发现选错了;全列出来只是多点一下。"""
+    ins = inspect_zip({
+        "a/.kiro/agents/one.json": '{"name": "one"}',
+        "a/.kiro/agents/two.json": '{"name": "two"}',
+    }, tmp_path)
+
+    assert len(ins.launch_guesses) == 2
+    assert all(g.certain is False for g in ins.launch_guesses)
+    assert set(ins.launch_candidates) == {
+        "kiro-cli chat --agent one", "kiro-cli chat --agent two",
+    }
+    assert "待核对" in ins.declared.sources["launch"]
+
+
+def test_agent_name_not_matching_filename_is_flagged(tmp_path: Path) -> None:
+    """kiro-cli 认文件名还是认 json 里的 name,我们没有权威依据 —— 所以不赌。
+
+    取文件名并要求两者一致,不一致时降级成待核对并把不一致本身说出来。赌错的表现是
+    "agent not found",看起来像根本没装上。
+    """
+    ins = inspect_zip({
+        "a/.kiro/agents/timesheet.json": '{"name": "report-manhour"}',
+    }, tmp_path)
+
+    assert ins.launch_guesses[0].certain is False
+    source = ins.declared.sources["launch"]
+    assert "timesheet" in source and "report-manhour" in source
+
+
+def test_broken_agent_json_is_ignored(tmp_path: Path) -> None:
+    """坏掉的 json 可能根本不是 agent 配置。按文件名硬推,错的时候看不出来。"""
+    ins = inspect_zip({
+        "a/.kiro/agents/x.json": "{not json at all",
+        "a/README.md": "## 启动\n```\npython main.py\n```\n",
+    }, tmp_path)
+
+    assert ins.declared.launch == "python main.py"
+
+
+def test_sidecar_still_beats_structured_derivation(tmp_path: Path) -> None:
+    """上传者明确写过的东西,不该被我们推导出来的值盖掉。"""
+    ins = inspect_zip({
+        "a/.kiro/agents/timesheet.json": KIRO_AGENT,
+        "a/portal-agent.yaml": 'launch: "kiro-cli chat --agent timesheet --resume"\n',
+    }, tmp_path)
+
+    assert ins.declared.launch == "kiro-cli chat --agent timesheet --resume"
+    assert ins.declared.sources["launch"] == "portal-agent.yaml"
+
+
+def test_pyproject_scripts_when_there_is_no_agent_config(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/pyproject.toml": '[project.scripts]\nmytool = "mytool.cli:main"\n',
+    }, tmp_path)
+    assert ins.declared.launch == "mytool"
+    assert ins.launch_guesses[0].certain is True
+
+
+def test_package_json_start_script(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/package.json": '{"name": "x", "scripts": {"start": "node server.js"}}',
+    }, tmp_path)
+    assert ins.declared.launch == "npm start"
+
+
+# --- runtime 与 keep 的推导 -------------------------------------------------
+
+
+def test_browser_automation_implies_long_running(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/requirements.txt": "playwright==1.49.1\nopenpyxl==3.1.5\n",
+    }, tmp_path)
+    assert ins.declared.runtime == "long-running"
+    assert "待核对" in ins.declared.sources["runtime"]
+
+
+def test_runtime_is_left_empty_without_a_strong_signal(tmp_path: Path) -> None:
+    """猜错的表现是对一个两秒就退出的脚本说"别关掉那个窗口"。留空让上传者选。"""
+    ins = inspect_zip({"a/requirements.txt": "requests\n"}, tmp_path)
+    assert ins.declared.runtime is None
+
+
+REAL_GITIGNORE = """\
+# 登录态：含 cookie 与浏览器 profile，绝不入库
+.browser-profile/
+
+# 运行产物：审计日志、计划报告、失败截图
+.timesheet-runs/
+
+# 输入物料（可能含真实项目号与工号）
+*.xlsx
+*.png
+!tests/fixtures/*.png
+
+# 代理生成的一次性启动器
+.ts-input.json
+
+# Python
+__pycache__/
+.venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+"""
+
+
+def test_keep_comes_from_gitignore_without_build_artifacts(tmp_path: Path) -> None:
+    """被 .gitignore 忽略的正好是"包里没有、远端也没有、只在这台机器上"的那一批。
+
+    排掉两类:构建产物(不搬不丢东西)和裸扩展名通配(匹配太宽,而提示词第 3 步的
+    "凡是只存在于 .bak 的都要搬"已经覆盖了它们)。
+    """
+    ins = inspect_zip({
+        "a/.gitignore": REAL_GITIGNORE,
+        "a/main.py": "1\n",
+    }, tmp_path)
+
+    keep = ins.declared.keep
+    # 丢了就恢复不回来的两项必须在。
+    assert ".browser-profile" in keep
+    assert ".timesheet-runs" in keep
+    assert ".ts-input.json" in keep
+    # 构建产物与工具缓存一个都不该在。
+    for derived in ("__pycache__", ".venv", "build", "dist", ".pytest_cache", ".mypy_cache"):
+        assert derived not in keep
+    # 裸扩展名通配不进清单。
+    assert not any(k.startswith("*.") for k in keep)
+    assert "请删掉不需要搬的" in ins.declared.sources["keep"]
+
+
+def test_sidecar_keep_is_not_overwritten_by_derivation(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/.gitignore": REAL_GITIGNORE,
+        "a/portal-agent.yaml": 'launch: "x"\nkeep:\n  - only-this\n',
+    }, tmp_path)
+    assert ins.declared.keep == ["only-this"]
+
+
+def test_no_gitignore_means_no_keep_candidates(tmp_path: Path) -> None:
+    ins = inspect_zip({"a/main.py": "1\n"}, tmp_path)
+    assert ins.declared.keep == []
+
+
+# --- 可用性检查 -------------------------------------------------------------
+
+
+def test_kiro_launch_resolves_to_the_agent_config(tmp_path: Path) -> None:
+    """`kiro-cli chat --agent X` 里一个词都不是包内文件,但它确实指向 `.kiro/agents/X.json`。
+
+    按通用规则它一定判 False,于是最常见也最有把握的那种包每次都会亮一条"包里找不到这个
+    文件"的警告 —— 而一处明显不对的提醒会让人连带不信别的提醒。
+    """
+    data = mkzip({"a/.kiro/agents/timesheet.json": KIRO_AGENT})
+    entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
+    assert pkg.launch_target_exists("kiro-cli chat --agent timesheet", entries) is True
+
+
+def test_wrong_agent_name_is_still_caught(tmp_path: Path) -> None:
+    """上面那条放宽不能把检查放空:agent 名写错了照样要判 False。"""
+    data = mkzip({"a/.kiro/agents/timesheet.json": KIRO_AGENT})
+    entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
+    assert pkg.launch_target_exists("kiro-cli chat --agent timesheeet", entries) is False
+
+
+# --- 推导不能被包里的内容带跑 -----------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["x; whoami", "a b", "$(id)", "x&&y", "x|y", "x`id`"])
+def test_agent_name_with_shell_metacharacters_yields_nothing(name: str, tmp_path: Path) -> None:
+    """推出来的命令会被标成"已确定、无需核对",然后原样交给使用者的 agent 去执行。
+
+    上传者本来就能在表单里手填任何启动命令,所以这不是新增的权限;新增的是"这条不用核对"
+    这个信号,而那正是不能给一条 `;` 分隔的命令的东西。名字不合规就整条不出。
+    """
+    ins = inspect_zip({f"a/.kiro/agents/{name}.json": "{}"}, tmp_path)
+    assert ins.launch_guesses == []
+    assert ins.declared.launch is None
+
+
+def test_agent_name_charset_matches_the_availability_check(tmp_path: Path) -> None:
+    """两边字符集必须一致,否则确认屏一边说"已确定"、一边说"包里找不到"。"""
+    ins = inspect_zip({"a/.kiro/agents/ts-report_2.json": "{}"}, tmp_path)
+    assert ins.declared.launch == "kiro-cli chat --agent ts-report_2"
+    assert ins.launch_guesses[0].certain is True
+    entries = pkg.extract_safely(
+        mkzip({"a/.kiro/agents/ts-report_2.json": "{}"}), tmp_path / "src2", max_bytes=MAX
+    )
+    assert pkg.launch_target_exists(ins.declared.launch, entries) is True
+
+
+@pytest.mark.parametrize("body", [
+    'project = "not a table"',          # 合法 TOML,但 project 不是表
+    "project = 1",
+    "[project]\nscripts = 'nope'",      # scripts 不是表
+])
+def test_malformed_pyproject_does_not_crash_the_inspection(body: str, tmp_path: Path) -> None:
+    """这是上传者的文件。抛 AttributeError 的结果是体检端点 500,而他看到的是
+    "服务器错误",不是"你的 pyproject 有问题"。"""
+    ins = inspect_zip({"a/pyproject.toml": body + "\n"}, tmp_path)
+    assert ins.declared.launch is None
+
+
+def test_dev_only_browser_dependency_is_not_long_running(tmp_path: Path) -> None:
+    """一个用 playwright 做端到端测试的普通应用,跑起来根本不开浏览器。
+
+    判成常驻,提示词就会对一个两秒退出的脚本说"别关掉那个窗口"。
+    """
+    ins = inspect_zip({
+        "a/pyproject.toml": (
+            '[project]\ndependencies = ["flask"]\n\n'
+            '[project.optional-dependencies]\ndev = ["pytest-playwright"]\n'
+        ),
+    }, tmp_path)
+    assert ins.declared.runtime is None
+
+
+def test_runtime_browser_dependency_still_detected_in_pyproject(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/pyproject.toml": '[project]\ndependencies = ["playwright==1.49.1"]\n',
+    }, tmp_path)
+    assert ins.declared.runtime == "long-running"
+
+
+def test_node_dev_dependency_is_not_long_running(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/package.json": (
+            '{"name": "x", "dependencies": {"express": "^4"},'
+            ' "devDependencies": {"playwright": "^1.49"}}'
+        ),
+    }, tmp_path)
+    assert ins.declared.runtime is None
+
+
+# --- 安装步骤 ---------------------------------------------------------------
+#
+# 提示词第 4 步原来只写"按 README 安装(若有 setup.ps1 就跑它)",把判断推给了使用者的
+# agent。这一组钉住的是**推出来的命令**,以及推不出来时要老老实实返回空。
+
+
+def test_setup_script_is_the_only_step(tmp_path: Path) -> None:
+    """一体式安装脚本的约定是"整个安装都归我"。
+
+    再并列几条我们猜出来的步骤会和它抢同一件事,而冲突的表现是脚本跑一半失败、报错指向
+    别处。report-manhour 的 setup.ps1 自己查 Python、装依赖、装浏览器、自检。
+    """
+    ins = inspect_zip({
+        "a/setup.ps1": "Write-Host hi\n",
+        "a/requirements.txt": "playwright==1.49.1\n",
+        "a/pyproject.toml": '[project]\nrequires-python = ">=3.12"\n',
+    }, tmp_path)
+
+    assert [s.command for s in ins.install_steps] == [
+        "powershell -ExecutionPolicy Bypass -File .\\setup.ps1"
+    ]
+    # 为什么不能省 Bypass 必须写出来:对方的 agent 遇到 "running scripts is disabled"
+    # 会自己想办法,而它想到的办法是去改机器的全局策略。
+    note = ins.install_steps[0].note or ""
+    assert "Restricted" in note and "不要" in note
+
+
+def test_python_floor_drives_both_winget_and_the_launcher(tmp_path: Path) -> None:
+    """版本号只能来自 requires-python。
+
+    猜错的表现不是装不上,而是装了一个能用、但不是作者测过的解释器。
+    """
+    ins = inspect_zip({
+        "a/pyproject.toml": '[project]\nrequires-python = ">=3.11"\n',
+        "a/requirements.txt": "requests\n",
+    }, tmp_path)
+
+    assert [s.command for s in ins.install_steps] == [
+        "winget install Python.Python.3.11",
+        "py -3.11 -m pip install -r requirements.txt",
+    ]
+    assert "新终端" in (ins.install_steps[0].note or "")
+
+
+def test_no_declared_python_version_means_no_winget_step(tmp_path: Path) -> None:
+    """没声明就不出 winget 那步,并退回 `py -3` —— 不替作者选一个版本。"""
+    ins = inspect_zip({"a/requirements.txt": "requests\n"}, tmp_path)
+    assert [s.command for s in ins.install_steps] == ["py -3 -m pip install -r requirements.txt"]
+
+
+def test_playwright_gets_the_browser_download_step(tmp_path: Path) -> None:
+    """pip 装的只是库,浏览器要另外下。**不做这一步不会在安装时报错**。"""
+    ins = inspect_zip({
+        "a/requirements.txt": "playwright==1.49.1\n",
+    }, tmp_path)
+    assert "playwright install chromium" in [s.command for s in ins.install_steps]
+
+
+def test_dev_only_playwright_gets_no_browser_step(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/pyproject.toml": (
+            '[project]\ndependencies = ["flask"]\n\n'
+            '[project.optional-dependencies]\ndev = ["pytest-playwright"]\n'
+        ),
+    }, tmp_path)
+    assert not any("playwright install" in s.command for s in ins.install_steps)
+
+
+def test_node_package_uses_ci_not_install(tmp_path: Path) -> None:
+    ins = inspect_zip({"a/package.json": '{"name": "x"}'}, tmp_path)
+    assert [s.command for s in ins.install_steps] == ["npm ci"]
+
+
+def test_unrecognisable_package_yields_no_steps(tmp_path: Path) -> None:
+    """推不出来就返回空,提示词退回"按 README 安装" —— 诚实的兜底,不是失败。"""
+    ins = inspect_zip({"a/README.md": "# x\n", "a/run.sh": "echo hi\n"}, tmp_path)
+    assert ins.install_steps == []
+
+
+# --- prerequisites ----------------------------------------------------------
+
+
+def test_prerequisites_come_only_from_the_sidecar(tmp_path: Path) -> None:
+    """这类知识不在代码里,推不出来。
+
+    report-manhour 的"SAP 工号是排他锁,先 Exit + Log off,否则锁挂 30 分钟到 2 小时"
+    只以散文形式存在于 README 和 agent 的 prompt 里。
+    """
+    ins = inspect_zip({
+        "a/portal-agent.yaml": (
+            'launch: "kiro-cli chat --agent timesheet"\n'
+            "prerequisites:\n"
+            "  - 先在自己的浏览器里 Exit + Log off，SAP 工号是排他锁\n"
+        ),
+    }, tmp_path)
+    assert ins.declared.prerequisites == [
+        "先在自己的浏览器里 Exit + Log off，SAP 工号是排他锁"
+    ]
+    assert ins.declared.sources["prerequisites"] == "portal-agent.yaml"
+
+
+def test_prerequisites_are_never_derived(tmp_path: Path) -> None:
+    """没有 sidecar 就是空,不从 README 里猜 —— 写错的后果是使用者被卡住两小时。"""
+    ins = inspect_zip({
+        "a/README.md": "# x\n\n注意：SAP 工号是排他锁，先 Exit + Log off。\n",
+        "a/.kiro/agents/timesheet.json": KIRO_AGENT,
+    }, tmp_path)
+    assert ins.declared.prerequisites == []
+
+
+def test_sidecar_round_trips_prerequisites(tmp_path: Path) -> None:
+    """写出去的 sidecar 必须能被自己读回来 —— 这一份是给拿着 zip 离开门户的人看的。"""
+    declared = pkg.Declared(
+        launch="kiro-cli chat --agent timesheet",
+        runtime="long-running",
+        keep=[".browser-profile"],
+        prerequisites=["先 Exit + Log off：SAP 工号是排他锁", "需要 ESS 门户权限"],
+    )
+    text = pkg.render_sidecar(declared, name="report-manhour", version="1.1.0")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / pkg.SIDECAR_NAME).write_text(text, encoding="utf-8")
+    back = pkg.read_sidecar(
+        tmp_path / "src", [pkg.FileEntry(pkg.SIDECAR_NAME, len(text))]
+    )
+    assert back.prerequisites == declared.prerequisites
+    assert back.keep == [".browser-profile"]
+
+
+def test_empty_prerequisites_render_as_an_empty_list(tmp_path: Path) -> None:
+    text = pkg.render_sidecar(pkg.Declared(launch="x"), name="n", version="1.0.0")
+    assert "prerequisites: []" in text
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / pkg.SIDECAR_NAME).write_text(text, encoding="utf-8")
+    back = pkg.read_sidecar(tmp_path / "src", [pkg.FileEntry(pkg.SIDECAR_NAME, len(text))])
+    assert back.prerequisites == []

@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.org_snapshot import RpAiOrgSnapshot
+from app.services.reporting_windows import reporting_tz
 from app.services.usage_report import graph_walk
 from app.services.usage_report import OrgSnapshotMissing, build_html
 
@@ -115,7 +116,11 @@ def put_org_snapshot(
     reporting line would still render a report — one with plausible-looking head
     counts that are wrong, which is worse than no report.
     """
-    return _store_snapshot(db, payload, captured_at or datetime.now(), eid)
+    # Zoned when we are the one stamping it, so the report can print it in Beijing
+    # time. An uploader-supplied capturedAt is left exactly as given.
+    return _store_snapshot(
+        db, payload, captured_at or datetime.now(reporting_tz()), eid
+    )
 
 
 def _store_snapshot(

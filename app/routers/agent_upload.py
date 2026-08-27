@@ -105,12 +105,18 @@ def _audit_text(inspection: pkg.Inspection, launch: str | None) -> str:
     传 README,并把上传者确认的启动命令附在后面:用户即将被提示词引导去执行那一行,它是
     整个包里风险最集中的一句,判定器理应看到。README 缺失时传一句明确的占位而不是空串 ——
     空串会让"声明与实现不符"这类检查永远不命中,而结论看起来仍然是"通过"。
+
+    安装步骤同理,而且理由更强:那几行也是用户会照着执行的,而它们是**我们**从包里推出来的,
+    不是上传者写的。判定器看不到它们,就没有任何环节看过"门户打算让人执行什么"。
     """
     parts: list[str] = []
     if inspection.readme_text:
         parts.append(inspection.readme_text)
     else:
         parts.append("（本包未提供 README，没有作者自述可供对照）")
+    if inspection.install_steps:
+        steps = "\n".join(f"  {s.command}" for s in inspection.install_steps)
+        parts.append(f"\n\n---\n门户将引导使用者执行的安装步骤：\n{steps}")
     if launch:
         parts.append(f"\n\n---\n上传者声明的启动命令：`{launch}`")
     return "".join(parts)
@@ -174,9 +180,24 @@ def _inspection_out(ins: pkg.Inspection, *, artifact_name: str | None) -> dict:
             "launch": launch,
             "runtime": d.runtime,
             "keep": d.keep,
+            "prerequisites": d.prerequisites,
             "sources": d.sources,
         },
+        # 装依赖那几步,从包里实际有什么推出来。空表示推不出来 —— 提示词退回原来那句
+        # "按 README 安装",那是诚实的兜底,不是失败。
+        "install": [
+            {"command": s.command, "note": s.note} for s in ins.install_steps
+        ],
         "launchCandidates": ins.launch_candidates,
+        # 每条候选的来源和"错了看不看得出来"。确认屏靠 certain 决定要不要把它当成已核对的
+        # 值来显示 —— 结构化推导出来的可以,从 README 猜的必须显式标成待核对。
+        "launchGuesses": [
+            {"command": g.command, "source": g.source, "certain": g.certain}
+            for g in ins.launch_guesses
+        ],
+        # 结构化来源命中了没有。留这一项是为了在决定"要不要上大模型兜底"之前先有数据:
+        # 如果绝大多数包都能确定推导出来,那个兜底就不值得建。
+        "launchCertain": bool(ins.launch_guesses and ins.launch_guesses[0].certain),
         # 唯一的自动可用性检查:启动命令提到的文件在不在包里。找不到不代表错(可能是装出来
         # 的 entry point),所以只是提示。
         "launchTargetFound": pkg.launch_target_exists(launch, ins.files) if launch else None,
@@ -295,6 +316,7 @@ async def publish_package(
     launch: str = Form(...),
     runtime: str = Form("oneshot"),
     keep: str | None = Form(None, description="JSON 数组或换行分隔"),
+    prerequisites: str | None = Form(None, description="JSON 数组或换行分隔"),
     item_id: str | None = Form(None, alias="itemId"),
     file: UploadFile | None = File(None),
     x_user_eid: str | None = Header(None),
@@ -334,7 +356,10 @@ async def publish_package(
             )
         cid, category_label = _resolve_category(db, acting, category_id)
         keep_list = _parse_keep(keep)
-        declared = pkg.Declared(launch=launch, runtime=runtime, keep=keep_list)
+        prereq_list = _parse_keep(prerequisites)
+        declared = pkg.Declared(
+            launch=launch, runtime=runtime, keep=keep_list, prerequisites=prereq_list
+        )
 
         # 审计:结论只记录,不改流向。内容没变时会命中引擎缓存(体检那一步已经跑过)。
         audit = audit_skill(
@@ -411,7 +436,15 @@ async def publish_package(
         db.add(RpAiMarketItemVersion(
             item_id=item.id, version=version, commit_sha=sha, tag=tag,
             uploader_eid=acting, artifact_name=artifact_name, artifact_bytes=len(data),
-            metadata_json={"launch": launch, "runtime": runtime, "keep": keep_list},
+            metadata_json={
+                "launch": launch, "runtime": runtime, "keep": keep_list,
+                "prerequisites": prereq_list,
+                # 门户推出来的安装步骤,和这一版内容绑在一起存 —— 下一版重新推,这一行不动。
+                # 提示词读的是这里,不在复制按钮那一刻重新解析一遍包(那要重新下载解压)。
+                "install": [
+                    {"command": s.command, "note": s.note} for s in ins.install_steps
+                ],
+            },
             audit_json=_audit_json(audit),
         ))
         db.commit()
