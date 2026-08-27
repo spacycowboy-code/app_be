@@ -340,6 +340,21 @@ def bar(value: int, peak: int) -> str:
     return f'<span class="bar" style="width:{max(2.0, round(value / peak * 100, 1))}%"></span>'
 
 
+def cell_text(people: int, events: int, countable: bool) -> str:
+    """一个格子里显示什么:人数,或者「人数 / 件数」。
+
+    件数一律显示,**即使它和人数相等**。原来的写法在两者相等时省掉后缀,于是同一列里
+    "1" 有两种意思(一个人一件、一个人多件),而读者分不出是哪一种 —— 这张表就是这么被
+    读错的:一个人上传了三个 agent,格子显示 1,看起来和只上传了一个的部门一样。
+
+    零仍然只写一个 0:0 人必然 0 件,不存在同样的歧义,而这张表里零很多,写成 "0 / 0"
+    只是噪音。
+    """
+    if not countable or not people:
+        return str(people)
+    return f'{people}<span class="small"> / {events}</span>'
+
+
 #: Metrics with no column of their own. The agent take-up figures were dropped from
 #: display because the market items they count mostly have no creator recorded, so a
 #: take-up could not be attributed to anybody.
@@ -591,9 +606,7 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
         for k, _ in COLS:
             c = g.cell(k)
             m = by_key[k]
-            inner = str(c.people)
-            if m.countable and c.events and c.events != c.people:
-                inner += f'<span class="small"> / {c.events}</span>'
+            inner = cell_text(c.people, c.events, m.countable)
             tds.append(f'<td class="num barcell{"" if c.people else " zero"}" '
                        f'data-v="{c.people}" data-v2="{c.events}">'
                        f'{bar(c.people, peaks[k])}<span class="v">{inner}</span></td>')
@@ -614,9 +627,7 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
         m = by_key[k]
         p = sum(g.cell(k).people for g in groups.values())
         e = sum(g.cell(k).events for g in groups.values())
-        v = str(p) + (f'<span class="small"> / {e}</span>'
-                      if m.countable and e and e != p else "")
-        foot.append(f'<td class="num">{v}</td>')
+        foot.append(f'<td class="num">{cell_text(p, e, m.countable)}</td>')
 
     head = [f'<th class="l">{"大部门（二级部门）" if is_big else "小部门"}</th>']
     if show_real:
@@ -626,8 +637,13 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
         head.append("<th>渗透率</th>")
     head.append("<th>有实际<br>动作</th>")
     for k, label in COLS:
-        head.append(f'<th>{esc(label)}<span class="win">'
-                    f'{by_key[k].first_seen or "—"} 起</span></th>')
+        m = by_key[k]
+        # 每列自己说清读法。同一张表里两种形态并存(人数、人数/件数),不写出来的话
+        # "1" 到底是一个人交了一件还是一个人交了三件,读者从格子上分不出来 —— 而这
+        # 正是这张表被读错的那一次。
+        how = f"人数 / {esc(m.unit)}" if m.countable else "人数"
+        head.append(f'<th>{esc(label)}<span class="win">{how}'
+                    f'<br>{by_key[k].first_seen or "—"} 起</span></th>')
     return ('<table class="sortable"><thead><tr>' + "".join(head)
             + "</tr></thead><tbody>" + "".join(rows) + "</tbody><tfoot><tr>"
             + "".join(foot) + "</tr></tfoot></table>")
@@ -840,11 +856,12 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
             extra += (f'<div class="small" style="color:var(--warn)">另有 '
                       f"{m.unattributed} 条无法归属到人：{esc(m.unattributed_note)}</div>")
         if m.excluded_people:
-            ev = f"、共 {m.excluded_events} 次" if m.countable else ""
+            # 单位跟着指标走,不写死「次」:上传类指标的单位是「个 skill」「个 agent」,
+            # 而"另有 1 个非个人账号、共 7 次"读起来像是它下载了 7 次,不是交了 7 个。
+            ev = f"、共 {m.excluded_events} {esc(m.unit)}" if m.countable else ""
             extra += (f'<div class="small">另有 {m.excluded_people} 个非个人账号{ev}'
                       f"，未计入。</div>")
-        ev = (f"，共 {m.events} {esc(m.unit)}"
-              if m.countable and m.events != m.people else "")
+        ev = f"，共 {m.events} {esc(m.unit)}" if m.countable else ""
         defs.append(f"<dt>{esc(m.label)}<span class='tag'>{esc(m.first_seen)} → "
                     f"{esc(m.last_seen)}</span></dt>"
                     f"<dd>{esc(m.note)}<br>当前：{m.people} 人{ev}。{extra}</dd>")
