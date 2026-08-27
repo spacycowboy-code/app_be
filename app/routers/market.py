@@ -111,7 +111,7 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
         return
     raise HTTPException(
         status.HTTP_403_FORBIDDEN,
-        "这个 Agent 还在等待审核,通过之后才能安装。",
+        "这个条目还在等待审核,通过之后才能安装。",
     )
 
 
@@ -475,7 +475,7 @@ def list_item_versions(
     if item.status != "approved" and requester not in (
         item.creator, settings.audit_admin_eid
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个条目还在等待审核。")
     rows = list(
         db.scalars(
             select(RpAiMarketItemVersion)
@@ -508,7 +508,7 @@ def get_review(
     if item.status != "approved" and requester not in (
         item.creator, settings.audit_admin_eid
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个条目还在等待审核。")
 
     versions = list(
         db.scalars(
