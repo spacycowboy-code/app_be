@@ -125,6 +125,25 @@ class SkillUpdate(CamelModel):
     skill_md: str | None = None
 
 
+class PendingUpdateRead(CamelModel):
+    """作者提交了、正在人工复核、还没发布的那次更新。
+
+    它存在的时候,这个技能其余所有字段描述的都是**已发布**的那一版。前端要靠它回答作者的那个问题:
+    "我明明改了,怎么页面上还是旧的" —— 答案是改动在复核里,而旧版本继续服务着使用者。
+    """
+
+    version: str | None = None
+    mr_url: str | None = None
+    audit_ref: str
+    editor_eid: str | None = None
+    # pending = 还在复核里;rejected = 复核被否了。两个答案不能长得一样:前者要等,后者要改。
+    outcome: str = "pending"
+    # 暂存的名称/描述,让前端不用再取一次就能显示"待发布的是什么"。
+    name: str | None = None
+    description: str | None = None
+    created_at: datetime | None = None
+
+
 class SkillRead(SkillBase, SkillDerived):
     id: str
     cases: list[SkillCaseSchema] = Field(default_factory=list)
@@ -144,6 +163,9 @@ class SkillRead(SkillBase, SkillDerived):
     # human-readable message the frontend can surface when synced is False.
     synced: bool | None = None
     sync_warning: str | None = None
+    # 压在已发布版本之外、正在人工复核的那次更新(没有就是 None)。上面所有字段描述的都是已发布的
+    # 那一版,这个字段是唯一说"还有一份在等复核"的地方。
+    pending_update: PendingUpdateRead | None = None
 
 
 class SkillSummary(CamelModel):

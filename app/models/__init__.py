@@ -12,6 +12,7 @@ from app.models.skill import (
     RpAiSkillCase,
     RpAiSubSkill,
 )
+from app.models.pending_update import RpAiSkillPendingUpdate
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
 from app.models.comment import RpAiSkillComment
@@ -36,6 +37,7 @@ __all__ = [
     "RpAiUserFavorite",
     "RpAiSkillReview",
     "RpAiSkillVersion",
+    "RpAiSkillPendingUpdate",
     "RpAiSkillComment",
     "RpAiActivity",
     "RpAiSkillDownload",

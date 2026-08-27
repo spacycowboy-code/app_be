@@ -24,6 +24,7 @@ from app.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.favorite import RpAiUserFavorite
+    from app.models.pending_update import RpAiSkillPendingUpdate
     from app.models.review import RpAiSkillReview
     from app.models.user import RpAiPortal
     from app.models.version import RpAiSkillVersion
@@ -79,6 +80,13 @@ class RpAiSkill(TimestampMixin, Base):
     repo_commit: Mapped[str | None] = mapped_column(String(64))
     # Security-audit derived state: pass | suspect (danger is never stored).
     audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
+    # 描述**当前发布内容**的那条审计记录(``rp_ai_skill_audit_record.id``)。
+    #
+    # 收敛器需要"当前这一版的结论是哪一条"这个答案,而它没法从时间戳推:记录的 created_at 只精确
+    # 到秒(MySQL DATETIME 默认如此),同一秒里落下的两条(上传完紧接着编辑一次)谁在后是不确定的,
+    # 而 id 是随机 uuid,拿它做次级排序等于抛硬币。所以这里把答案记下来,而不是每次去猜。
+    # 老数据是 NULL,收敛器对它们仍按时间倒序取最新一条。
+    audit_ref: Mapped[str | None] = mapped_column(String(32))
 
     @property
     def uploader_name(self) -> str | None:
@@ -129,6 +137,11 @@ class RpAiSkill(TimestampMixin, Base):
         back_populates="skill",
         cascade="all, delete-orphan",
         order_by="RpAiSkillVersion.id",
+    )
+    # 压在线上这一版之外的、正在人工复核的更新(最多一份)。它存在不影响这一行的任何字段:
+    # 这一行始终描述**已发布**的内容。见 models/pending_update.py。
+    pending_update: Mapped["RpAiSkillPendingUpdate | None"] = relationship(
+        back_populates="skill", cascade="all, delete-orphan", uselist=False
     )
 
 

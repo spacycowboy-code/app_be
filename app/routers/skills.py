@@ -42,6 +42,7 @@ from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
 from app.services.audit_engine import AuditResult, audit_skill
 from app.services.skill_audit import gate
+from app.services.skill_audit import pending as pending_updates
 from fastapi.concurrency import run_in_threadpool
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
@@ -524,6 +525,11 @@ async def update_skill(
             f"编辑被安全审计拒绝：{audit.reason or '命中安全红线'}。参考编号 {decision.ref}",
         )
 
+    # 这次改动的内容(改完之后的样子),在技能行被回滚之前抄下来。只有要走人工复核、且这个技能
+    # 已经发布过的时候才用得上;抄一份的代价是几个字段的读,所以不分支。
+    staged = pending_updates.capture(skill)
+    staged_name = skill.name
+
     # Persist the edit into the git-managed skill repo: refresh the folder
     # files, bump the version, commit, tag and push (same flow as upload).
     owner_eid = skill.uploader_eid or "ericsson"
@@ -543,25 +549,38 @@ async def update_skill(
         action="edit",
         target_branch=decision.review_branch,
     )
-    skill.version = result.version
-    skill.storage_path = result.storage_path
-    skill.repo_commit = result.commit_sha
-    # An edit that needs review takes the skill out of the market until the review
-    # MR is merged. The reviewed-and-published content is whatever is on the live
-    # branch; this edit is not it yet.
-    skill.status = decision.status
-    skill.audit_state = audit.state
 
-    db.add(
-        RpAiSkillVersion(
-            skill_id=skill.id,
-            version=result.version,
-            commit_sha=result.commit_sha,
-            tag=result.tag,
-            uploader_eid=editor_eid or owner_eid,
-            notes="Edited via portal",
+    if decision.stays_published:
+        # 要复核、而且这个技能已经在线上:技能行一个字不动 —— 名称、版本、``repo_commit``、状态
+        # 全部继续指向已发布的那一版,它照常留在市场里。这次更新整份停在暂存表,等复核 MR 合了
+        # 再搬过去(见 skill_audit.pending)。
+        #
+        # 回滚是为了把改动从技能行上撤下来:改动是先落在 ORM 对象上再送审的(审的就是它渲染出来
+        # 的内容),不撤就会随下面的 commit 一起写进去。审计记录还没落库,所以回滚不丢事实。
+        db.rollback()
+        skill = _get_skill_or_404(db, skill_id)
+    else:
+        skill.version = result.version
+        skill.storage_path = result.storage_path
+        skill.repo_commit = result.commit_sha
+        # 没有已发布版本可以保护的时候,老规矩:通过即上线,可疑则等复核 MR 合。
+        skill.status = decision.status
+        skill.audit_state = audit.state
+        # 哪条记录描述这一版(见 models/skill.py)。
+        skill.audit_ref = decision.ref
+
+        db.add(
+            RpAiSkillVersion(
+                skill_id=skill.id,
+                version=result.version,
+                commit_sha=result.commit_sha,
+                tag=result.tag,
+                uploader_eid=editor_eid or owner_eid,
+                notes="Edited via portal",
+            )
         )
-    )
+        # 收藏者收到的"更新到 vX"必须对应一个装得到的版本,所以这条通知只在内容真的发布时发。
+        notify_version_update(db, skill, result.version, actor_eid=editor_eid)
 
     # A review is a person reading a change, so the change has to be somewhere
     # they can read it: same Draft MR as an upload takes.
@@ -572,7 +591,7 @@ async def update_skill(
                 lambda: gitlab_mr.review_suspect(
                     source_branch=decision.review_branch,
                     target_branch=settings.skill_repo_branch,
-                    skill_name=skill.name,
+                    skill_name=staged_name,
                     findings=audit.findings,
                     audit_ref=decision.ref,
                     uploader=gate._uploader_label(db, editor),
@@ -590,11 +609,23 @@ async def update_skill(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "内容需要人工复核,但复核单没能创建,本次未保存,请稍后重试。",
             ) from exc
-    gate.record(db, decision.ref, audit, skill_id=skill.id,
-                skill_name=skill.name, uploader_eid=editor, mr_url=mr_url)
 
-    # Notify users who favorited this skill about the new version.
-    notify_version_update(db, skill, result.version, actor_eid=editor_eid)
+    if decision.stays_published:
+        pending_updates.stage(
+            db, skill_id=skill.id, staged=staged, audit_ref=decision.ref,
+            review_branch=decision.review_branch, mr_url=mr_url,
+            version=result.version, storage_path=result.storage_path,
+            commit_sha=result.commit_sha, tag=result.tag,
+            artifact_name=result.artifact_name, editor_eid=editor_eid or owner_eid,
+        )
+    elif skill.pending_update is not None:
+        # 这次改动直接发布了,它就是线上那一版;之前那份待复核的更新已经不是"线上之外压着的下一
+        # 版"了,留着会在复核合并时把作者后来改的东西盖回去。
+        pending_updates.drop(db, skill.pending_update, why="被一次直接发布的编辑取代")
+
+    gate.record(db, decision.ref, audit, skill_id=skill.id,
+                skill_name=staged_name, uploader_eid=editor, mr_url=mr_url,
+                replaces_published=decision.replaces_published)
 
     db.commit()
     db.refresh(skill)

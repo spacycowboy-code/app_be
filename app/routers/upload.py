@@ -42,6 +42,7 @@ from app.services.eids import acting_eid, normalize_eid
 from app.services.audit_engine import AuditResult, audit_skill, content_key
 from app.models.audit import RpAiSkillAuditRecord
 from app.services.skill_audit import gate
+from app.services.skill_audit import pending as pending_updates
 from app.services.audit_report import build_checks
 from app.repositories import skill_content
 from app.services import gitlab_mr
@@ -347,6 +348,7 @@ async def upload_skill(
         db, audit_ref, audit,
         skill_id=resolved_id if existing else None,
         skill_name=name, uploader_eid=eid,
+        replaces_published=decision.replaces_published,
     )
     db.commit()
 
@@ -366,6 +368,7 @@ async def upload_skill(
     )
 
     # Upsert the skill row.
+    staged: dict = {}
     skill = existing
     if skill is None:
         skill = RpAiSkill(id=resolved_id, uploader_eid=eid, tags=[])
@@ -384,40 +387,53 @@ async def upload_skill(
         skill.tags = parsed_tags
     # 不再写 instructions 这一列:正文的权威在仓库,详情接口按引用读。留着写会长出第二份会漂的
     # 副本,而且没有任何重算路径。列本身等一次迁移再删。
-    skill.version = result.version
-    skill.storage_path = result.storage_path
-    skill.repo_commit = result.commit_sha
-    # One lifecycle field gates visibility; the audit verdict decides its value.
-    # A pass goes live immediately, a suspect waits for the review MR to be
-    # merged, and a danger verdict never reaches this point (nothing is stored).
-    # Recomputable from the audit record + MR state - see skill_audit.reconcile,
-    # which is the only other writer.
-    skill.status = decision.status
-    # Latest verdict for the current version: display only, never a gate.
-    skill.audit_state = audit.state
 
-    # The version row and the audit record both reference this skill by foreign
-    # key, and neither is linked to it by an ORM relationship, so the ordering of
-    # the flush is not guaranteed. Insert the skill first: MySQL enforces the
-    # constraint (sqlite does not, which is why this only shows up on a
-    # production-like engine).
-    db.flush()
+    if decision.stays_published:
+        # 一个**已经在线上**的技能,这次传的新版本要走人工复核:技能那一行一个字不动,线上那一版
+        # 照常留在市场里。这次的新版本整份停在暂存表,等复核 MR 合了再搬过去。
+        #
+        # 原来这里照常改行、把 status 打成 pending,于是作者传一个可疑的新版本,等于替所有使用者
+        # 把这个技能下架 —— 而且详情页会按新的 repo_commit 读到复核分支上那份没过审的正文。
+        staged = pending_updates.capture(skill)
+        db.rollback()                       # 把改动从技能行上撤下来(审计记录已单独提交)
+        skill = db.get(RpAiSkill, resolved_id)
+    else:
+        skill.version = result.version
+        skill.storage_path = result.storage_path
+        skill.repo_commit = result.commit_sha
+        # One lifecycle field gates visibility; the audit verdict decides its value.
+        # A pass goes live immediately, a suspect waits for the review MR to be
+        # merged, and a danger verdict never reaches this point (nothing is stored).
+        # Recomputable from the audit record + MR state - see skill_audit.reconcile,
+        # which is the only other writer.
+        skill.status = decision.status
+        # Latest verdict for the current version: display only, never a gate.
+        skill.audit_state = audit.state
+        # 哪条记录描述这一版:收敛器靠它重算上面那一格,而不靠时间戳排序(见 models/skill.py)。
+        skill.audit_ref = audit_ref
 
-    # Record the version.
-    db.add(
-        RpAiSkillVersion(
-            skill_id=resolved_id,
-            version=result.version,
-            commit_sha=result.commit_sha,
-            tag=result.tag,
-            uploader_eid=eid,
-            artifact_name=result.artifact_name,
+        # The version row and the audit record both reference this skill by foreign
+        # key, and neither is linked to it by an ORM relationship, so the ordering of
+        # the flush is not guaranteed. Insert the skill first: MySQL enforces the
+        # constraint (sqlite does not, which is why this only shows up on a
+        # production-like engine).
+        db.flush()
+
+        # Record the version.
+        db.add(
+            RpAiSkillVersion(
+                skill_id=resolved_id,
+                version=result.version,
+                commit_sha=result.commit_sha,
+                tag=result.tag,
+                uploader_eid=eid,
+                artifact_name=result.artifact_name,
+            )
         )
-    )
 
-    # Notify users who favorited this skill about the new version.
-    if existing is not None:
-        notify_version_update(db, skill, result.version, actor_eid=eid)
+        # Notify users who favorited this skill about the new version.
+        if existing is not None:
+            notify_version_update(db, skill, result.version, actor_eid=eid)
 
     # 可疑内容要开一张 Draft MR 供人复核。**不是 best-effort**:开不出来就当这次发布没成功。
     mr_url = None
@@ -455,6 +471,19 @@ async def upload_skill(
         .where(RpAiSkillAuditRecord.id == audit_ref)
         .values(**filled)
     )
+
+    if decision.stays_published:
+        pending_updates.stage(
+            db, skill_id=resolved_id, staged=staged, audit_ref=audit_ref,
+            review_branch=review_branch, mr_url=mr_url,
+            version=result.version, storage_path=result.storage_path,
+            commit_sha=result.commit_sha, tag=result.tag,
+            artifact_name=result.artifact_name, editor_eid=eid,
+        )
+    elif skill.pending_update is not None:
+        # 这一版直接发布了,它就是线上那一版;之前那份待复核的更新不再是"下一版",留着会在复核
+        # 合并时把这次的内容盖回去。
+        pending_updates.drop(db, skill.pending_update, why="被一次直接发布的上传取代")
 
     db.commit()
     db.refresh(skill)
