@@ -62,17 +62,24 @@ class Settings(BaseSettings):
     gitlab_agents_group: str = "rp-ai/rp-ai-agents"
     gitlab_tools_group: str = "rp-ai/rp-ai-tools"
 
-    # --- GitLab (用户上传的 Agent 包) ----------------------------------------
-    # 每个上传的 agent 在这个组下有自己的项目。**独立于上面那个 token**:上面那个是
-    # 个人 PAT、全域读写、要读 sync 的两个组;这个是该组的 group access token
-    # (Owner + api,write_repository),作用域只有这一个组。合成一个的代价是给"上传
-    # agent"配上全域写权限,而分开的代价只是多一个变量。
+    # --- GitLab (用户上传的包) ------------------------------------------------
+    # 上传的包每个在这两个组之一下有自己的项目:agent 进 user-agents,tool 进 user-tools。
+    # **独立于上面那个 token**:上面那个是个人 PAT、全域读写、要读 sync 的两个组;这里两个
+    # 是各自那个组的 group access token(Owner + api,write_repository),作用域只有那一个组。
+    # 合成一个的代价是给"上传包"配上全域写权限,而分开的代价只是多几个变量。
+    #
+    # **两个类型各一个 token,而不是在父组 rp-ai 上开一个覆盖两边的。** 那样只要一个变量,
+    # 代价是写权限扩到整个 rp-ai(含技能仓和 sync 的那两个组)—— 正好是拆开这个凭据要避免
+    # 的事。谁能写哪里,应该和"哪个功能需要写哪里"一样窄。
     gitlab_user_agents_group: str = "rp-ai/rp-ai-user-agents"
-    # 空 = 关闭 zip 上传(端点答 503 并说明原因,而不是把包丢掉)。
+    # 空 = 关闭该类型的包上传(端点答 503 并说明缺哪个变量,而不是把包丢掉)。
     gitlab_user_agents_token: str = ""
     # 该 token 的到期日,只用于提前提醒。GitLab 强制 group token 有到期日,所以这是
     # 一个**已知的将来故障**:不预告的话,那天上传会突然 401,而现象离原因很远。
     gitlab_user_agents_token_expires: str = "2027-08-20"
+    gitlab_user_tools_group: str = "rp-ai/rp-ai-user-tools"
+    gitlab_user_tools_token: str = ""
+    gitlab_user_tools_token_expires: str = ""
     # Verify TLS when calling the GitLab API (internal certs may be self-signed).
     gitlab_verify_tls: bool = False
 

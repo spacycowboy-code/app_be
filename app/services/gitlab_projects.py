@@ -1,14 +1,20 @@
-"""GitLab 写客户端:用户上传的 agent 包,每个一个项目。
+"""GitLab 写客户端:用户上传的包(tool / agent),每个一个项目。
 
 `gitlab_sync` 只读(同步那两个组、拉 archive)。这个模块是唯一会**写** GitLab 的地方,
-用的是另一个凭据:`rp-ai/rp-ai-user-agents` 这个组的 group access token,权限只在这一个组。
+用的是另一套凭据:两个上传组各自的 group access token,权限只在那一个组 ——
+agent 进 `rp-ai/rp-ai-user-agents`,tool 进 `rp-ai/rp-ai-user-tools`。哪个组、哪个 token
+是同一个决定,所以它们一起装在 `UploadTarget` 里传,不分开传。
 
-三件事值得先说清,因为它们决定了这里为什么长这样:
+四件事值得先说清,因为它们决定了这里为什么长这样:
 
 **为什么一个包一个项目,而不是一个大仓的一个子目录。** 包一旦是真实项目,门户已有的
-`/api/market/{id}/download` 和 `/install-token` 一行都不用改 —— 它们认的就是 `gl-<项目id>`。
-版本之间的 compare 链接、README 渲染、以后谁想直接 clone,全都是 GitLab 免费给的。代价是
-组里会有很多小项目,那不是问题。
+`/api/market/{id}/download` 和 `/install-token` 一行都不用改 —— 它们认的就是 `gl-<项目id>`,
+而 GitLab 的项目 id 全局唯一,和它在哪个组无关。版本之间的 compare 链接、README 渲染、
+以后谁想直接 clone,全都是 GitLab 免费给的。代价是组里会有很多小项目,那不是问题。
+
+**为什么两个组两个 token,而不是一个覆盖父组的。** 一个 `rp-ai` 上的 token 只要一个变量,
+代价是写权限扩到整个 `rp-ai`(含技能仓和 sync 的那两个组)—— 正好是当初把这个凭据从个人
+PAT 拆出来要避免的事。谁能写哪里,应该和"哪个功能需要写哪里"一样窄。
 
 **为什么用 git push 而不是 commits API。** 一个 50MB 的包走 `POST /repository/commits` 要把
 每个文件 base64 塞进一个 JSON 请求;git 传的是压缩后的 pack。而且 push 会经过 GitLab 的
@@ -96,23 +102,63 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(*handlers)
 
 
-def _token() -> str:
+@dataclass(frozen=True)
+class UploadTarget:
+    """一个上传目标:哪个组、用哪个 token、缺了要报哪个变量名。
+
+    存在的理由是**每个组一个 token**:group access token 只能访问它所属的那个组,所以
+    "包放哪个组"和"用哪个凭据"是同一个决定,不能分开传。改成一个覆盖父组的 token 只要一个
+    变量,但那会把写权限扩到整个 `rp-ai`(含技能仓和 sync 的那两个组),正好是拆开这个凭据
+    要避免的事。
+
+    `env_var` 不是装饰:凭据没配时上传者看到的是"未配置",而去配它的人需要知道**哪一个**
+    变量是空的 —— 现在有两个,笼统一句"凭据未配置"会让人去改另一个。
+    """
+
+    item_type: str
+    group_path: str
+    token: str
+    env_var: str
+
+
+def target_for(item_type: str) -> UploadTarget:
+    """按条目类型取上传目标。`ai-platform` 没有包可传,所以不在这里。"""
     s = get_settings()
-    if not s.gitlab_user_agents_token:
+    if item_type == "tool":
+        return UploadTarget(
+            item_type="tool",
+            group_path=s.gitlab_user_tools_group,
+            token=s.gitlab_user_tools_token,
+            env_var="GITLAB_USER_TOOLS_TOKEN",
+        )
+    if item_type == "agent":
+        return UploadTarget(
+            item_type="agent",
+            group_path=s.gitlab_user_agents_group,
+            token=s.gitlab_user_agents_token,
+            env_var="GITLAB_USER_AGENTS_TOKEN",
+        )
+    raise GitLabWriteError(f"{item_type} 类型的条目没有可上传的包。")
+
+
+def _token(target: UploadTarget) -> str:
+    if not target.token:
         raise GitLabWriteError(
-            "未配置上传 Agent 包所需的 GitLab 凭据(GITLAB_USER_AGENTS_TOKEN),"
+            f"未配置上传 {target.item_type} 包所需的 GitLab 凭据({target.env_var}),"
             "本次上传未保存。"
         )
-    return s.gitlab_user_agents_token
+    return target.token
 
 
-def _api(method: str, path: str, payload: dict | None = None) -> dict | list:
+def _api(
+    method: str, path: str, payload: dict | None = None, *, target: UploadTarget
+) -> dict | list:
     """调 GitLab API。401/403 单独成一类,因为那是凭据问题而不是请求问题。"""
     s = get_settings()
     url = f"{s.gitlab_url.rstrip('/')}/api/v4/{path.lstrip('/')}"
     data = urllib.parse.urlencode(payload).encode() if payload else None
     req = urllib.request.Request(
-        url, data=data, method=method, headers={"PRIVATE-TOKEN": _token()}
+        url, data=data, method=method, headers={"PRIVATE-TOKEN": _token(target)}
     )
     try:
         with _opener().open(req, timeout=60) as resp:
@@ -123,7 +169,16 @@ def _api(method: str, path: str, payload: dict | None = None) -> dict | list:
         if exc.code in (401, 403):
             log.error("GitLab 拒绝了写请求(%s %s): HTTP %s", method, path, exc.code)
             raise CredentialExpired(
-                "上传 Agent 包用的 GitLab 凭据已失效(过期或被吊销),请更新后重试。"
+                f"上传 {target.item_type} 包用的 GitLab 凭据({target.env_var})已失效"
+                "(过期或被吊销),请更新后重试。"
+            ) from exc
+        if exc.code == 404 and path.startswith("groups/"):
+            # 组查不到,最常见的原因不是组不存在,而是**这个 token 看不到它**:一个只覆盖
+            # 另一个组的 group token 去问这个组,GitLab 答的就是 404。照原样报 "HTTP 404"
+            # 会让人去查组名,而组名往往是对的。
+            raise GitLabWriteError(
+                f"找不到 GitLab 组 {target.group_path},或者 {target.env_var} 这个凭据"
+                "没有它的访问权限(组访问令牌只能访问它所属的那一个组)。"
             ) from exc
         log.warning("GitLab %s %s -> HTTP %s %s", method, path, exc.code, detail)
         raise GitLabWriteError(f"GitLab 返回 HTTP {exc.code}:{detail}") from exc
@@ -132,29 +187,35 @@ def _api(method: str, path: str, payload: dict | None = None) -> dict | list:
         raise GitLabWriteError("暂时连不上 GitLab,请稍后重试。", retryable=True) from exc
 
 
-_namespace_id: int | None = None
+#: 组路径 → 数字 id。**按路径分键**,不是一个全局的 int:有两个上传组,而一个共用的缓存会
+#: 让第一次上传解析出的 id 被另一种类型直接复用 —— tool 的项目建到 agent 组里去,门户不
+#: 报错、条目也正常,只有去 GitLab 看才发现。
+_namespace_ids: dict[str, int] = {}
 
 
-def namespace_id() -> int:
+def namespace_id(target: UploadTarget) -> int:
     """上传组的数字 id,建项目要用。
 
     配置里存的是**路径**(和 sync 的两个组一致,排查时看得懂),这里解析成 id 并缓存。
     组被改名路径就失效 —— 但改名这件事本来就该有人知道,而 id 静默漂移不会。
     """
-    global _namespace_id
-    if _namespace_id is None:
-        path = get_settings().gitlab_user_agents_group
-        group = _api("GET", f"groups/{urllib.parse.quote(path, safe='')}")
-        if not isinstance(group, dict) or "id" not in group:
-            raise GitLabWriteError(f"找不到 GitLab 组 {path}")
-        _namespace_id = int(group["id"])
-    return _namespace_id
+    cached = _namespace_ids.get(target.group_path)
+    if cached is not None:
+        return cached
+    path = target.group_path
+    group = _api("GET", f"groups/{urllib.parse.quote(path, safe='')}", target=target)
+    if not isinstance(group, dict) or "id" not in group:
+        raise GitLabWriteError(f"找不到 GitLab 组 {path}")
+    _namespace_ids[path] = int(group["id"])
+    return _namespace_ids[path]
 
 
-def create_project(*, slug: str, name: str, description: str | None = None) -> ProjectRef:
+def create_project(
+    *, slug: str, name: str, description: str | None = None, target: UploadTarget
+) -> ProjectRef:
     """在上传组下建一个项目。
 
-    路径撞了就在后面加序号重试:两个人上传同名 agent 是正常的,而"名字被占"不该变成
+    路径撞了就在后面加序号重试:两个人上传同名的包是正常的,而"名字被占"不该变成
     上传失败。
     """
     base = slug
@@ -167,7 +228,7 @@ def create_project(*, slug: str, name: str, description: str | None = None) -> P
                 {
                     "name": name[:255],
                     "path": path,
-                    "namespace_id": str(namespace_id()),
+                    "namespace_id": str(namespace_id(target)),
                     "description": (description or "")[:2000],
                     # 组是 internal;项目跟着组,不要自己声明 public。
                     "visibility": "internal",
@@ -178,6 +239,7 @@ def create_project(*, slug: str, name: str, description: str | None = None) -> P
                     "snippets_enabled": "false",
                     "container_registry_enabled": "false",
                 },
+                target=target,
             )
         except GitLabWriteError as exc:
             if "has already been taken" in str(exc) and attempt < 5:
@@ -194,13 +256,13 @@ def create_project(*, slug: str, name: str, description: str | None = None) -> P
     raise GitLabWriteError(f"项目路径 {base} 连续 5 次都被占用")
 
 
-def archive_project(project_id: int | str) -> None:
+def archive_project(project_id: int | str, target: UploadTarget) -> None:
     """归档而不是删除。
 
     门户里删掉一行是可逆的,删掉一个仓库不是 —— 包的历史版本、谁在什么时候改了什么,
     删完再想查就没有了。归档后它从列表里消失、变成只读,该有的都还在。
     """
-    _api("POST", f"projects/{project_id}/archive")
+    _api("POST", f"projects/{project_id}/archive", target=target)
 
 
 def compare_url(web_url: str, from_ref: str, to_ref: str) -> str:
@@ -208,12 +270,16 @@ def compare_url(web_url: str, from_ref: str, to_ref: str) -> str:
     return f"{web_url.rstrip('/')}/-/compare/{urllib.parse.quote(from_ref)}...{urllib.parse.quote(to_ref)}"
 
 
-def list_tree(project_id: int | str, ref: str, *, limit: int = 500) -> list[dict]:
+def list_tree(
+    project_id: int | str, ref: str, *, target: UploadTarget, limit: int = 500
+) -> list[dict]:
     """项目在某个 ref 上的文件清单。
 
     审核页读的是 GitLab 上**实际存在**的东西,而不是上传时我们记下的清单。两者本该一致,
     但如果有人直接在 GitLab 上改了这个项目,审核人应该看到改后的样子 —— 他要批准的是仓库
     里的内容,不是一份历史快照。
+
+    `target` 按条目类型给:两个上传组各有自己的 token,拿错那个问不到这个项目。
     """
     out: list[dict] = []
     page = 1
@@ -221,7 +287,9 @@ def list_tree(project_id: int | str, ref: str, *, limit: int = 500) -> list[dict
         query = urllib.parse.urlencode(
             {"ref": ref, "recursive": "true", "per_page": 100, "page": page}
         )
-        batch = _api("GET", f"projects/{project_id}/repository/tree?{query}")
+        batch = _api(
+            "GET", f"projects/{project_id}/repository/tree?{query}", target=target
+        )
         if not isinstance(batch, list) or not batch:
             break
         out.extend(e for e in batch if e.get("type") == "blob")
@@ -235,10 +303,15 @@ def list_tree(project_id: int | str, ref: str, *, limit: int = 500) -> list[dict
 
 
 def _scrub(text: str) -> str:
-    """把 token 从任何要落日志或给用户看的文本里抹掉。"""
+    """把 token 从任何要落日志或给用户看的文本里抹掉。
+
+    **两个都抹**,不只是这次用的那一个:`publish_tree` 的失败原文是直接给上传者看的,而
+    "只抹当前那个"这种写法在加第二个凭据时静默失效 —— 漏掉的那个会原样出现在错误里。
+    """
     s = get_settings()
-    if s.gitlab_user_agents_token:
-        text = text.replace(s.gitlab_user_agents_token, "***")
+    for token in (s.gitlab_user_agents_token, s.gitlab_user_tools_token):
+        if token:
+            text = text.replace(token, "***")
     return text
 
 
@@ -285,6 +358,7 @@ def publish_tree(
     version: str,
     message: str,
     tmp_root: Path,
+    target: UploadTarget,
 ) -> tuple[str, str]:
     """把 `src` 目录的内容作为项目的新一版推上去,返回 (commit_sha, tag)。
 
@@ -304,7 +378,8 @@ def publish_tree(
     host = urllib.parse.urlsplit(s.gitlab_url).netloc
     # store 这个 helper 按 "协议://用户:密码@主机" 匹配;用户名任意,GitLab 只看密码。
     cred.write_text(
-        f"https://oauth2:{urllib.parse.quote(_token(), safe='')}@{host}\n", encoding="utf-8"
+        f"https://oauth2:{urllib.parse.quote(_token(target), safe='')}@{host}\n",
+        encoding="utf-8",
     )
     os.chmod(cred, 0o600)
 

@@ -111,7 +111,7 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
         return
     raise HTTPException(
         status.HTTP_403_FORBIDDEN,
-        "这个 Agent 还在等待审核,通过之后才能安装。",
+        "这个条目还在等待审核,通过之后才能安装。",
     )
 
 
@@ -475,7 +475,7 @@ def list_item_versions(
     if item.status != "approved" and requester not in (
         item.creator, settings.audit_admin_eid
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个条目还在等待审核。")
     rows = list(
         db.scalars(
             select(RpAiMarketItemVersion)
@@ -508,7 +508,7 @@ def get_review(
     if item.status != "approved" and requester not in (
         item.creator, settings.audit_admin_eid
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个 Agent 还在等待审核。")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "这个条目还在等待审核。")
 
     versions = list(
         db.scalars(
@@ -522,16 +522,26 @@ def get_review(
     compare: str | None = None
     if item.id.startswith("gl-") and versions:
         ref = versions[0].tag or "HEAD"
-        try:
-            files = [
-                {"path": e.get("path"), "name": e.get("name")}
-                for e in glw.list_tree(item.id[3:], ref)
-            ]
-        except glw.GitLabWriteError as exc:
-            # Say why instead of showing an empty list: "this package has no
-            # files" and "we could not ask GitLab" must not look the same to
-            # someone deciding whether to publish it.
-            files_error = exc.detail
+        if item.source != "upload":
+            # 同步来的条目住在 sync 的那两个组里,而这里的读用的是**上传**组的组访问令牌 ——
+            # 问不到,GitLab 答 404。说清楚原因,而不是显示一个空清单:"这个包没有文件"和
+            # "我们问不到" 对一个要决定是否发布的人不是同一件事。
+            files_error = "这个条目不是通过门户上传的,文件清单请到它的 GitLab 项目里看。"
+        else:
+            try:
+                # 用哪个 token 取决于这个条目是什么:两个上传组各有自己的组访问令牌,拿错
+                # 那个问不到这个项目(GitLab 答 404,而组名是对的)。
+                files = [
+                    {"path": e.get("path"), "name": e.get("name")}
+                    for e in glw.list_tree(
+                        item.id[3:], ref, target=glw.target_for(item.item_type)
+                    )
+                ]
+            except glw.GitLabWriteError as exc:
+                # Say why instead of showing an empty list: "this package has no
+                # files" and "we could not ask GitLab" must not look the same to
+                # someone deciding whether to publish it.
+                files_error = exc.detail
         if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
