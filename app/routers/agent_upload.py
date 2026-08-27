@@ -1,9 +1,19 @@
-"""Agent 包(zip)上传:包进 GitLab,条目进市场,等人批准才可见。
+"""包上传(tool / agent):包进 GitLab,条目进市场,等人批准才可见。
 
 和 skill 上传的关系:形状一样(先体检、再发布),存储不一样。skill 全部落在一个 git 仓的
-子目录里;agent 每个包一个 GitLab 项目(`rp-ai/rp-ai-user-agents` 组下)。这样做的直接好处是
+子目录里;这里每个包一个 GitLab 项目(`rp-ai/rp-ai-user-agents` 组下)。这样做的直接好处是
 门户已有的下载与安装令牌两条路径一行都不用改 —— 它们认 `gl-<项目id>`,而上传出来的条目
 正好就是这个形状。
+
+**收哪些格式,按类型分:** tool 只收 zip,agent 还收 tar(`.tar`/`.tar.gz`/`.tgz`/`.tar.bz2`/
+`.tar.xz`)。判断"这是什么"看内容不看扩展名,所以一个改名成 `.zip` 的 tar 走 tool 那条路
+一样会被退回 —— 否则那条规则只是一句文案。tar 在送审计之前会被**重新打成 zip**:引擎只解
+zip,tar 原样送过去会被当成一个不透明的二进制文件,于是一个源文件都没扫过,而结论看起来
+仍然像"通过"。
+
+两种类型的上传路径完全一样,`itemType` 只决定市场那一行的 `item_type` 和收哪些格式。
+GitLab 组也是同一个:那个 token 是**组访问令牌**,作用域只有这一个组,给 tool 单开一个组
+意味着再要一个 token 和一处会各自过期的配置。
 
 三条规矩,和这里的每个决定都有关:
 
@@ -16,7 +26,7 @@
 而是两分钟后给用户一句 GitLab 原文报错、组里还留下一个空项目。
 
 **上传者确认的启动命令是权威值。** 存进数据库(提示词读它)和包里的 portal-agent.yaml(给
-拿着 zip 离开门户的人)。README 一个字都不改:改了下一版会被上传者自己的包覆盖,而且发出去
+拿着包离开门户的人)。README 一个字都不改:改了下一版会被上传者自己的包覆盖,而且发出去
 的包就不是审计过的那一个了。
 """
 from __future__ import annotations
@@ -53,6 +63,22 @@ settings = get_settings()
 
 router = APIRouter(prefix="/api/market/agent-upload", tags=["agent-upload"])
 
+#: 每种条目类型收哪些打包格式。两种都收 zip 和 tar —— 一张表在这里,是为了让"收什么"
+#: 有一个可以指的地方,而不是散在校验分支里。
+#:
+#: 判断格式看**内容**不看扩展名(`pkg.archive_kind`),所以一个改名成 `.zip` 的 tar 走的仍然
+#: 是 tar 那条解包路径,不会报"这不是有效的 zip"。
+ALLOWED_KINDS: dict[str, tuple[str, ...]] = {
+    "tool": ("zip", "tar"),
+    "agent": ("zip", "tar"),
+}
+
+#: 上传界面与错误提示里用的扩展名。真正的判断按内容,这里只是为了能对上传者说出"该传什么"。
+ALLOWED_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "tool": pkg.ZIP_SUFFIXES + pkg.TAR_SUFFIXES,
+    "agent": pkg.ZIP_SUFFIXES + pkg.TAR_SUFFIXES,
+}
+
 
 # --- 共用 ------------------------------------------------------------------
 
@@ -61,9 +87,37 @@ def _sse(event: str, payload: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
-async def _read_zip(file: UploadFile | None) -> bytes:
+def _item_type(raw: str | None) -> str:
+    """收哪两种类型的上传。默认 agent —— 这个端点原来只有 agent,老的调用方不带这个字段。
+
+    `ai-platform` 不在其中:那类条目是一个别人运营的服务,它没有包可传,给它一个文件选择框
+    只会让人以为门户能托管它。
+    """
+    value = (raw or "agent").strip().lower()
+    if value not in ALLOWED_KINDS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"itemType 只能是 {'、'.join(ALLOWED_KINDS)}",
+        )
+    return value
+
+
+async def _read_package(file: UploadFile | None, item_type: str) -> bytes:
+    """读上传的包并按类型校验扩展名与大小。
+
+    扩展名校验是给人看的提示,不是安全边界 —— 真正判断格式的是内容(`pkg.archive_kind`,
+    由 `extract_safely` 按 `ALLOWED_KINDS` 强制)。两道都要:只看内容的话,一个传错文件的人
+    得到的是"这不是有效的包",而他更需要知道的是"这里收 .zip / .tar.gz"。
+    """
+    suffixes = ALLOWED_SUFFIXES[item_type]
+    wanted = " / ".join(suffixes)
     if file is None:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请选择一个 zip 包")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"请选择一个包({wanted})")
+    name = (file.filename or "").lower()
+    if not name.endswith(suffixes):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"包的格式只能是 {wanted}"
+        )
     data = await file.read()
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(
@@ -73,17 +127,43 @@ async def _read_zip(file: UploadFile | None) -> bytes:
     return data
 
 
-def _unpack(data: bytes) -> tuple[Path, list[pkg.FileEntry], pkg.Inspection]:
+def _unpack(
+    data: bytes, item_type: str
+) -> tuple[Path, list[pkg.FileEntry], pkg.Inspection]:
     """安全解包并体检。调用方负责删掉返回的临时目录。"""
     tmp = Path(tempfile.mkdtemp(prefix="agent-pkg-"))
     try:
         entries = pkg.extract_safely(
-            data, tmp / "src", max_bytes=settings.max_upload_bytes
+            data,
+            tmp / "src",
+            max_bytes=settings.max_upload_bytes,
+            allow=ALLOWED_KINDS[item_type],
         )
     except pkg.PackageRejected as exc:
         shutil.rmtree(tmp, ignore_errors=True)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.detail) from exc
     return tmp, entries, pkg.inspect(tmp / "src", entries)
+
+
+def _audit_artifact(
+    data: bytes, root: Path, entries: list[pkg.FileEntry], filename: str | None
+) -> tuple[bytes, str]:
+    """送审计引擎的那份字节 + 文件名。zip 原样,tar 重打成 zip。
+
+    引擎只解 zip:tar 原样送过去落在工作目录里就是**一个不透明的二进制文件**,一个源文件
+    都没被扫过 —— 而返回的结论看起来仍然像一次正常的审计。审计失败会显示成"未能完成",
+    这种情况会显示成"通过",所以它比失败更糟。
+
+    重打是确定性的,所以体检与发布两次调用打出同样的字节,引擎的内容哈希缓存照旧命中。
+    """
+    if pkg.archive_kind(data) == "zip":
+        return data, filename or "artifact.zip"
+    stem = Path(filename or "package").name
+    for suffix in pkg.TAR_SUFFIXES:
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return pkg.repack_as_zip(root, entries), f"{stem or 'package'}.zip"
 
 
 def _secret_stop(root: Path, entries: list[pkg.FileEntry]) -> None:
@@ -212,6 +292,7 @@ async def inspect_package(
     request: Request,
     eid: str = Form(""),
     name: str = Form(""),
+    item_type: str = Form("agent", alias="itemType"),
     file: UploadFile | None = File(None),
     x_user_eid: str | None = Header(None),
 ) -> StreamingResponse:
@@ -222,9 +303,10 @@ async def inspect_package(
     (它按内容哈希缓存),所以这一次不是白跑的。
     """
     eid_norm = acting_eid(request, eid or x_user_eid)
-    data = await _read_zip(file)
+    itype = _item_type(item_type)
+    data = await _read_package(file, itype)
     artifact_name = file.filename if file else None
-    tmp, entries, ins = _unpack(data)
+    tmp, entries, ins = _unpack(data, itype)
     try:
         _secret_stop(tmp / "src", entries)
     except HTTPException:
@@ -232,16 +314,18 @@ async def inspect_package(
         raise
 
     facts = _inspection_out(ins, artifact_name=artifact_name)
-    audit_name = name.strip() or (ins.top_dir or artifact_name or "agent")
+    audit_name = name.strip() or (ins.top_dir or artifact_name or itype)
     skill_md = _audit_text(ins, ins.declared.launch)
+    # 审计的那份字节要在删掉临时目录**之前**算出来:tar 的那一份是从解开的文件重打的。
+    audit_bytes, audit_filename = _audit_artifact(data, tmp / "src", entries, artifact_name)
     shutil.rmtree(tmp, ignore_errors=True)
 
     events: queue.Queue = queue.Queue()
 
     def run() -> AuditResult:
         return audit_skill(
-            name=audit_name, skill_md=skill_md, artifact_bytes=data,
-            artifact_filename=artifact_name, uploader_eid=eid_norm or None,
+            name=audit_name, skill_md=skill_md, artifact_bytes=audit_bytes,
+            artifact_filename=audit_filename, uploader_eid=eid_norm or None,
             on_progress=events.put,
         )
 
@@ -318,6 +402,7 @@ async def publish_package(
     keep: str | None = Form(None, description="JSON 数组或换行分隔"),
     prerequisites: str | None = Form(None, description="JSON 数组或换行分隔"),
     item_id: str | None = Form(None, alias="itemId"),
+    item_type: str = Form("agent", alias="itemType"),
     file: UploadFile | None = File(None),
     x_user_eid: str | None = Header(None),
 ) -> dict:
@@ -331,11 +416,14 @@ async def publish_package(
     acting = acting_eid(request, eid or x_user_eid)
     if not acting:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少上传者身份")
-    if not settings.gitlab_user_agents_token:
+    itype = _item_type(item_type)
+    target = glw.target_for(itype)
+    if not target.token:
         # 早点说清楚:凭据没配的时候,包收下来也无处存,答 503 比收下再丢掉诚实。
+        # 说出**哪一个**变量:现在有两个组两个 token,笼统一句"未配置"会让人去改另一个。
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "上传 Agent 包所需的 GitLab 凭据未配置,请联系管理员。",
+            f"上传 {itype} 包所需的 GitLab 凭据({target.env_var})未配置,请联系管理员。",
         )
     launch = launch.strip()
     if not launch:
@@ -343,16 +431,23 @@ async def publish_package(
     if runtime not in pkg.RUNTIMES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"runtime 只能是 {pkg.RUNTIMES}")
 
-    data = await _read_zip(file)
+    data = await _read_package(file, itype)
     artifact_name = file.filename if file else None
-    tmp, entries, ins = _unpack(data)
+    tmp, entries, ins = _unpack(data, itype)
     try:
         _secret_stop(tmp / "src", entries)
 
         existing = db.get(RpAiMarketItem, item_id) if item_id else None
         if existing is not None and existing.creator and existing.creator != acting:
             raise HTTPException(
-                status.HTTP_403_FORBIDDEN, "只有原上传者可以上传这个 Agent 的新版本"
+                status.HTTP_403_FORBIDDEN, "只有原上传者可以上传这个条目的新版本"
+            )
+        if existing is not None and existing.item_type != itype:
+            # 换类型等于换了它在市场里是什么东西,而卡片、筛选和用法说明都跟着这一格走。
+            # 静默接受会让一个 tool 的新版本把它变成 agent,而上传者只是传了一个包。
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"这个条目是 {existing.item_type},不能作为 {itype} 上传新版本。",
             )
         cid, category_label = _resolve_category(db, acting, category_id)
         keep_list = _parse_keep(keep)
@@ -362,9 +457,12 @@ async def publish_package(
         )
 
         # 审计:结论只记录,不改流向。内容没变时会命中引擎缓存(体检那一步已经跑过)。
+        audit_bytes, audit_filename = _audit_artifact(
+            data, tmp / "src", entries, artifact_name
+        )
         audit = audit_skill(
-            name=name, skill_md=_audit_text(ins, launch), artifact_bytes=data,
-            artifact_filename=artifact_name, uploader_eid=acting,
+            name=name, skill_md=_audit_text(ins, launch), artifact_bytes=audit_bytes,
+            artifact_filename=audit_filename, uploader_eid=acting,
         )
 
         version = bump_minor(existing.version if existing else None)
@@ -386,21 +484,22 @@ async def publish_package(
             )
         else:
             project = glw.create_project(
-                slug=_slug(name), name=name, description=description or None
+                slug=_slug(name), name=name, description=description or None,
+                target=target,
             )
 
         try:
             sha, tag = glw.publish_tree(
                 project, src, version=version,
                 message=f"{'upload' if existing is None else 'update'}({cid}): {name} v{version}",
-                tmp_root=tmp,
+                tmp_root=tmp, target=target,
             )
         except glw.GitLabWriteError as exc:
             if existing is None:
                 # 项目建好了但内容没推上去 —— 留下一个空项目会让下次同名上传撞路径,而且
                 # 没人看得出它是半成品。归档掉,让失败干净地结束。
                 try:
-                    glw.archive_project(project.id)
+                    glw.archive_project(project.id, target)
                 except glw.GitLabWriteError:
                     log.warning("推送失败后归档项目 %s 也失败了", project.id)
             raise HTTPException(
@@ -416,9 +515,9 @@ async def publish_package(
             db.add(item)
             item.creator = acting
             item.source = "upload"
-            item.item_type = "agent"
-            # 上传出来的条目**就是**一个 code 服务:它有真实的仓库地址。"zip" 是它怎么来的,
-            # 不是它是什么 —— 所以那个轴上是 source,不是 service_type。这也让市场里
+            item.item_type = itype
+            # 上传出来的条目**就是**一个 code 服务:它有真实的仓库地址。"zip/tar" 是它怎么
+            # 来的,不是它是什么 —— 所以那个轴上是 source,不是 service_type。这也让市场里
             # 每一处 `serviceType === 'code' ? repoUrl : serviceUrl` 照旧成立。
             item.service_type = "code"
             item.repo_url = project.web_url
@@ -473,7 +572,7 @@ def _slug(name: str) -> str:
     import re
 
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", (name or "").strip().lower()).strip("-")
-    return (slug or f"agent-{uuid.uuid4().hex[:8]}")[:60]
+    return (slug or f"pkg-{uuid.uuid4().hex[:8]}")[:60]
 
 
 def _parse_tags(raw: str | None) -> list[str]:

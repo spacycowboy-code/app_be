@@ -55,18 +55,27 @@ def test_terminal_prompt_is_disabled(monkeypatch) -> None:
 def test_token_is_scrubbed_from_anything_reported(monkeypatch) -> None:
     """错误里带着 token 是最容易的一种泄露:它会直接落进日志和返回给用户的文案。
 
+    **两个上传组的 token 都要抹**,不只是这次用的那一个:`publish_tree` 的失败原文是直接
+    给上传者看的,而"只抹当前那个"这种写法在加第二个凭据时静默失效。
+
     样本在运行时拼出来。整段 `https://用户:口令@主机` 写成字面量会被密钥扫描器判成
     Basic Auth 凭据 —— 远端的 pre-receive 钩子已经为此警告过一次。拼接后被测代码看到的
     字符串一模一样。
     """
-    fake = "glpat-" + "NOTAREALTOKEN" + "0123456789"
+    agents = "glpat-" + "NOTAREALTOKEN" + "0123456789"
+    tools = "glpat-" + "ALSONOTREAL" + "9876543210"
     monkeypatch.setattr(
         glw, "get_settings",
-        lambda: SimpleNamespace(gitlab_user_agents_token=fake),
+        lambda: SimpleNamespace(
+            gitlab_user_agents_token=agents, gitlab_user_tools_token=tools
+        ),
     )
-    text = glw._scrub("fatal: unable to access https://" + "oauth2:" + fake + "@host/x.git")
-    assert fake not in text
-    assert "***" in text
+    for fake in (agents, tools):
+        text = glw._scrub(
+            "fatal: unable to access https://" + "oauth2:" + fake + "@host/x.git"
+        )
+        assert fake not in text
+        assert "***" in text
 
 
 def test_credentials_go_in_a_file_not_the_command_line() -> None:
@@ -86,7 +95,59 @@ def test_credentials_go_in_a_file_not_the_command_line() -> None:
     uses = [
         line.strip()
         for line in push_src.splitlines()
-        if "_token()" in line
+        if "_token(" in line
     ]
     assert len(uses) == 1, f"token 被读了 {len(uses)} 次:{uses}"
     assert "cred" in uses[0] or "oauth2" in uses[0], uses[0]
+
+
+def test_each_item_type_gets_its_own_group_and_token(monkeypatch) -> None:
+    """组和 token 是同一个决定:group access token 只能访问它所属的那个组。
+
+    拿 agent 那个 token 去 tool 的组建项目,GitLab 答 404 —— 而组名是对的,所以这条搞错
+    的表现是"组名写错了"式的排查,离原因很远。
+    """
+    monkeypatch.setattr(
+        glw, "get_settings",
+        lambda: SimpleNamespace(
+            gitlab_user_agents_group="rp-ai/rp-ai-user-agents",
+            gitlab_user_agents_token="agents-token",
+            gitlab_user_tools_group="rp-ai/rp-ai-user-tools",
+            gitlab_user_tools_token="tools-token",
+        ),
+    )
+    agent = glw.target_for("agent")
+    tool = glw.target_for("tool")
+    assert (agent.group_path, agent.token) == ("rp-ai/rp-ai-user-agents", "agents-token")
+    assert (tool.group_path, tool.token) == ("rp-ai/rp-ai-user-tools", "tools-token")
+    # 缺哪个变量要说得出来:有两个之后,笼统一句"凭据未配置"会让人去改另一个。
+    assert agent.env_var == "GITLAB_USER_AGENTS_TOKEN"
+    assert tool.env_var == "GITLAB_USER_TOOLS_TOKEN"
+
+
+def test_namespace_cache_is_keyed_by_group(monkeypatch) -> None:
+    """组 id 的缓存必须按组路径分键。
+
+    共用一个全局 int 的后果是第一次上传解析出的 id 被另一种类型直接复用 —— tool 的项目
+    建到 agent 组里去,门户不报错、条目也正常,只有去 GitLab 看才发现。
+    """
+    monkeypatch.setattr(
+        glw, "get_settings",
+        lambda: SimpleNamespace(
+            gitlab_user_agents_group="g/agents", gitlab_user_agents_token="a",
+            gitlab_user_tools_group="g/tools", gitlab_user_tools_token="t",
+        ),
+    )
+    asked: list[str] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        asked.append(target.group_path)
+        return {"id": 11 if target.group_path == "g/agents" else 22}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "_namespace_ids", {})
+    assert glw.namespace_id(glw.target_for("agent")) == 11
+    assert glw.namespace_id(glw.target_for("tool")) == 22
+    # 各自缓存,不互相顶掉。
+    assert glw.namespace_id(glw.target_for("agent")) == 11
+    assert asked == ["g/agents", "g/tools"]

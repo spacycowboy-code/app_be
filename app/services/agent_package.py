@@ -1,11 +1,11 @@
-"""Agent 包(zip)的解包、体检与自描述文件。
+"""上传包(zip / tar)的解包、体检与自描述文件。
 
-这个模块只回答"这个 zip 里是什么",不做任何判断题式的裁决 —— 审计结论归引擎,是否放行归
+这个模块只回答"这个包里是什么",不做任何判断题式的裁决 —— 审计结论归引擎,是否放行归
 人。它管三类**事实**:
 
-1. **能不能安全解开。** zip 里的成员路径可以写成 `../../etc/x` 或者一个指向 `/etc/passwd`
-   的符号链接。照抄 `extractall` 就会写到目标目录外面(zip slip)。这不是对上传者的判断,
-   是我们自己的漏洞,所以这类包直接退回。
+1. **能不能安全解开。** 包里的成员路径可以写成 `../../etc/x` 或者一个指向 `/etc/passwd`
+   的符号链接。照抄 `extractall` 就会写到目标目录外面(zip slip / tar slip)。这不是对上传者的
+   判断,是我们自己的漏洞,所以这类包直接退回。
 2. **GitLab 会不会拒收。** 包里带明文凭据时,GitLab 的 pre-receive 钩子必定拒绝这次
    push。我们不做这项检查也不会"放过"它,只会把失败推到两分钟后、报错变成 GitLab 的原文,
    而且组里已经留下一个建了一半的空项目。所以提前检出、提前说明。
@@ -28,6 +28,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import tarfile
 import tomllib
 import zipfile
 from dataclasses import dataclass, field
@@ -37,7 +38,17 @@ import yaml
 
 #: 包根目录的自描述文件。名字里带 portal 是故意的:它是门户加进去的,不是上传者的 README
 #: 的一部分 —— 我们从不改写上传者的文件。
+#:
+#: 名字里带 agent 是历史,现在 tool 包也写同一个文件:改名会让已经把它同步回自己仓库的
+#: 上传者下一版突然多出一个陌生文件,而这个文件的内容与包的类型无关。
 SIDECAR_NAME = "portal-agent.yaml"
+
+#: 认得的两种打包格式,按**扩展名**给调用方做入口校验用。真正判断"这是什么"看内容
+#: (`archive_kind`):扩展名是上传者写的,内容不是。
+ZIP_SUFFIXES = (".zip",)
+TAR_SUFFIXES = (
+    ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tbz", ".tar.xz", ".txz",
+)
 
 #: 常驻/一次性。常驻的才提示"会弹浏览器窗口、别关掉";一次性的提示这句就是错的。
 RUNTIMES = ("long-running", "oneshot")
@@ -128,6 +139,9 @@ _DERIVED_IGNORES = frozenset({
 #: keep 候选最多给这么多。再多上传者就不会逐条看了,而这个清单的价值全在他逐条看。
 _KEEP_LIMIT = 8
 
+#: 解 tar 时一次读多少。按实际写出的字节记账,不信 header 里的 size。
+_COPY_CHUNK = 64 * 1024
+
 #: 一体式安装脚本。发现它就只出这一条 —— 这类脚本的约定是"整个安装都归我"
 #: (report-manhour 的 setup.ps1 自己查 Python、装依赖、装浏览器、自检),再并列几条我们
 #: 猜出来的步骤会和它抢同一件事,而冲突的表现是脚本跑一半失败、报错指向别处。
@@ -138,7 +152,7 @@ _PY_FLOOR = re.compile(r">=\s*3\.(\d+)")
 
 
 class PackageRejected(Exception):
-    """这个 zip 我们处理不了,或者 GitLab 一定会拒收。
+    """这个包我们处理不了,或者 GitLab 一定会拒收。
 
     和"审计说它可疑"是两回事:那个只记录不拦,这个是事实性的死路,越早说越好。
     """
@@ -250,11 +264,72 @@ def _is_symlink(info: zipfile.ZipInfo) -> bool:
     return (info.external_attr >> 16) & 0xF000 == 0xA000
 
 
-def extract_safely(data: bytes, dest: Path, *, max_bytes: int) -> list[FileEntry]:
-    """把 zip 解到 `dest`,拒绝任何会写到 `dest` 外面的东西。
+def archive_kind(data: bytes) -> str | None:
+    """`"zip"` / `"tar"` / `None`(两者都不是)。**按内容判,不按扩展名。**
+
+    扩展名是上传者写的一串字符,内容不是。调用方用扩展名做入口校验(那是给人看的错误
+    提示),能不能解开、按哪种格式解开只由这里回答 —— 否则一个叫 `x.zip` 的 tar 会走进
+    zip 的解包分支,报错说它"不是有效的 zip",而它其实是一个完好的 tar。
+    """
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        return "zip"
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:*"):
+            return "tar"
+    except tarfile.TarError:
+        return None
+
+
+def _tar_member_name(raw: str) -> str | None:
+    """tar 成员名归一成"包内相对路径"。返回 None 表示这个成员不用落地。
+
+    `tar -czf - .` 打出来的每一项都带 `./` 前缀,还有一个名为 `.` 的目录项。不去掉这一层,
+    `_common_top_dir` 会认为顶层目录叫 `.`,于是 README、`pyproject.toml`、`.kiro/agents/`
+    一个都找不到 —— 包看起来什么都没声明,而它其实什么都有。
+    """
+    name = raw
+    while name.startswith("./"):
+        name = name[2:]
+    name = name.rstrip("/")
+    return None if name in ("", ".") else name
+
+
+def extract_safely(
+    data: bytes,
+    dest: Path,
+    *,
+    max_bytes: int,
+    allow: tuple[str, ...] = ("zip", "tar"),
+) -> list[FileEntry]:
+    """把包解到 `dest`,拒绝任何会写到 `dest` 外面的东西。
+
+    `allow` 是**策略**,由调用方给:tool 只收 zip,agent 收 zip 和 tar。放在这里而不是只在
+    路由上按扩展名拦,是因为扩展名可以写错也可以写谎 —— 一个叫 `x.zip` 的 tar 必须在这里
+    也被 tool 那条路拒掉,否则那条规则只是一句文案。
 
     返回文件清单。目录项不计入 —— 审核人要看的是文件。
     """
+    kind = archive_kind(data)
+    if kind is None or kind not in allow:
+        raise PackageRejected(_wrong_format_detail(kind, allow))
+    if kind == "zip":
+        return _extract_zip(data, dest, max_bytes=max_bytes)
+    return _extract_tar(data, dest, max_bytes=max_bytes)
+
+
+def _wrong_format_detail(kind: str | None, allow: tuple[str, ...]) -> str:
+    """说清楚"你传的是什么"和"这里收什么",两句都要有。
+
+    只说"格式不对"会让上传者去改扩展名 —— 而扩展名从来不是判断依据,改完再传一次还是同一句
+    错误。
+    """
+    wanted = " 或 ".join(allow)
+    if kind is None:
+        return f"这不是一个有效的 {wanted} 包(按内容判断,不看扩展名)。"
+    return f"这是一个 {kind} 包,而这里只收 {wanted} 包。"
+
+
+def _extract_zip(data: bytes, dest: Path, *, max_bytes: int) -> list[FileEntry]:
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
@@ -289,15 +364,125 @@ def extract_safely(data: bytes, dest: Path, *, max_bytes: int) -> list[FileEntry
             if info.is_dir():
                 (dest / info.filename).mkdir(parents=True, exist_ok=True)
                 continue
-            target = (dest / info.filename).resolve()
-            # 双保险:上面按名字判过,这里按落地后的真实路径再判一次。名字检查可能被
-            # 某种编码绕过,而 resolve() 之后的比较不会。
-            if not str(target).startswith(str(dest.resolve()) + "/"):
-                raise PackageRejected(f"包里有不安全的路径({info.filename})。")
+            target = _safe_target(dest, info.filename)
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(info) as src, open(target, "wb") as out:
                 out.write(src.read())
     return entries
+
+
+def _extract_tar(data: bytes, dest: Path, *, max_bytes: int) -> list[FileEntry]:
+    """tar 的那一份。同一套规则,但 tar 能表达的危险成员比 zip 多。
+
+    zip 只有"文件 / 目录 / 带 symlink 位的文件";tar 还能装硬链接、字符设备、块设备、
+    FIFO。这些解出来要么指向目标目录之外(链接),要么根本不是我们要审的东西(设备节点)——
+    而一个正常的 agent/tool 包里不会有任何一项,所以整包退回,不静默跳过:静默跳过意味着
+    审核人看到的文件清单和包里真实的内容不一样。
+    """
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:*")
+    except tarfile.TarError as exc:
+        raise PackageRejected("这不是一个有效的 tar 包。") from exc
+
+    entries: list[FileEntry] = []
+    total = 0
+    with tf:
+        try:
+            members = tf.getmembers()
+        except tarfile.TarError as exc:
+            # 坏在中途的 tar:前面的成员读得出来,后面读不出来。当整包无效处理 —— 半个包
+            # 解出来的目录树看起来完全正常,而它少了文件。
+            raise PackageRejected("这个 tar 包读到一半损坏了,请重新打包。") from exc
+
+        for member in members:
+            name = _tar_member_name(member.name)
+            if name is None:
+                continue
+            if member.issym() or member.islnk():
+                raise PackageRejected(
+                    f"包里有链接({name} → {member.linkname}),解压时它可以指向目标目录"
+                    "之外,所以这个包不能被接收。请去掉链接、放实际文件。"
+                )
+            if not (member.isfile() or member.isdir()):
+                raise PackageRejected(
+                    f"包里有既不是文件也不是目录的成员({name}:设备节点或管道),"
+                    "这类内容无法审核,也不该随包分发。请重新打包。"
+                )
+            reason = _unsafe_reason(name)
+            if reason is not None:
+                raise PackageRejected(
+                    f"包里有不安全的路径({name}:{reason}),解压时会写到目标目录之外。"
+                    "请重新打包,只包含相对路径。"
+                )
+            if member.isdir():
+                continue
+            total += member.size
+            if total > max_bytes:
+                raise PackageRejected(
+                    f"解压后的总大小超过 {max_bytes // (1024 * 1024)} MB 上限。"
+                )
+            entries.append(FileEntry(path=name, size=member.size))
+
+        dest.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for member in members:
+            name = _tar_member_name(member.name)
+            if name is None:
+                continue
+            target = _safe_target(dest, name)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            src = tf.extractfile(member)
+            if src is None:                     # 上面已经拦过非普通文件,这里是兜底
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with src, open(target, "wb") as out:
+                # 按**实际写出的字节**记账,而不是信 header 里的 size:tar 的 header 是
+                # 上传者写的,而决定磁盘被写多少的是数据块。
+                while chunk := src.read(_COPY_CHUNK):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise PackageRejected(
+                            f"解压后的总大小超过 {max_bytes // (1024 * 1024)} MB 上限。"
+                        )
+                    out.write(chunk)
+    return entries
+
+
+def _safe_target(dest: Path, name: str) -> Path:
+    """成员落地的绝对路径,确认它在 `dest` 里面。
+
+    双保险:调用方已经按名字判过,这里按 resolve() 之后的真实路径再判一次。名字检查可能被
+    某种编码绕过,而落地路径的比较不会。
+    """
+    target = (dest / name).resolve()
+    if not str(target).startswith(str(dest.resolve()) + "/"):
+        raise PackageRejected(f"包里有不安全的路径({name})。")
+    return target
+
+
+def repack_as_zip(root: Path, entries: list[FileEntry]) -> bytes:
+    """把解开的目录重新打成 zip,用来送审计引擎。
+
+    引擎只解 zip(`skill_audit/pipeline.py` 按 `is_zipfile` 判):tar 原样送过去会被当成
+    **一个不透明的二进制文件**,于是一个源文件都没被扫过 —— 而返回的结论看起来仍然像一次
+    正常的审计。这比审计失败更糟:失败会显示成"未能完成",这个会显示成"通过"。
+
+    打包必须是确定的(成员按路径排序、时间戳固定):体检和发布是两次调用,引擎按内容哈希
+    缓存,同一个包两次要打出同样的字节,否则发布那一次会再跑一遍几十秒的审计。
+    """
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+        for entry in sorted(entries, key=lambda e: e.path):
+            path = root / entry.path
+            if not path.is_file():
+                continue
+            info = zipfile.ZipInfo(entry.path, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            zf.writestr(info, path.read_bytes())
+    return out.getvalue()
 
 
 # --- 体检 ------------------------------------------------------------------
