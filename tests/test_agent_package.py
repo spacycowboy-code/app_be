@@ -438,3 +438,72 @@ def test_wrong_agent_name_is_still_caught(tmp_path: Path) -> None:
     data = mkzip({"a/.kiro/agents/timesheet.json": KIRO_AGENT})
     entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
     assert pkg.launch_target_exists("kiro-cli chat --agent timesheeet", entries) is False
+
+
+# --- 推导不能被包里的内容带跑 -----------------------------------------------
+
+
+@pytest.mark.parametrize("name", ["x; whoami", "a b", "$(id)", "x&&y", "x|y", "x`id`"])
+def test_agent_name_with_shell_metacharacters_yields_nothing(name: str, tmp_path: Path) -> None:
+    """推出来的命令会被标成"已确定、无需核对",然后原样交给使用者的 agent 去执行。
+
+    上传者本来就能在表单里手填任何启动命令,所以这不是新增的权限;新增的是"这条不用核对"
+    这个信号,而那正是不能给一条 `;` 分隔的命令的东西。名字不合规就整条不出。
+    """
+    ins = inspect_zip({f"a/.kiro/agents/{name}.json": "{}"}, tmp_path)
+    assert ins.launch_guesses == []
+    assert ins.declared.launch is None
+
+
+def test_agent_name_charset_matches_the_availability_check(tmp_path: Path) -> None:
+    """两边字符集必须一致,否则确认屏一边说"已确定"、一边说"包里找不到"。"""
+    ins = inspect_zip({"a/.kiro/agents/ts-report_2.json": "{}"}, tmp_path)
+    assert ins.declared.launch == "kiro-cli chat --agent ts-report_2"
+    assert ins.launch_guesses[0].certain is True
+    entries = pkg.extract_safely(
+        mkzip({"a/.kiro/agents/ts-report_2.json": "{}"}), tmp_path / "src2", max_bytes=MAX
+    )
+    assert pkg.launch_target_exists(ins.declared.launch, entries) is True
+
+
+@pytest.mark.parametrize("body", [
+    'project = "not a table"',          # 合法 TOML,但 project 不是表
+    "project = 1",
+    "[project]\nscripts = 'nope'",      # scripts 不是表
+])
+def test_malformed_pyproject_does_not_crash_the_inspection(body: str, tmp_path: Path) -> None:
+    """这是上传者的文件。抛 AttributeError 的结果是体检端点 500,而他看到的是
+    "服务器错误",不是"你的 pyproject 有问题"。"""
+    ins = inspect_zip({"a/pyproject.toml": body + "\n"}, tmp_path)
+    assert ins.declared.launch is None
+
+
+def test_dev_only_browser_dependency_is_not_long_running(tmp_path: Path) -> None:
+    """一个用 playwright 做端到端测试的普通应用,跑起来根本不开浏览器。
+
+    判成常驻,提示词就会对一个两秒退出的脚本说"别关掉那个窗口"。
+    """
+    ins = inspect_zip({
+        "a/pyproject.toml": (
+            '[project]\ndependencies = ["flask"]\n\n'
+            '[project.optional-dependencies]\ndev = ["pytest-playwright"]\n'
+        ),
+    }, tmp_path)
+    assert ins.declared.runtime is None
+
+
+def test_runtime_browser_dependency_still_detected_in_pyproject(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/pyproject.toml": '[project]\ndependencies = ["playwright==1.49.1"]\n',
+    }, tmp_path)
+    assert ins.declared.runtime == "long-running"
+
+
+def test_node_dev_dependency_is_not_long_running(tmp_path: Path) -> None:
+    ins = inspect_zip({
+        "a/package.json": (
+            '{"name": "x", "dependencies": {"express": "^4"},'
+            ' "devDependencies": {"playwright": "^1.49"}}'
+        ),
+    }, tmp_path)
+    assert ins.declared.runtime is None

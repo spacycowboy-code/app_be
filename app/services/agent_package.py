@@ -99,6 +99,18 @@ _PLACEHOLDERISH = re.compile(
 #: `kiro-cli chat --agent <名字>` 写的,不存在"它想说什么"的问题。
 _KIRO_AGENT_DIR = ".kiro/agents"
 
+#: agent 名里允许出现的字符。**这不是洁癖,是这条推导唯一的安全边界**:推出来的命令会被
+#: 标成"已确定、无需核对"预填进确认屏,提示词再把它原样交给使用者的 agent 去执行。一个叫
+#: `x; whoami.json` 的文件会推出 `kiro-cli chat --agent x; whoami` —— 两条命令。
+#:
+#: 上传者本来就能在表单里手填任何启动命令,所以这不是新增的权限;新增的是"这条不用核对"
+#: 这个信号,而那正是不能给出去的东西。名字不合规就整条不出,不降级成候选:一个名字里带
+#: shell 元字符的 agent 配置,我们没有任何理由替它拼出一条命令。
+#:
+#: 字符集与 `_KIRO_AGENT_ARG` 一致 —— 两边不一致会让 `launch_target_exists` 对自己推出来
+#: 的命令判 False,也就是确认屏一边说"已确定"、一边说"包里找不到"。
+_KIRO_AGENT_NAME = re.compile(r"^[\w.-]+$")
+
 #: 常驻运行的强信号。只认这几个:它们都会开一个真实的浏览器进程并停在那里。
 #: 认得越少越好 —— `runtime` 猜错的表现是对一个两秒就退出的脚本说"别关掉那个窗口",
 #: 而一处明显不对的提醒会让整段提示词都不被相信。
@@ -371,7 +383,8 @@ def kiro_agent_launches(root: Path, entries: list[FileEntry]) -> list[LaunchGues
             if "/" in rel:          # agents/ 下的子目录不是 agent 配置
                 continue
             stem = rel[: -len(".json")]
-            if not stem:
+            if not stem or not _KIRO_AGENT_NAME.match(stem):
+                # 见 _KIRO_AGENT_NAME:名字不合规就整条不出。
                 continue
             try:
                 data = json.loads((root / entry.path).read_text(encoding="utf-8", errors="ignore"))
@@ -426,7 +439,11 @@ def pyproject_launches(root: Path, entries: list[FileEntry]) -> list[LaunchGuess
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError:
         return []
-    scripts = (data.get("project") or {}).get("scripts") or {}
+    # 每一层都要 isinstance:这是上传者的文件,`project = "x"` 是合法 TOML,而
+    # `(data.get("project") or {}).get(...)` 对一个字符串会抛 AttributeError ——
+    # 体检端点 500,上传者看到的是"服务器错误",不是"你的 pyproject 有问题"。
+    project = data.get("project")
+    scripts = project.get("scripts") if isinstance(project, dict) else None
     if not isinstance(scripts, dict):
         return []
     names = [str(k).strip() for k in scripts if str(k).strip()]
@@ -506,18 +523,50 @@ def derive_launch(
     return out
 
 
+def _runtime_deps(root: Path, entries: list[FileEntry]) -> str:
+    """只把**运行时**依赖拼成一段文本。dev / 测试依赖不算。
+
+    这个区分是必要的,不是讲究:一个用 playwright 做端到端测试的普通 web 应用,它的
+    `pytest-playwright` 只在 dev extra 里,而它跑起来根本不开浏览器。把它判成常驻,提示词
+    就会对一个两秒退出的脚本说"别关掉那个窗口" —— 而一处明显不对的提醒会让人连带不信
+    别的提醒。
+
+    `requirements.txt` 整个文件都算运行时:它没有分组,而 dev 依赖的惯例是另一个文件
+    (`requirements-dev.txt`),那个文件不在这里读。
+    """
+    parts: list[str] = [_read_text(root, entries, "requirements.txt") or ""]
+
+    toml_text = _read_text(root, entries, "pyproject.toml")
+    if toml_text:
+        try:
+            data = tomllib.loads(toml_text)
+        except tomllib.TOMLDecodeError:
+            data = {}
+        project = data.get("project")
+        deps = project.get("dependencies") if isinstance(project, dict) else None
+        if isinstance(deps, list):
+            parts += [str(d) for d in deps]
+
+    pkg_text = _read_text(root, entries, "package.json")
+    if pkg_text:
+        try:
+            data = json.loads(pkg_text)
+        except ValueError:
+            data = {}
+        deps = data.get("dependencies") if isinstance(data, dict) else None
+        if isinstance(deps, dict):
+            parts += [str(k) for k in deps]
+
+    return "\n".join(parts).lower()
+
+
 def derive_runtime(root: Path, entries: list[FileEntry]) -> str | None:
-    """依赖里有浏览器自动化 → `long-running`。推不出来返回 None,让上传者选。
+    """运行时依赖里有浏览器自动化 → `long-running`。推不出来返回 None,让上传者选。
 
     只在有强信号时才答。别的形态(常驻服务、定时任务)也可能是 long-running,但从依赖看不
     出来,而这一项猜错会让提示词出现一句明显不对的提醒。
     """
-    texts = [
-        _read_text(root, entries, "requirements.txt") or "",
-        _read_text(root, entries, "pyproject.toml") or "",
-        _read_text(root, entries, "package.json") or "",
-    ]
-    blob = "\n".join(texts).lower()
+    blob = _runtime_deps(root, entries)
     return "long-running" if any(dep in blob for dep in _LONG_RUNNING_DEPS) else None
 
 
