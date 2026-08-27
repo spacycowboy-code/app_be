@@ -10,6 +10,7 @@ import pytest
 from app.database import SessionLocal
 from app.models.audit import RpAiSkillAuditRecord
 from app.models.skill import RpAiSkill
+from app.models.version import RpAiSkillVersion
 from app.routers import skills as skills_mod
 from app.routers import upload as upload_mod
 from app.services.audit_engine import AuditResult, Finding
@@ -96,12 +97,22 @@ def test_a_rejected_edit_is_not_written_and_leaves_a_record(client, monkeypatch)
         assert db.get(RpAiSkill, sid).description == "d"
 
 
-def test_an_edit_needing_review_goes_to_a_branch_and_leaves_the_market(
+def test_an_edit_needing_review_keeps_the_published_version_in_the_market(
     client, monkeypatch
 ):
+    """一次要复核的更新不许动线上那一版 —— 旧版本继续在市场里,新内容在复核分支上等着。
+
+    原来这里断言的是相反的行为(``status == "pending"``,技能从市场消失)。它是照着实现写的,而那个
+    实现让作者的一次更新替所有使用者下架了这个技能:线上那一版是审过、批过的内容,被质疑的是还没
+    发布的新内容。生产上真的发生过("Replir Allocation Tool" 更新触发安全问题后旧 skill 不见了)。
+    """
     calls: list = []
     _stub_store(monkeypatch, calls)
     sid = _create_skill(client, monkeypatch)
+    with SessionLocal() as db:
+        before = db.get(RpAiSkill, sid)
+        live = (before.version, before.repo_commit, before.description, before.audit_state)
+
     monkeypatch.setattr(skills_mod, "audit_skill", lambda **kw: AuditResult(
         state="suspect", verdict="flag",
         findings=[Finding("judge", "dangerous_instruction", "medium", "sudo", "elevates")],
@@ -115,13 +126,54 @@ def test_an_edit_needing_review_goes_to_a_branch_and_leaves_the_market(
     # Written to a review branch, never live.
     assert calls[-1]["target_branch"] and calls[-1]["target_branch"].startswith("skill-audit/")
     assert opened and opened[0]["source_branch"] == calls[-1]["target_branch"]
+    # 响应里说清了"改动在复核里",而技能本身还是已发布的那一版。
+    assert r.json()["status"] == "approved"
+    assert r.json()["pendingUpdate"]["mrUrl"] == "http://mr/1"
+    assert r.json()["pendingUpdate"]["description"] == "edited"
 
     with SessionLocal() as db:
         skill = db.get(RpAiSkill, sid)
-        assert skill.status == "pending"        # hidden until the MR is merged
-        assert skill.audit_state == "suspect"
+        assert skill.status == "approved"        # 旧版本继续在市场里
+        # 已发布那一版的指针一个字没动:详情页照旧读到过审的正文,不是复核分支上那份。
+        assert (skill.version, skill.repo_commit, skill.description,
+                skill.audit_state) == live
+        pending = skill.pending_update
+        assert pending is not None
+        assert pending.version == "1.1.0" and pending.commit_sha == "def456"
+        assert pending.payload_json["description"] == "edited"
+        assert pending.mr_url == "http://mr/1"
         rec = db.query(RpAiSkillAuditRecord).filter_by(state="suspect").one()
         assert rec.skill_id == sid and rec.mr_url == "http://mr/1"
+        # 记录自己说清了它审的是一次更新,不是线上那一版 —— 收敛器靠这个不去下架它。
+        assert rec.replaces_published is True
+        # 还没发布的版本不进版本历史,也不通知收藏者:首页会推一个谁都装不到的版本。
+        assert db.query(RpAiSkillVersion).filter_by(skill_id=sid).count() == 1
+
+
+def test_a_suspect_first_upload_still_waits_outside_the_market(client, monkeypatch):
+    """没有已发布版本可保护时,老规矩不变:内容没过审就不该在市场上。
+
+    两条测试合起来才说清区别 —— 保护的对象是"已经审过、已经在用的那一版",不是提交者。
+    """
+    calls: list = []
+    _stub_store(monkeypatch, calls)
+    monkeypatch.setattr(upload_mod, "audit_skill", lambda **kw: AuditResult(
+        state="suspect", verdict="flag",
+        findings=[Finding("judge", "dangerous_instruction", "medium", "sudo", "elevates")]))
+    monkeypatch.setattr(upload_mod.gitlab_mr, "review_suspect", lambda **kw: "http://mr/2")
+
+    r = client.post(
+        "/api/skills/upload",
+        data={"eid": "TESTER", "name": "Fresh", "categoryId": "public"},
+        files={"file": ("SKILL.md", SKILL_MD, "text/markdown")},
+    )
+    assert r.status_code == 201, r.text
+    sid = r.json()["skill"]["id"]
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, sid)
+        assert skill.status == "pending"          # 没有旧版本可以显示
+        assert skill.audit_state == "suspect"
+        assert skill.pending_update is None       # 待复核的是技能本身,不是一次更新
 
 
 def test_editing_metadata_without_touching_the_content_is_still_audited(
@@ -170,7 +222,10 @@ def test_an_author_side_failure_still_fails_closed(client, monkeypatch):
     """作者自己能改的失败**不是** 503。
 
     附件解不开是作者的问题,再试一百次都一样 —— 让他重试是把人挂在一个永远不变的结果上。这种情况照旧
-    fail closed:转人工复核、技能不再是 approved。这条与上面那条一起,才说清了"不可用"和"查不动"的区别。
+    fail closed:内容不发布、转人工复核。这条与上面那条一起,才说清了"不可用"和"查不动"的区别。
+
+    "不发布"对一个已经在线上的技能意味着**这次更新**不发布,而不是把技能下架:线上那一版继续服务,
+    新内容停在待复核的暂存里(见 test_an_edit_needing_review_keeps_the_published_version_in_the_market)。
     """
     calls: list = []
     _stub_store(monkeypatch, calls)
@@ -187,7 +242,10 @@ def test_an_author_side_failure_still_fails_closed(client, monkeypatch):
     r = client.put(f"/api/skills/{sid}", json={"description": "typo fixed"})
     assert r.status_code != 503, "作者侧的失败不该让人重试"
     with SessionLocal() as db:
-        assert db.get(RpAiSkill, sid).status == "pending"
+        skill = db.get(RpAiSkill, sid)
+        assert skill.description == "d"            # 这次更新没有发布
+        assert skill.pending_update is not None    # 它在等人工复核
+        assert skill.status == "approved"          # 线上那一版照旧
 
 
 def test_a_review_branch_is_cut_from_the_live_branch_in_the_same_write(monkeypatch):

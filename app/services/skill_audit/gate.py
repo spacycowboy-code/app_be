@@ -73,6 +73,20 @@ class WriteDecision:
         return self.audit.state == "suspect"
 
     @property
+    def stays_published(self) -> bool:
+        """这次写入不许改动已发布的那一版:它要等人工复核。
+
+        复核中的更新和"没通过复核的技能"是两件事。后者本来就不该出现在市场上;前者顶掉的是一份
+        **已经审过、已经在用**的内容,而复核结论说的只是新内容可疑。把技能行改掉(状态、版本、
+        ``repo_commit``)等于让作者的一次更新替所有使用者下架这个技能 —— 而且详情页会按新的
+        ``repo_commit`` 去读复核分支上那份没过审的正文。
+
+        所以这种情况下技能行一个字不动,更新整份停在 ``rp_ai_skill_pending_update``,
+        复核 MR 合了才搬过去。见 ``skill_audit.pending``。
+        """
+        return self.needs_review and self.replaces_published
+
+    @property
     def status(self) -> str:
         """The skill's lifecycle field. Only a pass is publicly visible."""
         return "approved" if self.audit.state == "pass" else "pending"
@@ -99,6 +113,7 @@ def record(
     skill_name: str,
     uploader_eid: str | None,
     mr_url: str | None = None,
+    replaces_published: bool = False,
 ) -> None:
     """Persist the audit record + its findings (append-only facts)."""
     rec = RpAiSkillAuditRecord(
@@ -119,6 +134,9 @@ def record(
         analyzers_used=",".join(audit.analyzers_used) or None,
         incomplete=",".join(audit.incomplete) or None,
         mr_url=mr_url,
+        # 这条结论的对象:线上那一版,还是一次要顶掉它的更新。收敛器靠它决定可疑结论该不该
+        # 影响 status(见 skill_audit.reconcile)。
+        replaces_published=replaces_published,
     )
     for f in audit.findings:
         rec.findings.append(

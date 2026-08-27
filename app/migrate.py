@@ -23,6 +23,9 @@ COLUMNS = [
     ("rp_ai_skill", "storage_path", "VARCHAR(512) NULL"),
     ("rp_ai_skill", "repo_commit", "VARCHAR(64) NULL"),
     ("rp_ai_skill", "audit_state", "VARCHAR(16) NULL"),
+    # 当前发布的这一版对应的审计记录 id。见 models/skill.py:同一秒里的两条记录分不出先后,
+    # 所以"哪条结论描述现在这一版"要记下来,不能靠排序猜。
+    ("rp_ai_skill", "audit_ref", "VARCHAR(32) NULL"),
     ("rp_ai_skill_audit_record", "judge_model", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "rules_hash", "VARCHAR(64) NULL"),
     ("rp_ai_skill_finding", "rule_id", "VARCHAR(120) NULL"),
@@ -36,6 +39,10 @@ COLUMNS = [
     ("rp_ai_skill_audit_record", "policy_fingerprint", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "analyzers_used", "TEXT NULL"),
     ("rp_ai_skill_audit_record", "incomplete", "TEXT NULL"),
+    # 这条可疑结论说的是"要顶掉线上那一版"的更新,还是技能本身。没有它,收敛器会把一次被拦下的
+    # 更新当成"这个技能不该上线",于是下架一个已经审过的线上版本。老记录是 NULL(当时没有待复核
+    # 更新这个概念),按 false 读。
+    ("rp_ai_skill_audit_record", "replaces_published", "TINYINT(1) NULL"),
     ("rp_ai_skill_finding", "file", "VARCHAR(512) NULL"),
     ("rp_ai_skill_finding", "line", "INT NULL"),
     ("rp_ai_market_item", "last_activity", "VARCHAR(40) NULL"),

@@ -10,7 +10,7 @@ Separates *facts* from *derived state*:
 """
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -73,6 +73,14 @@ class RpAiSkillAuditRecord(TimestampMixin, Base):
     incomplete: Mapped[str | None] = mapped_column(Text)
     # Draft MR url for suspect uploads (null otherwise / until created).
     mr_url: Mapped[str | None] = mapped_column(String(512))
+    # 这次审计审的内容,是不是**当前发布的那一版之外**的东西。是投影里绕不开的一格:同一个可疑结论,
+    # 落在还没发布过的技能上意味着"它不该上线",落在一次更新上只意味着"这次更新不该上线,线上那一版
+    # 照旧"。没有这一格,收敛器无法区分两者,于是会把一个好好的线上技能因为一次被拦下的更新而下架。
+    #
+    # 复核通过、这份内容被搬成线上那一版时,这一格翻成 false —— 那一刻这条结论说的就是发布出去的
+    # 内容了(见 skill_audit.pending.publish)。所以它读作"这条结论描述的不是当前发布的那一版",
+    # 而不是"当初提交时替换掉了什么"。
+    replaces_published: Mapped[bool | None] = mapped_column(Boolean)
 
     findings: Mapped[list["RpAiSkillFinding"]] = relationship(
         back_populates="record", cascade="all, delete-orphan"
