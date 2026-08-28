@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.services import gitlab_projects as glw
 
 
@@ -151,3 +153,158 @@ def test_namespace_cache_is_keyed_by_group(monkeypatch) -> None:
     # 各自缓存,不互相顶掉。
     assert glw.namespace_id(glw.target_for("agent")) == 11
     assert asked == ["g/agents", "g/tools"]
+
+
+# --- 提交签名 ----------------------------------------------------------------
+#
+# 这一组来自一次真实的失败:tool 包上传时 `git push` 被 GitLab 的「Reject unsigned commits」
+# 推送规则拒收(`Commit must be signed with a GPG key`),而包已经解开、项目已经建好 ——
+# 上传者看到的是一段 git 原文和 HTTP 502,对他完全不可操作。
+#
+# 用 SSH 签名而不是 GPG:镜像里没有 gpg,有 ssh-keygen(openssh-client),而这个 GitLab
+# 实例的那条规则接受 SSH 签名。
+
+
+def test_no_key_configured_means_no_signing(monkeypatch) -> None:
+    """不配就不签 —— 历史行为一字不变。
+
+    没有这条,给这个功能加一个默认值就会让所有不需要签名的环境跟着改行为。
+    """
+    monkeypatch.setattr(
+        glw, "get_settings", lambda: SimpleNamespace(git_signing_key="")
+    )
+    assert glw.signing_args() == []
+
+
+def test_a_configured_key_that_is_not_there_is_refused_early(monkeypatch, tmp_path) -> None:
+    """配了路径但文件没挂进来 —— 这是部署漏挂,越早说越好。
+
+    交给 git 去失败的话,报错来自 ssh-keygen、措辞离原因很远,而且那时项目已经建出来了,
+    失败要多归档一个空项目。
+    """
+    monkeypatch.setattr(
+        glw, "get_settings",
+        lambda: SimpleNamespace(git_signing_key=str(tmp_path / "nope.pub")),
+    )
+    with pytest.raises(glw.GitLabWriteError) as exc:
+        glw.signing_args()
+    assert "GIT_SIGNING_KEY" in exc.value.detail
+
+
+def test_the_private_half_must_be_there_too(monkeypatch, tmp_path) -> None:
+    """公钥在、私钥不在:ssh-keygen 按同名去掉 .pub 找私钥,找不到就签不了。
+
+    这种挂载(只挂了 .pub)看起来完全正常,所以必须单独说出来。
+    """
+    pub = tmp_path / "portal.pub"
+    pub.write_text("ssh-ed25519 AAAA fake\n", encoding="utf-8")
+    monkeypatch.setattr(
+        glw, "get_settings", lambda: SimpleNamespace(git_signing_key=str(pub))
+    )
+    with pytest.raises(glw.GitLabWriteError) as exc:
+        glw.signing_args()
+    assert "私钥" in exc.value.detail
+
+
+def test_signing_args_do_not_touch_global_config(monkeypatch, tmp_path) -> None:
+    """签名参数逐条 -c 传,和身份同一条规矩:不写全局 config,也不落到 .git/config。"""
+    pub = tmp_path / "portal.pub"
+    pub.write_text("ssh-ed25519 AAAA fake\n", encoding="utf-8")
+    (tmp_path / "portal").write_text("fake private\n", encoding="utf-8")
+    monkeypatch.setattr(
+        glw, "get_settings", lambda: SimpleNamespace(git_signing_key=str(pub))
+    )
+    args = glw.signing_args()
+    assert args == ["-c", "gpg.format=ssh", "-c", f"user.signingkey={pub}"]
+
+
+def test_a_real_ssh_key_produces_a_signed_commit(tmp_path, monkeypatch) -> None:
+    """端到端:用这些参数提交出来的对象里真的有签名头。
+
+    钉住的是"参数拼对了"这件事,而它只能由 git 自己回答 —— 断言参数列表长什么样只能证明
+    我们没改这几个字符串。跳过而不是失败:没有 ssh-keygen 的机器上这个功能本来就用不了。
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ssh-keygen") is None or shutil.which("git") is None:
+        pytest.skip("需要 ssh-keygen 和 git")
+
+    key = tmp_path / "portal"
+    subprocess.run(
+        ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", "portal-test", "-f", str(key)],
+        check=True, capture_output=True,
+    )
+    monkeypatch.setattr(
+        glw, "get_settings",
+        lambda: SimpleNamespace(git_signing_key=str(key.with_suffix(".pub"))),
+    )
+    sign = glw.signing_args()
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    (repo / "a.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo),
+         "-c", "user.name=Portal", "-c", "user.email=portal@example.com",
+         *sign, "commit", "-q", "-S", "-m", "signed"],
+        check=True, capture_output=True,
+    )
+    obj = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "commit", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    # `git log --format=%G?` 在没配 allowedSignersFile 的机器上答 N(验不了),那是个假信号;
+    # 提交对象里的 gpgsig 头才是"签了没签"的事实。
+    assert "gpgsig" in obj
+    assert "BEGIN SSH SIGNATURE" in obj
+
+    # tag 也要能签。它是两半里更容易出版本差异的那一半:`tag -s` 走 SSH 格式是 git 2.34
+    # 才有的,而发布路径同时推分支和 tag,tag 签不上等于这个修复只做了一半。
+    subprocess.run(
+        ["git", "-C", str(repo),
+         "-c", "user.name=Portal", "-c", "user.email=portal@example.com",
+         *sign, "tag", "-s", "v1.0.0", "-m", "signed tag"],
+        check=True, capture_output=True,
+    )
+    tag_obj = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "tag", "v1.0.0"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "BEGIN SSH SIGNATURE" in tag_obj
+
+
+# --- 推送被规则拒收时说什么 ---------------------------------------------------
+
+
+def test_an_unsigned_rejection_says_who_must_do_what() -> None:
+    """上传者不是能改推送规则的人,所以这句话要指向管理员,并且说清跟他的包无关。"""
+    detail = (
+        "git push 失败:remote: GitLab: Commit must be signed with a GPG key "
+        "! [remote rejected] HEAD -> main (pre-receive hook declined)"
+    )
+    hint = glw._push_rejection_hint(detail, signed=False)
+    assert hint is not None
+    assert "GIT_SIGNING_KEY" in hint
+    assert "不是你的包的问题" in hint
+
+
+def test_a_rejection_after_signing_names_the_remaining_cause() -> None:
+    """签了还被拒,只剩一种解释:规则要求签名可归属到推送者,而门户是机器身份。
+
+    这条分支存在的意义是让下一个人不必重跑一遍这次的实验。
+    """
+    hint = glw._push_rejection_hint(
+        "remote: GitLab: Commit must be signed with a GPG key", signed=True
+    )
+    assert hint is not None
+    assert "已经签名" in hint
+    assert "Push Rules" in hint
+
+
+def test_unrelated_push_failures_are_left_alone() -> None:
+    """认不出来就不要翻译。给一个无关的失败套上签名的说明,比不解释更糟。"""
+    assert glw._push_rejection_hint("remote: repository is archived", signed=False) is None
+    assert glw._push_rejection_hint("fatal: could not read from remote", signed=True) is None

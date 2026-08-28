@@ -424,6 +424,13 @@ async def publish_package(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"上传 {itype} 包所需的 GitLab 凭据({target.env_var})未配置,请联系管理员。",
         )
+    try:
+        # 签名密钥的存在性在**建项目之前**查。放到 publish_tree 里查的话,一个部署漏挂的
+        # 配置错误会先建出一个 GitLab 项目、再把它归档 —— 组里多一个半成品,而原因和这次
+        # 上传的内容毫无关系。
+        glw.signing_args()
+    except glw.GitLabWriteError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, exc.detail) from exc
     launch = launch.strip()
     if not launch:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "请填写启动命令")
@@ -501,11 +508,14 @@ async def publish_package(
                     glw.archive_project(project.id, target)
                 except glw.GitLabWriteError:
                     log.warning("推送失败后归档项目 %s 也失败了", project.id)
-            raise HTTPException(
-                status.HTTP_502_BAD_GATEWAY if not isinstance(exc, glw.CredentialExpired)
-                else status.HTTP_503_SERVICE_UNAVAILABLE,
-                exc.detail,
-            ) from exc
+            # 502 只留给"上游真的坏了"。凭据失效和推送规则拒收都不是那种情况:内容没问题、
+            # 请求没问题,是环境里少了一样东西或多了一条规则,而重试同一份内容一定还是失败 ——
+            # 答 502 会让上传者以为再点一次就好。
+            if isinstance(exc, (glw.CredentialExpired, glw.PushRuleRejected)):
+                code = status.HTTP_503_SERVICE_UNAVAILABLE
+            else:
+                code = status.HTTP_502_BAD_GATEWAY
+            raise HTTPException(code, exc.detail) from exc
 
         _ensure_user(db, acting)
         item = existing

@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     # Identity used for skill-repo commits (does not touch global git config).
     git_author_name: str = "RP AI Portal"
     git_author_email: str = "rp-ai-portal@ericsson.com"
+    # 给门户自己的提交签名用的 SSH 密钥。空 = 不签名(历史行为)。
+    #
+    # **为什么需要它:** 上传包的目标组开着 GitLab 的「Reject unsigned commits」推送规则,
+    # 而门户是 git init/commit/push 发布的,提交默认没有签名 —— 实测被 pre-receive 钩子
+    # 拒收(`Commit must be signed with a GPG key`),包已解开、项目已建好,倒在最后一步。
+    #
+    # **为什么是 SSH 而不是 GPG:** 镜像里没有 gpg(实测 `command -v gpg` 为空),但有
+    # openssh-client 自带的 ssh-keygen;而这个实例的那条规则实测接受 SSH 签名(本仓自己的
+    # 提交就是这么签的)。
+    #
+    # 值填**公钥**路径。私钥必须在同一目录、同名去掉 `.pub` —— `ssh-keygen -Y sign` 就是
+    # 这么找它的。密钥不能有 passphrase:容器里没有 ssh-agent 可以解锁它。
+    git_signing_key: str = ""
     # Max upload artifact size in bytes (default 50 MB).
     max_upload_bytes: int = 50 * 1024 * 1024
 
