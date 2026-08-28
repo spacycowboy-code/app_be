@@ -4,13 +4,12 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
-from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
@@ -24,6 +23,7 @@ from app.schemas.market import (
 )
 from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
+from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
@@ -95,7 +95,7 @@ def list_items(
             RpAiMarketItem.name.like(like) | RpAiMarketItem.description.like(like)
         )
     items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
-    _attach_stats(db, items)
+    attach_market_stats(db, items)
     return items
 
 
@@ -113,38 +113,6 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
         status.HTTP_403_FORBIDDEN,
         "这个条目还在等待审核,通过之后才能安装。",
     )
-
-
-def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
-    """Attach deduplicated-by-EID favorite/download counts onto each item.
-
-    Favorites are already unique per (eid, item) by table constraint, so the
-    row count is the like count. Downloads are raw events, so we count distinct
-    EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
-    """
-    if not items:
-        return
-    ids = [it.id for it in items]
-    fav = dict(
-        db.execute(
-            select(RpAiMarketFavorite.item_id, func.count(RpAiMarketFavorite.id))
-            .where(RpAiMarketFavorite.item_id.in_(ids))
-            .group_by(RpAiMarketFavorite.item_id)
-        ).all()
-    )
-    dls = dict(
-        db.execute(
-            select(
-                RpAiMarketDownload.item_id,
-                func.count(func.distinct(RpAiMarketDownload.eid)),
-            )
-            .where(RpAiMarketDownload.item_id.in_(ids))
-            .group_by(RpAiMarketDownload.item_id)
-        ).all()
-    )
-    for it in items:
-        it.favorite_count = int(fav.get(it.id, 0))
-        it.download_count = int(dls.get(it.id, 0))
 
 
 @router.post("/{item_id}/download")
@@ -546,7 +514,7 @@ def get_review(
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
     uploader = db.get(RpAiPortal, item.creator) if item.creator else None
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return MarketReviewRead(
         item=MarketItemRead.model_validate(item, from_attributes=True),
         versions=[
@@ -586,7 +554,7 @@ def decide_review(
     item.reviewed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return item
 
 

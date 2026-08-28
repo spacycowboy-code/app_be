@@ -17,6 +17,7 @@ from app.routers import (
     auth,
     categories,
     comments,
+    departments,
     favorites,
     login_stats,
     market,
@@ -205,6 +206,7 @@ app.include_router(skill_import.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
+app.include_router(departments.router)
 app.include_router(market.router)
 app.include_router(agent_upload.router)
 app.include_router(usage.router)
