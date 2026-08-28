@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from app.schemas.card_group import CardGroupRead
 from app.schemas.common import CamelModel
 
 SkillStatus = Literal["pending", "approved", "rejected"]
@@ -166,6 +167,10 @@ class SkillRead(SkillBase, SkillDerived):
     # 压在已发布版本之外、正在人工复核的那次更新(没有就是 None)。上面所有字段描述的都是已发布的
     # 那一版,这个字段是唯一说"还有一份在等复核"的地方。
     pending_update: PendingUpdateRead | None = None
+    # Where the uploader sits: 地址 · 大部门 · 小部门. None when the person cannot
+    # be placed (no department recorded, or a department outside Radio Products)
+    # or when there is no real uploader at all — the official imports.
+    group: CardGroupRead | None = None
 
 
 class SkillSummary(CamelModel):
@@ -199,3 +204,5 @@ class SkillSummary(CamelModel):
     # as an "Update", so that bookkeeping writes to the row (download counters,
     # ratings, repo bookkeeping) cannot announce a skill as updated.
     content_updated_at: datetime | None = None
+    # Where the uploader sits: 地址 · 大部门 · 小部门. See ``SkillRead.group``.
+    group: CardGroupRead | None = None

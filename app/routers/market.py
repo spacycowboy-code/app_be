@@ -25,6 +25,7 @@ from app.schemas.market import (
 from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.auth_tokens import create_scoped_token
+from app.services.card_group import groups_for_eids
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
@@ -116,11 +117,17 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
 
 
 def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
-    """Attach deduplicated-by-EID favorite/download counts onto each item.
+    """Attach deduplicated-by-EID favorite/download counts onto each item,
+    plus the creator's org group.
 
     Favorites are already unique per (eid, item) by table constraint, so the
     row count is the like count. Downloads are raw events, so we count distinct
     EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
+
+    The group rides along here rather than in ``list_items`` because every path
+    that returns a ``MarketItemRead`` goes through this function: the list, the
+    single item, and the review page. A card that shows the group on the market
+    and loses it on the detail view reads as a bug in the data.
     """
     if not items:
         return
@@ -142,9 +149,14 @@ def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
             .group_by(RpAiMarketDownload.item_id)
         ).all()
     )
+    # One query for the whole page. GitLab-synced items have no creator, so they
+    # contribute no EID and end up with no group — correctly: there is no person
+    # to place, and inventing one would credit an office that never uploaded it.
+    groups = groups_for_eids(db, {it.creator for it in items if it.creator})
     for it in items:
         it.favorite_count = int(fav.get(it.id, 0))
         it.download_count = int(dls.get(it.id, 0))
+        it.group = groups.get((it.creator or "").strip().upper())
 
 
 @router.post("/{item_id}/download")
