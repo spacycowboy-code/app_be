@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from app.schemas.card_group import CardGroupRead
 from app.schemas.common import CamelModel
 
 ItemType = Literal["tool", "agent", "ai-platform"]
@@ -64,6 +65,9 @@ class MarketItemRead(CamelModel):
     download_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Where the creator sits: 地址 · 大部门 · 小部门. None for GitLab-synced items,
+    # which have no creator at all, and for a creator outside Radio Products.
+    group: CardGroupRead | None = None
 
 
 class MarketItemVersionRead(CamelModel):

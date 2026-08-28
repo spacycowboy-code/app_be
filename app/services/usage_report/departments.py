@@ -96,8 +96,15 @@ class Dept:
     org_prefix: str     # first three codes, e.g. BNEW/RTE/RP
 
 
-def _codes(department: str) -> list[str]:
-    """The leading run of org codes. Stops at the first human-readable word."""
+def code_run(department: str) -> list[str]:
+    """The leading run of org codes. Stops at the first human-readable word.
+
+    Public because the market cards need the same reading of the same string
+    (see ``app/services/card_group.py``). Two readers of one free-text field
+    must not each carry their own idea of where the codes stop — the ``QA&CM 2``
+    and ``Enclosure 1`` cases above were found once and are worth paying for
+    once.
+    """
     out: list[str] = []
     for token in department.split():
         if _CODE.match(token):
@@ -120,7 +127,7 @@ def parse(department: str | None) -> Dept:
         return Dept(UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN)
 
     department = " ".join(department.split())
-    codes = _codes(department)
+    codes = code_run(department)
     if not codes:
         return Dept(UNKNOWN, department, UNKNOWN, UNKNOWN, UNKNOWN)
 
