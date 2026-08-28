@@ -60,6 +60,16 @@ class CredentialExpired(GitLabWriteError):
     """
 
 
+class PushRuleRejected(GitLabWriteError):
+    """GitLab 的推送规则拒了这次 push。
+
+    和别的写失败分开,因为它既不是我们的错也不是上传者的错:内容没问题、凭据没问题,是目标
+    项目上的一条规则不允许这种提交。重试同一份内容一定还是被拒,所以调用方必须把"要谁去改
+    什么"说出来,而不是答一个 502 加一段 git 原文 —— 那是上传者唯一看到的东西,而他对它无能
+    为力。
+    """
+
+
 @dataclass(frozen=True)
 class ProjectRef:
     """一个已存在的 GitLab 项目,门户需要的那几项。"""
@@ -335,6 +345,63 @@ def _git_env() -> dict[str, str]:
     return env
 
 
+def signing_args() -> list[str]:
+    """给 git 的签名参数。没配密钥就返回空 —— 也就是历史行为(不签名)。
+
+    **为什么门户要签名:** 上传包的目标组开着 GitLab 的「Reject unsigned commits」推送规则。
+    实测的失败长这样:包解开了、项目建好了,`git push` 被 pre-receive 钩子拒收
+    (`Commit must be signed with a GPG key`),两个 ref 一起 rejected。
+
+    **为什么是 SSH 签名:** 镜像里没有 gpg,有 ssh-keygen(openssh-client);而这个 GitLab
+    实例的那条规则接受 SSH 签名 —— 本仓自己的提交就是这么签着推上去的。
+
+    配置值是**公钥**路径,私钥按 `ssh-keygen -Y sign` 的约定在同一目录、同名去掉 `.pub`。
+    两个文件都检查存在:少了公钥 git 直接报错,少了私钥的报错来自 ssh-keygen 且措辞离原因很
+    远,而这两种情况都是部署漏挂了文件,越早说越好。
+    """
+    key = (get_settings().git_signing_key or "").strip()
+    if not key:
+        return []
+    pub = Path(key)
+    if not pub.is_file():
+        raise GitLabWriteError(
+            f"配了提交签名公钥 GIT_SIGNING_KEY={key},但容器里没有这个文件 —— "
+            "部署漏挂了密钥目录。本次上传未保存。"
+        )
+    private = pub.with_suffix("") if pub.suffix == ".pub" else pub
+    if not private.is_file():
+        raise GitLabWriteError(
+            f"签名要用的私钥 {private} 不在容器里。GIT_SIGNING_KEY 填的是**公钥**路径,"
+            "私钥必须在同一目录、同名去掉 .pub(ssh-keygen 就是这么找它的)。本次上传未保存。"
+        )
+    return ["-c", "gpg.format=ssh", "-c", f"user.signingkey={pub}"]
+
+
+#: pre-receive 钩子拒收时,GitLab 原文里的这句话说明是签名规则。
+_UNSIGNED_REJECTION = "must be signed"
+
+
+def _push_rejection_hint(detail: str, *, signed: bool) -> str | None:
+    """把推送规则的拒收翻译成"谁去改什么"。认不出来就返回 None。
+
+    上传者看到的是这句话,而 git 的原文对他没有任何可操作性 —— 他既不是那个能改推送规则的
+    人,也无法从"pre-receive hook declined"看出这跟他的包无关。
+    """
+    if _UNSIGNED_REJECTION not in detail.lower():
+        return None
+    if not signed:
+        return (
+            "目标项目开着 GitLab 的「必须签名提交」推送规则,而门户没有配签名密钥"
+            "(GIT_SIGNING_KEY),所以这次推送被拒了。**这不是你的包的问题** —— 包已经解开、"
+            "项目也建好了。请管理员给门户配一个 SSH 签名密钥,或者改掉新建项目的默认推送规则。"
+        )
+    return (
+        "门户的提交**已经签名**,GitLab 仍然拒收 —— 说明这条推送规则要求签名可归属到推送者"
+        "本人,而门户是用组访问令牌的机器身份推的,签名密钥不属于它。这条只能由管理员改掉"
+        "新建项目的默认推送规则(Admin Area → Push Rules),门户侧没有别的解法。"
+    )
+
+
 def _git(repo: Path, *args: str, cred_file: Path | None = None) -> subprocess.CompletedProcess:
     cmd = ["git", "-C", str(repo)]
     if cred_file is not None:
@@ -409,12 +476,26 @@ def publish_tree(
         _git(work, "reset", "--mixed", "-q", "FETCH_HEAD")
 
     _git(work, "add", "-A")
-    _git(work, *ident, "commit", "-q", "--allow-empty", "-m", message)
+    # 签名参数和身份一起传:两者都是逐条 -c,不碰全局 git config,也不碰工作区的 .git/config
+    # (那里会落到磁盘上)。没配密钥时 sign 是空列表,行为与从前一字不差。
+    sign = signing_args()
+    signed = bool(sign)
+    _git(work, *ident, *sign, "commit", "-q", "--allow-empty",
+         *(["-S"] if signed else []), "-m", message)
     sha = _git(work, "rev-parse", "HEAD").stdout.strip()
 
     tag = f"v{version}"
-    _git(work, *ident, "tag", "-a", tag, "-m", message)
+    # tag 也签。推送规则拒收时两个 ref 是一起被拒的,而一个指向已签名提交的未签名 tag 是否
+    # 满足规则我们没有依据 —— 签它的代价是零,赌错的代价是同一个失败再来一遍。
+    _git(work, *ident, *sign, "tag", "-s" if signed else "-a", tag, "-m", message)
     # 一次 push 送出分支和这个 tag。分支用显式 refspec:空项目里没有上游可依赖。
-    _git(work, "push", project.http_url, f"HEAD:refs/heads/{branch}", f"refs/tags/{tag}",
-         cred_file=cred)
+    try:
+        _git(work, "push", project.http_url, f"HEAD:refs/heads/{branch}",
+             f"refs/tags/{tag}", cred_file=cred)
+    except GitLabWriteError as exc:
+        hint = _push_rejection_hint(exc.detail, signed=signed)
+        if hint is None:
+            raise
+        # 原文留在后面:上传者需要那句人话,而排查的人需要 GitLab 到底说了什么。
+        raise PushRuleRejected(f"{hint}\n\nGitLab 原文:{exc.detail}") from exc
     return sha, tag
