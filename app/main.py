@@ -194,7 +194,7 @@ async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSON
     with an empty log, and the cause (a duplicate eid insert) had to be
     reproduced by hand against the production schema to be found at all.
     """
-    logging.getLogger("app").error(
+    logger.error(
         "DB constraint violation on %s %s: %s",
         request.method, request.url.path, exc.orig,
     )

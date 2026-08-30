@@ -472,3 +472,27 @@ def test_eid_is_not_the_primary_key() -> None:
         db.commit()
         # 人就在库里,db.get 照样答 None —— 这就是那个洞。
         assert db.get(RpAiPortal, "EZHGMIO") is None
+
+
+def test_failed_push_renames_before_it_archives() -> None:
+    """失败清理的顺序必须是先改名、再归档。
+
+    顺序反了就白改:归档后的项目是只读的,改名会被 GitLab 拒,于是这个包的名字仍然被永久
+    占掉 —— 而这两句挨在一起、看起来可以随便换位置,所以在这里钉住。
+
+    端到端跑一遍 publish_package 需要造 multipart 上传、打桩审计引擎和整套 GitLab API,
+    这个仓里还没有那套脚手架;按同文件 test_credentials_go_in_a_file 的先例,用源码顺序
+    断言换取覆盖。
+    """
+    import inspect
+
+    from app.routers import agent_upload as au
+
+    src = inspect.getsource(au.publish_package)
+    rename_at = src.find("glw.rename_project(")
+    archive_at = src.find("glw.archive_project(")
+    assert rename_at != -1, "推送失败后没有给项目改名,名字会被永久占掉"
+    assert archive_at != -1, "推送失败后没有归档,组里会留下一个看不出是半成品的空项目"
+    assert rename_at < archive_at, "改名必须在归档之前:归档后的项目是只读的,改不了名"
+    # 改名失败不能吞掉真正的失败原因 —— 上传者要看到的是推送为什么被拒。
+    assert src.count("except glw.GitLabWriteError:") >= 2
