@@ -12,6 +12,12 @@ real values (see ``test_dept_groups.REAL_DEPARTMENTS``). The rest carry an
 illustrative trailing label, because only the leading run of codes is
 load-bearing and where that run stops is already covered by the department
 parser's own tests.
+
+Two rows — ``CD PS`` and ``CD INT`` — were first supplied as ``BJ CD PS`` /
+``BJ CD INT`` and carried as hard-coded exceptions until their owner confirmed
+they are Chengdu like every other unit under ``CD``. They are kept called out
+below so that a future reader who finds the same two spellings somewhere else
+knows the question was asked and settled, rather than re-adding the exception.
 """
 import pytest
 
@@ -65,9 +71,11 @@ SUB_UNITS = [
     ("BNEW RTE RP CD ET Equipment Test", "CD ET"),
     ("BNEW RTE RP CD FIC Filter&IC", "CD FIC"),
     ("BNEW RTE RP CD FS Function System", "CD FS"),
+    ("BNEW RTE RP CD INT Integration", "CD INT"),
     ("BNEW RTE RP CD PA1 Power Amplifier 1", "CD PA1"),
     ("BNEW RTE RP CD PA2 Power Amplifier 2", "CD PA2"),
     ("BNEW RTE RP CD PPD Power PCB Digital", "CD PPD"),
+    ("BNEW RTE RP CD PS Performance System", "CD PS"),
     ("BNEW RTE RP CD SW1 Software 1", "CD SW1"),
     ("BNEW RTE RP CD SW2 Software 2", "CD SW2"),
     ("BNEW RTE RP CD SW3 Software 3", "CD SW3"),
@@ -75,9 +83,6 @@ SUB_UNITS = [
     # The one Chengdu unit with teams under it.
     ("BNEW RTE RP CD IVC T1 Team 1", "CD IVC T1"),
     ("BNEW RTE RP CD IVC T2 Team 2", "CD IVC T2"),
-    # --- The two exceptions: Chengdu-org units listed as Beijing-located ---
-    ("BNEW RTE RP CD PS Performance System", "BJ CD PS"),
-    ("BNEW RTE RP CD INT Integration", "BJ CD INT"),
 ]
 
 
@@ -104,9 +109,12 @@ def test_the_list_covers_every_sub_unit_exactly_once():
         # rather than borrowed from somewhere else.
         ("BNEW RTE RP CD PPD Power PCB Digital", "CD", "PPD", None),
         ("BNEW RTE RP CD IVC T2 Team 2", "CD", "IVC", "T2"),
-        # Supplied verbatim: CD stays the big department, the sub-unit is
-        # demoted, and the site is the one the path cannot know.
-        ("BNEW RTE RP CD PS Performance System", "BJ", "CD", "PS"),
+        # Chengdu all the way down, including the two units that were first
+        # specified as Beijing-located and then corrected: nothing about their
+        # path differs from their ten sibling units, and nothing about their
+        # label does either.
+        ("BNEW RTE RP CD PS Performance System", "CD", "PS", None),
+        ("BNEW RTE RP CD INT Integration", "CD", "INT", None),
     ],
 )
 def test_the_three_parts_are_split_where_the_card_expects_them(
@@ -152,6 +160,41 @@ def test_the_chengdu_site_level_is_a_site_and_nothing_more():
 )
 def test_an_unplaceable_department_shows_no_group_at_all(department):
     assert group_for_department(department) is None
+
+
+def test_a_unit_missing_from_the_supplied_list_is_still_placed():
+    """The 54th team is not hypothetical, and it must not come out blank.
+
+    ``BNEW RTE RP CD IVC2 IVC Team 2`` exists in production and is absent from
+    the 53 rows above. A lookup table keyed on that list would answer nothing
+    for the person in it and their card would quietly lose its group line; the
+    rule places them without being told about the unit.
+    """
+    group = group_for_department("BNEW RTE RP CD IVC2 IVC Team 2")
+    assert group is not None
+    assert (group.site, group.big_dept, group.small_dept) == ("CD", "IVC2", None)
+    assert group.label == "CD IVC2"
+
+
+@pytest.mark.parametrize(
+    "department, expected",
+    [
+        # The unit code is its own name plus a digit, so the label's leading
+        # all-upper word is the name being spelled out, not a team.
+        ("BNEW RTE RP CD IVC2 IVC Team 2", "CD IVC2"),
+        ("BNEW RTE RP RD3 ED2 ED Enclosure 2", "BJ RD3 ED2"),
+        # Genuine sub-units that superficially resemble the shape above and must
+        # survive it: the unit code is not the sub-unit code plus digits.
+        ("BNEW RTE RP SWD SW1 Software 1", "BJ SWD SW1"),
+        ("BNEW RTE RP PS PS1 Performance System 1", "BJ PS PS1"),
+        ("BNEW RTE RP RD2 TRX1 Transceiver 1", "BJ RD2 TRX1"),
+        ("BNEW RTE RP IVC T1 Team 1", "BJ IVC T1"),
+    ],
+)
+def test_a_label_spelling_out_the_unit_name_is_not_a_sub_unit(department, expected):
+    group = group_for_department(department)
+    assert group is not None
+    assert group.label == expected
 
 
 def test_a_code_that_merely_starts_with_cd_is_not_chengdu():
