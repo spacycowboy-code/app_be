@@ -32,9 +32,12 @@ legitimately empty rather than missing.
 Why derive instead of storing a 53-row table
 --------------------------------------------
 The rule below was checked against the full list of 53 sub-units that exist in
-the organisation today and reproduces 51 of them exactly. A table would too,
-but a table also answers "nothing" for the 54th team, and the way that failure
-shows up is a card that silently loses its group line. Same argument as
+the organisation today and reproduces every one of them. A table would too, but
+a table also answers "nothing" for the 54th team, and the way that failure shows
+up is a card that silently loses its group line. That 54th team is not
+hypothetical: production already holds ``BNEW RTE RP CD IVC2 IVC Team 2``, which
+is absent from the list the label was specified against, and the rule places it
+(``CD IVC2``) where a table would have left it blank. Same argument as
 ``dept_groups.DEPT_GROUP_MAP`` makes for prefix matching: the codes are the
 stable part, and a rule keeps working when a new team appears under a known
 unit.
@@ -65,23 +68,6 @@ _ORG_PREFIX = ("BNEW", "RTE", "RP")
 
 #: The fourth code that names a site rather than a department.
 _CHENGDU = "CD"
-
-#: Sub-units whose site is not what the path implies.
-#:
-#: Both are Chengdu-organisation units that the owner of this feature listed as
-#: Beijing-located, which is a fact no reading of the path can produce — the
-#: path only knows the org tree. They are the *only* two exceptions among the 53
-#: sub-units, and they are written verbatim as supplied, including the unusual
-#: shape (``CD`` kept as the 大部门 with the sub-unit demoted to 小部门), because
-#: guessing at an intent behind someone else's org data is how a card ends up
-#: asserting the wrong office.
-#:
-#: If these two turn out to be a data-entry slip for ``CD PS`` / ``CD INT``,
-#: deleting the two rows below is the whole fix — the rule already handles them.
-_EXCEPTIONS: dict[tuple[str, ...], tuple[str, str | None, str | None]] = {
-    ("CD", "PS"): ("BJ", "CD", "PS"),
-    ("CD", "INT"): ("BJ", "CD", "INT"),
-}
 
 
 @dataclass(frozen=True)
@@ -117,11 +103,6 @@ def group_for_department(department: str | None) -> CardGroup | None:
     if not rest:
         return None
 
-    override = _EXCEPTIONS.get(tuple(rest[:2]))
-    if override:
-        site, big, small = override
-        return CardGroup(site, big, small, department)
-
     if rest[0] == _CHENGDU:
         # Chengdu spends the fourth code on the site, so its departments start
         # at the fifth. ``BNEW RTE RP CD Radio Products Chengdu`` — the site's
@@ -132,7 +113,29 @@ def group_for_department(department: str | None) -> CardGroup | None:
 
     big = rest[0] if rest else None
     small = rest[1] if len(rest) > 1 else None
+    if big and small and _echoes_own_name(big, small):
+        small = None
     return CardGroup(site, big, small, department)
+
+
+def _echoes_own_name(big: str, small: str) -> bool:
+    """True when the fifth code is the unit's own name, not a sub-unit.
+
+    ``BNEW RTE RP CD IVC2 IVC Team 2`` is a real production value. Its human
+    label starts with an all-upper word, so the code scanner takes ``IVC`` as a
+    fifth code and the card would claim a sub-unit ``IVC`` inside ``IVC2`` —
+    a team that does not exist. The signal is narrow and checkable: the unit code
+    is the token plus digits, i.e. the label is spelling out the unit's own name.
+
+    Deliberately not a general fix. Telling a genuine code apart from an
+    all-upper label word is not possible from this string alone — the same class
+    of trap as ``QA&CM 2`` and ``Enclosure 1`` in ``departments``. This catches
+    the shape that actually occurs and leaves the rest to the label, which the
+    card shows on hover anyway. Verified against all 53 sub-units: no genuine
+    pair matches (``SWD``/``SW1``, ``PS``/``PS1``, ``RD2``/``TRX1`` all fail it).
+    """
+    tail = big[len(small):]
+    return big.startswith(small) and tail.isdigit()
 
 
 def groups_for_eids(db: Session, eids: set[str]) -> dict[str, CardGroup]:
