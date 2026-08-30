@@ -251,6 +251,10 @@ def test_a_service_account_that_uploaded_skills_is_flagged_as_not_a_person(clien
                 name="Imported Skill",
                 category_id="public",
                 uploader_eid="RP-AI-BOT",
+                # Explicit: the report only counts skills that were really on the
+                # market, and the model default is "pending". The official import
+                # writes approved, so this is what a bot's skill actually looks like.
+                status="approved",
             )
         )
         db.commit()
@@ -285,7 +289,10 @@ def test_a_download_recorded_now_shows_up_now(client):
     _seed_people()
     with SessionLocal() as db:
         db.add(
-            RpAiSkill(id="s1", name="S1", category_id="public", uploader_eid="EBOSS")
+            RpAiSkill(
+                id="s1", name="S1", category_id="public", uploader_eid="EBOSS",
+                status="approved",
+            )
         )
         db.commit()
     before = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
@@ -626,8 +633,10 @@ def test_uploaded_skills_are_counted_the_same_way(client):
     with SessionLocal() as db:
         db.add_all(
             [
-                RpAiSkill(id="s-a", name="A", category_id="public", uploader_eid="EDEV"),
-                RpAiSkill(id="s-b", name="B", category_id="public", uploader_eid="EDEV"),
+                RpAiSkill(id="s-a", name="A", category_id="public", uploader_eid="EDEV",
+                          status="approved"),
+                RpAiSkill(id="s-b", name="B", category_id="public", uploader_eid="EDEV",
+                          status="approved"),
             ]
         )
         db.commit()
@@ -671,6 +680,7 @@ def test_the_appendix_counts_items_not_times(client):
                     name=f"Bot {n}",
                     category_id="public",
                     uploader_eid="RP-AI-BOT",
+                    status="approved",
                 )
                 for n in range(2)
             ]

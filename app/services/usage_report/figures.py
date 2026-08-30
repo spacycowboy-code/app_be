@@ -103,6 +103,78 @@ class Metric:
         self.per_eid = {e: n for e, n in self.per_eid.items() if e in keep}
 
 
+#: The statuses that mean "this thing was, at some point, really visible to other
+#: people" — the population every contribution figure is counted over.
+#:
+#: The line drawn here is *was it ever on the market*, not *is it there now*.
+#:
+#: ``archived`` counts. A taken-down skill was live and downloadable first, and
+#: ``skills.delete_skill`` keeps its row precisely because the portal facts hanging
+#: off it — downloads, favourites, comments, audit records — cannot be recomputed
+#: from the repository. Dropping it here would also contradict the download
+#: columns, which go on counting the downloads a taken-down skill received: a
+#: department could end up showing twelve downloads and nobody who ever uploaded
+#: anything.
+#:
+#: ``pending`` and ``rejected`` do not count. The public list filters on
+#: ``approved``, so neither was ever visible to anyone and neither can have been
+#: downloaded — counting them would report an attempt as a contribution. For
+#: ``rejected`` that is not merely untidy: ten packages that all failed review
+#: would read as ten uploads, and that is a number someone can drive on purpose.
+#:
+#: The rule applies to the columns that count *things* — uploads, updates, market
+#: items. It is deliberately not applied to the columns that count what a *person*
+#: did: a download happened whatever later became of the thing downloaded, and
+#: retracting it because the author took the skill down would report the author's
+#: decision as the downloader's activity.
+SKILL_COUNTED_STATUSES = ("approved", "archived")
+
+#: Market items have no ``archived``: ``market.delete_item`` removes the row, and
+#: the foreign keys cascade its downloads, favourites and versions away with it.
+#: So a deleted agent is already absent from every query here and there is nothing
+#: left to include — not a judgement that it should not count, but the reason it
+#: cannot. Making market deletion keep its history is a separate change.
+MARKET_COUNTED_STATUSES = ("approved",)
+
+
+def _counted(table: str, statuses: tuple[str, ...]) -> str:
+    """SQL predicate selecting the rows the report counts.
+
+    Takes the table (or an alias) rather than assuming one, because the same rule
+    has to be applied to bare-table queries, to aliased joins, and to the
+    ``_range`` lookups that date each column's header. Dating the header without
+    it would be its own small lie: the range would start at a submission that the
+    column does not count.
+    """
+    return f"{table}.status in (" + ", ".join(f"'{s}'" for s in statuses) + ")"
+
+
+_SKILL_COUNTED = _counted("rp_ai_skill", SKILL_COUNTED_STATUSES)
+_MARKET_COUNTED = _counted("rp_ai_market_item", MARKET_COUNTED_STATUSES)
+
+#: Same rule for the version table, which has no status of its own: a version row
+#: is counted when the skill it belongs to is.
+_VERSION_SKILL_COUNTED = (
+    "exists (select 1 from rp_ai_skill s2 where s2.id = rp_ai_skill_version.skill_id "
+    f"and {_counted('s2', SKILL_COUNTED_STATUSES)})"
+)
+
+#: Sentence appended to every metric whose population this rule narrows, so the
+#: report states its own scope instead of leaving the reader to assume it.
+_SCOPE_NOTE = (
+    "口径：含已下架的（它曾经真的上线、被人取用过），"
+    "不含还在复核里和被拒的（它们从未对任何人可见）。"
+)
+
+#: Market items get their own wording: they have no taken-down state to include,
+#: because deleting one removes the row. Reusing the skill sentence here would
+#: promise a population the table cannot contain.
+_SCOPE_NOTE_MARKET = (
+    "口径：不含还在复核里和被拒的（它们从未对任何人可见）。"
+    "被删除的市场项不在这里 —— 删除会连行一起删掉，它的下载和收藏也一并没了。"
+)
+
+
 def _range(
     conn: Connection,
     table: str,
@@ -207,14 +279,16 @@ def collect(conn: Connection) -> list[Metric]:
             "上传 skill",
             "个 skill",
             "按 skill 的上传者统计。官方导入的由服务账号写入，已排除，"
-            "所以这里全是同事自己交的。",
+            "所以这里全是同事自己交的。" + _SCOPE_NOTE,
             per_eid=_tally(
                 conn,
                 "select uploader_eid, count(*) from rp_ai_skill "
-                "where uploader_eid is not null group by uploader_eid",
+                f"where uploader_eid is not null and {_SKILL_COUNTED} "
+                "group by uploader_eid",
             ),
         ),
         "rp_ai_skill",
+        where=_SKILL_COUNTED,
     )
     # An update is a version row that is not the first one for its skill. Ordered
     # by id rather than created_at: both sqlite and MySQL store DATETIME to the
@@ -227,17 +301,19 @@ def collect(conn: Connection) -> list[Metric]:
             "更新 skill（发新版本）",
             "次更新",
             "定义为「不是该 skill 最早那一版的版本记录」。首次上传不计入更新，"
-            "否则同一件事会被数两遍。",
+            "否则同一件事会被数两遍。" + _SCOPE_NOTE,
             per_eid=_tally(
                 conn,
-                """
+                f"""
                 select v.uploader_eid, count(*)
                   from rp_ai_skill_version v
                   join (select skill_id, min(id) first_id
                           from rp_ai_skill_version group by skill_id) f
                     on f.skill_id = v.skill_id
+                  join rp_ai_skill s on s.id = v.skill_id
                  where v.id > f.first_id
                    and v.uploader_eid is not null
+                   and {_counted('s', SKILL_COUNTED_STATUSES)}
                  group by v.uploader_eid
                 """,
             ),
@@ -247,6 +323,7 @@ def collect(conn: Connection) -> list[Metric]:
             "id > (select min(v2.id) from (select id, skill_id "
             "from rp_ai_skill_version) v2 "
             "where v2.skill_id = rp_ai_skill_version.skill_id)"
+            f" and {_VERSION_SKILL_COUNTED}"
         ),
     )
     add(
@@ -309,31 +386,35 @@ def collect(conn: Connection) -> list[Metric]:
             "上传 agent",
             "个 agent",
             "只统计人工提交的 agent。从 GitLab 同步进来的项没有提交人，"
-            "把它们算作某人上传会凭空造出一个作者。",
+            "把它们算作某人上传会凭空造出一个作者。" + _SCOPE_NOTE_MARKET,
             per_eid=_tally(
                 conn,
                 "select creator, count(*) from rp_ai_market_item "
-                "where item_type = 'agent' and creator is not null group by creator",
+                "where item_type = 'agent' and creator is not null "
+                f"and {_MARKET_COUNTED} group by creator",
             ),
         ),
         "rp_ai_market_item",
+        where=_MARKET_COUNTED,
     )
     add(
         Metric(
             "market_item_upload",
             "上传市场项（agent / tool / 平台，合计）",
             "个市场项",
-            "把 agent、工具、AI 平台入口合在一起看，因为对提交者来说是同一个动作。",
+            "把 agent、工具、AI 平台入口合在一起看，因为对提交者来说是同一个动作。"
+            + _SCOPE_NOTE_MARKET,
             per_eid=_tally(
                 conn,
                 "select creator, count(*) from rp_ai_market_item "
-                "where creator is not null group by creator",
+                f"where creator is not null and {_MARKET_COUNTED} group by creator",
             ),
             unattributed=int(
                 conn.execute(
                     text(
                         "select count(*) from rp_ai_market_item "
-                        "where creator is null or trim(creator)=''"
+                        "where (creator is null or trim(creator)='') "
+                        f"and {_MARKET_COUNTED}"
                     )
                 ).scalar()
                 or 0
@@ -343,6 +424,7 @@ def collect(conn: Connection) -> list[Metric]:
             ),
         ),
         "rp_ai_market_item",
+        where=_MARKET_COUNTED,
     )
     add(
         Metric(
@@ -420,7 +502,8 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
     for eid, n in conn.execute(
         text(
             "select uploader_eid, count(*) from rp_ai_skill "
-            "where uploader_eid is not null group by uploader_eid"
+            f"where uploader_eid is not null and {_SKILL_COUNTED} "
+            "group by uploader_eid"
         )
     ):
         row(str(eid).upper())["skills"] = n
@@ -443,7 +526,9 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
             "join (select skill_id, min(id) first_id "
             "        from rp_ai_skill_version group by skill_id) f "
             "  on f.skill_id = v.skill_id "
+            "join rp_ai_skill s on s.id = v.skill_id "
             "where v.id > f.first_id and v.uploader_eid is not null "
+            f"  and {_counted('s', SKILL_COUNTED_STATUSES)} "
             "group by v.uploader_eid"
         )
     ):
@@ -452,7 +537,7 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
     for eid, n in conn.execute(
         text(
             "select creator, count(*) from rp_ai_market_item "
-            "where creator is not null group by creator"
+            f"where creator is not null and {_MARKET_COUNTED} group by creator"
         )
     ):
         row(str(eid).upper())["market_items"] = n
@@ -461,7 +546,8 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
         text(
             "select s.uploader_eid, count(*), count(distinct d.eid) "
             "from rp_ai_skill_download d join rp_ai_skill s on s.id = d.skill_id "
-            "where s.uploader_eid is not null group by s.uploader_eid"
+            f"where s.uploader_eid is not null and {_counted('s', SKILL_COUNTED_STATUSES)} "
+            "group by s.uploader_eid"
         )
     ):
         r = row(str(eid).upper())
@@ -471,7 +557,8 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
         text(
             "select m.creator, count(*), count(distinct d.eid) "
             "from rp_ai_market_download d join rp_ai_market_item m on m.id = d.item_id "
-            "where m.creator is not null group by m.creator"
+            f"where m.creator is not null and {_counted('m', MARKET_COUNTED_STATUSES)} "
+            "group by m.creator"
         )
     ):
         r = row(str(eid).upper())
@@ -480,11 +567,16 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
     one = lambda sql: conn.execute(text(sql)).scalar() or 0  # noqa: E731
     gaps = {
         "skills_without_uploader": one(
-            "select count(*) from rp_ai_skill where uploader_eid is null"
+            f"select count(*) from rp_ai_skill where uploader_eid is null "
+            f"and {_SKILL_COUNTED}"
         ),
         "market_items_without_creator": one(
-            "select count(*) from rp_ai_market_item where creator is null"
+            "select count(*) from rp_ai_market_item where creator is null "
+            f"and {_MARKET_COUNTED}"
         ),
+        # The download totals are NOT narrowed by status. They are a denominator over
+        # real events, and dropping events from it to match the asset columns would
+        # make the ratio state something neither population supports.
         "skill_downloads_unattributed": one(
             "select count(*) from rp_ai_skill_download d "
             "left join rp_ai_skill s on s.id = d.skill_id where s.uploader_eid is null"
@@ -497,16 +589,23 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
         "skill_downloads_total": one("select count(*) from rp_ai_skill_download"),
         # The three figures behind the "updates exclude the initial upload" rule, so
         # the report can state them instead of hardcoding numbers that go stale.
-        "version_rows_total": one("select count(*) from rp_ai_skill_version"),
+        # Narrowed by the same rule as the update column they explain: a rejected
+        # skill's version rows would otherwise make the prose claim more updates than
+        # the table shows.
+        "version_rows_total": one(
+            f"select count(*) from rp_ai_skill_version where {_VERSION_SKILL_COUNTED}"
+        ),
         "first_versions": one(
-            "select count(distinct skill_id) from rp_ai_skill_version"
+            "select count(distinct skill_id) from rp_ai_skill_version "
+            f"where {_VERSION_SKILL_COUNTED}"
         ),
         "real_updates": one(
             "select count(*) from rp_ai_skill_version v "
             "join (select skill_id, min(id) first_id "
             "        from rp_ai_skill_version group by skill_id) f "
             "  on f.skill_id = v.skill_id "
-            "where v.id > f.first_id"
+            "join rp_ai_skill s on s.id = v.skill_id "
+            f"where v.id > f.first_id and {_counted('s', SKILL_COUNTED_STATUSES)}"
         ),
     }
     return rows, gaps
