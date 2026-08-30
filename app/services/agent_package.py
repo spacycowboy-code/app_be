@@ -462,29 +462,6 @@ def _safe_target(dest: Path, name: str) -> Path:
     return target
 
 
-def repack_as_zip(root: Path, entries: list[FileEntry]) -> bytes:
-    """把解开的目录重新打成 zip,用来送审计引擎。
-
-    引擎只解 zip(`skill_audit/pipeline.py` 按 `is_zipfile` 判):tar 原样送过去会被当成
-    **一个不透明的二进制文件**,于是一个源文件都没被扫过 —— 而返回的结论看起来仍然像一次
-    正常的审计。这比审计失败更糟:失败会显示成"未能完成",这个会显示成"通过"。
-
-    打包必须是确定的(成员按路径排序、时间戳固定):体检和发布是两次调用,引擎按内容哈希
-    缓存,同一个包两次要打出同样的字节,否则发布那一次会再跑一遍几十秒的审计。
-    """
-    out = io.BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
-        for entry in sorted(entries, key=lambda e: e.path):
-            path = root / entry.path
-            if not path.is_file():
-                continue
-            info = zipfile.ZipInfo(entry.path, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            zf.writestr(info, path.read_bytes())
-    return out.getvalue()
-
-
 # --- 体检 ------------------------------------------------------------------
 
 

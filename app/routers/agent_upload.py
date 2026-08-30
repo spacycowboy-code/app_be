@@ -10,30 +10,26 @@
 是同一个决定,一起装在 `gitlab_projects.UploadTarget` 里。
 
 **收哪些格式:** zip 和 tar(`.tar`/`.tar.gz`/`.tgz`/`.tar.bz2`/`.tar.xz`),两种类型相同。
-判断"这是什么"看**内容**不看扩展名,扩展名校验只用来告诉上传者该传什么。tar 在送审计之前会
-被**重新打成 zip**:引擎只解 zip,tar 原样送过去会被当成一个不透明的二进制文件,于是一个源
-文件都没扫过,而结论看起来仍然像"通过" —— 那比审计失败更糟,失败会显示成"未能完成"。
+判断"这是什么"看**内容**不看扩展名,扩展名校验只用来告诉上传者该传什么。
 
 三条规矩,和这里的每个决定都有关:
 
-**审计只出结论,不拦。** 引擎的判断照记、照展示,但不改流向。于是**唯一的闸门是批准的人**,
-所以审核页必须给他足够的事实(文件清单、可执行文件、包会做什么、审计跑成了没有),否则
-批准就是盖章。
+**这条路不跑安全审计。** 原来跑,但对包它从来不改流向 —— 产出只有一份给审核人看的报告,而
+**唯一的闸门是批准的人**。于是它是纯成本:上传要多等几十秒,还多一个必须活着的下游服务。
+所以审核页必须给审核人足够的事实(文件清单、可执行文件、包会做什么),否则批准就是盖章。
+skill 那条路不受影响,它的审计**就是**闸门(`skill_audit.gate`),不是报告。
 
-**两件事例外,而它们不是审计。** 解不开的包(zip slip、符号链接)是我们自己会写到目录外面,
+**两件事仍然拦,而它们不是审计。** 解不开的包(zip slip、符号链接)是我们自己会写到目录外面,
 必须退回;带明文凭据的包 GitLab 的 pre-receive 钩子必定拒收,不提前说的结果不是"放过",
 而是两分钟后给用户一句 GitLab 原文报错、组里还留下一个空项目。
 
 **上传者确认的启动命令是权威值。** 存进数据库(提示词读它)和包里的 portal-agent.yaml(给
-拿着包离开门户的人)。README 一个字都不改:改了下一版会被上传者自己的包覆盖,而且发出去
-的包就不是审计过的那一个了。
+拿着包离开门户的人)。README 一个字都不改:改了下一版会被上传者自己的包覆盖。
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import queue
 import shutil
 import tempfile
 import uuid
@@ -41,7 +37,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from fastapi import Depends
@@ -54,7 +49,6 @@ from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
 from app.services import agent_package as pkg
 from app.services import gitlab_projects as glw
-from app.services.audit_engine import AuditResult, audit_skill
 from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid
 from app.services.skill_storage import bump_minor
@@ -82,10 +76,6 @@ ALLOWED_SUFFIXES: dict[str, tuple[str, ...]] = {
 
 
 # --- 共用 ------------------------------------------------------------------
-
-
-def _sse(event: str, payload: dict) -> bytes:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 def _item_type(raw: str | None) -> str:
@@ -146,27 +136,6 @@ def _unpack(
     return tmp, entries, pkg.inspect(tmp / "src", entries)
 
 
-def _audit_artifact(
-    data: bytes, root: Path, entries: list[pkg.FileEntry], filename: str | None
-) -> tuple[bytes, str]:
-    """送审计引擎的那份字节 + 文件名。zip 原样,tar 重打成 zip。
-
-    引擎只解 zip:tar 原样送过去落在工作目录里就是**一个不透明的二进制文件**,一个源文件
-    都没被扫过 —— 而返回的结论看起来仍然像一次正常的审计。审计失败会显示成"未能完成",
-    这种情况会显示成"通过",所以它比失败更糟。
-
-    重打是确定性的,所以体检与发布两次调用打出同样的字节,引擎的内容哈希缓存照旧命中。
-    """
-    if pkg.archive_kind(data) == "zip":
-        return data, filename or "artifact.zip"
-    stem = Path(filename or "package").name
-    for suffix in pkg.TAR_SUFFIXES:
-        if stem.lower().endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    return pkg.repack_as_zip(root, entries), f"{stem or 'package'}.zip"
-
-
 def _secret_stop(root: Path, entries: list[pkg.FileEntry]) -> None:
     """带明文凭据就此为止 —— 不是我们的裁决,是 GitLab 一定会拒。"""
     hits = pkg.scan_secrets(root, entries)
@@ -178,67 +147,6 @@ def _secret_stop(root: Path, entries: list[pkg.FileEntry]) -> None:
         f"包里有明文凭据({where}),GitLab 不会接收这个包。请删掉凭据、改用环境变量或"
         f"配置文件后重新上传。共命中 {len(hits)} 处。",
     )
-
-
-def _audit_text(inspection: pkg.Inspection, launch: str | None) -> str:
-    """交给判定器的"作者自称这个包做什么"。
-
-    传 README,并把上传者确认的启动命令附在后面:用户即将被提示词引导去执行那一行,它是
-    整个包里风险最集中的一句,判定器理应看到。README 缺失时传一句明确的占位而不是空串 ——
-    空串会让"声明与实现不符"这类检查永远不命中,而结论看起来仍然是"通过"。
-
-    安装步骤同理,而且理由更强:那几行也是用户会照着执行的,而它们是**我们**从包里推出来的,
-    不是上传者写的。判定器看不到它们,就没有任何环节看过"门户打算让人执行什么"。
-    """
-    parts: list[str] = []
-    if inspection.readme_text:
-        parts.append(inspection.readme_text)
-    else:
-        parts.append("（本包未提供 README，没有作者自述可供对照）")
-    if inspection.install_steps:
-        steps = "\n".join(f"  {s.command}" for s in inspection.install_steps)
-        parts.append(f"\n\n---\n门户将引导使用者执行的安装步骤：\n{steps}")
-    if launch:
-        parts.append(f"\n\n---\n上传者声明的启动命令：`{launch}`")
-    return "".join(parts)
-
-
-def _audit_json(audit: AuditResult) -> dict:
-    """存进版本行的审计留痕。
-
-    存的是"当时我们知道什么":结论、覆盖度、哪些分析器跑了、哪些没跑成、策略指纹。下一次
-    上传写的是新的一行,不会覆盖这一份。
-    """
-    return {
-        "state": audit.state,
-        "verdict": audit.verdict,
-        "coverage": audit.coverage,
-        "cause": audit.cause,
-        "retryable": audit.retryable,
-        "reason": audit.reason,
-        "degraded": list(audit.degraded),
-        "incomplete": list(audit.incomplete),
-        "analyzersUsed": list(audit.analyzers_used),
-        "judgeModel": audit.judge_model,
-        "scannerVersion": audit.scanner_version,
-        "policyFingerprint": audit.policy_fingerprint,
-        "contentSha": audit.content_sha,
-        "findings": [
-            {
-                "source": f.source,
-                "category": f.category,
-                "severity": f.severity,
-                "detail": f.detail,
-                "file": f.file,
-                "line": f.line,
-                "remediation": f.remediation,
-                "ruleId": f.rule_id,
-            }
-            for f in audit.findings
-        ],
-        # 判定器原文留档:结论怎么来的,事后只能靠它回答。
-        "raw": (audit.raw or "")[:20000],
-    }
 
 
 def _inspection_out(ins: pkg.Inspection, *, artifact_name: str | None) -> dict:
@@ -285,81 +193,39 @@ def _inspection_out(ins: pkg.Inspection, *, artifact_name: str | None) -> dict:
     }
 
 
-# --- 体检(带进度) ---------------------------------------------------------
+# --- 体检 ------------------------------------------------------------------
 
 
 @router.post("/inspect")
 async def inspect_package(
-    request: Request,
-    eid: str = Form(""),
-    name: str = Form(""),
     item_type: str = Form("agent", alias="itemType"),
     file: UploadFile | None = File(None),
-    x_user_eid: str | None = Header(None),
-) -> StreamingResponse:
-    """解包体检 + 跑一次审计,什么都不存。
+) -> dict:
+    """解包体检,什么都不存。
 
-    走事件流的理由和 skill 那条一样:审计要几十秒到几分钟,固定动画会先跑完,留下一个
-    满格的进度条和什么都没发生。顺带一个真好处:同一份内容在发布时会命中引擎的缓存
-    (它按内容哈希缓存),所以这一次不是白跑的。
+    **这里不跑安全审计。** 原来跑,而且这个端点做成事件流就是为了它:审计要几十秒到几分钟,
+    一条固定动画会先跑完、留下一个满格进度条和什么都没发生。但那次审计对 tool / agent 的包
+    从来不改流向(`blocking: False`),产出只有一份给审核人看的报告 —— 而包的闸门是人工审核。
+    所以它是纯成本:每次上传多等几十秒,还多一个必须活着的下游服务(引擎连不上时它返回的是
+    "suspect,没能查",于是界面还得专门解释"这不等于通过")。
+
+    去掉之后这一步只剩解包、扫明文凭据、把启动命令和安装步骤推出来 —— 全是本地的、毫秒级,
+    所以事件流也一并去掉,直接一次答完。skill 那条路不受影响:它的审计**就是**闸门
+    (见 `skill_audit.gate`),不是报告。
+
+    `eid` / `name` 两个表单字段跟着审计一起没了用处(它们是审计的入参),所以这里不再声明 ——
+    前端多送的字段 FastAPI 会忽略,老调用方不会因此失败。
     """
-    eid_norm = acting_eid(request, eid or x_user_eid)
     itype = _item_type(item_type)
     data = await _read_package(file, itype)
     artifact_name = file.filename if file else None
     tmp, entries, ins = _unpack(data, itype)
     try:
         _secret_stop(tmp / "src", entries)
-    except HTTPException:
+        return _inspection_out(ins, artifact_name=artifact_name)
+    finally:
+        # 体检不留任何东西 —— 无论是被明文凭据拦下还是正常答完。
         shutil.rmtree(tmp, ignore_errors=True)
-        raise
-
-    facts = _inspection_out(ins, artifact_name=artifact_name)
-    audit_name = name.strip() or (ins.top_dir or artifact_name or itype)
-    skill_md = _audit_text(ins, ins.declared.launch)
-    # 审计的那份字节要在删掉临时目录**之前**算出来:tar 的那一份是从解开的文件重打的。
-    audit_bytes, audit_filename = _audit_artifact(data, tmp / "src", entries, artifact_name)
-    shutil.rmtree(tmp, ignore_errors=True)
-
-    events: queue.Queue = queue.Queue()
-
-    def run() -> AuditResult:
-        return audit_skill(
-            name=audit_name, skill_md=skill_md, artifact_bytes=audit_bytes,
-            artifact_filename=audit_filename, uploader_eid=eid_norm or None,
-            on_progress=events.put,
-        )
-
-    async def stream():
-        loop = asyncio.get_running_loop()
-        task = loop.run_in_executor(None, run)
-        # 先把体检结果发出去:它是立刻就有的,用户可以一边看文件清单一边等审计。
-        yield _sse("package", facts)
-        yield _sse("stage", {"stage": "deterministic"})
-        while not task.done():
-            try:
-                stage = await loop.run_in_executor(None, events.get, True, 1.0)
-            except queue.Empty:
-                yield _sse("ping", {})
-                continue
-            yield _sse("stage", {"stage": stage})
-        try:
-            audit: AuditResult = await task
-        except Exception as exc:  # noqa: BLE001
-            log.exception("agent 包审计失败: %s", audit_name)
-            # 审计跑不成不拦上传,但绝不能显示成"通过"。
-            yield _sse("audit", {
-                "state": "unknown", "coverage": "none",
-                "reason": "审计未能完成", "kind": exc.__class__.__name__,
-                "findings": [], "blocking": False,
-            })
-            return
-        yield _sse("audit", {**_audit_json(audit), "blocking": False})
-
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={
-        "Cache-Control": "no-cache",
-        "X-Accel-Buffering": "no",
-    })
 
 
 # --- 发布 ------------------------------------------------------------------
@@ -475,19 +341,12 @@ async def publish_package(
             launch=launch, runtime=runtime, keep=keep_list, prerequisites=prereq_list
         )
 
-        # 审计:结论只记录,不改流向。内容没变时会命中引擎缓存(体检那一步已经跑过)。
-        audit_bytes, audit_filename = _audit_artifact(
-            data, tmp / "src", entries, artifact_name
-        )
-        audit = audit_skill(
-            name=name, skill_md=_audit_text(ins, launch), artifact_bytes=audit_bytes,
-            artifact_filename=audit_filename, uploader_eid=acting,
-        )
+        # 这里不跑安全审计:它对包从来不改流向,产出只有一份报告,而包的闸门是人工审核。
+        # 详见 inspect_package 的说明。skill 那条路不受影响。
 
         version = bump_minor(existing.version if existing else None)
 
-        # 自描述文件在 push 之前写进工作目录 —— 审的是上传的原始内容,发布的是它加这一个
-        # 文件。顺序反过来(审完再改包)意味着发出去的包不是审过的那一个。
+        # 自描述文件在 push 之前写进工作目录。
         src = tmp / "src"
         sidecar_dir = src / ins.top_dir if ins.top_dir else src
         (sidecar_dir / pkg.SIDECAR_NAME).write_text(
@@ -581,7 +440,7 @@ async def publish_package(
                     {"command": s.command, "note": s.note} for s in ins.install_steps
                 ],
             },
-            audit_json=_audit_json(audit),
+            # audit_json 留空:包不再跑安全审计。历史行里那份留痕不动,审核页照旧显示它。
         ))
         db.commit()
         db.refresh(item)
@@ -594,8 +453,6 @@ async def publish_package(
             "commitSha": sha,
             "repoUrl": item.repo_url,
             "reviewPath": f"/market/{item.id}/review",
-            "audit": {"state": audit.state, "coverage": audit.coverage,
-                      "findings": len(audit.findings), "blocking": False},
         }
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
