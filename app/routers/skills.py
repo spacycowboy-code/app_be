@@ -674,9 +674,14 @@ def delete_skill(
     skill = _get_skill_or_404(db, skill_id)
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
-    if not is_admin and skill.uploader_eid and requester != skill.uploader_eid:
+    # `uploader_eid` 为空时**不放行** —— 官方导入的技能就是没有上传者的,而原来的写法
+    # (`skill.uploader_eid and ...`)让任何登录用户都能把它们下架。
+    if not is_admin and requester != skill.uploader_eid:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "只有上传者本人或管理员可以下架这个技能"
+            status.HTTP_403_FORBIDDEN,
+            "只有上传者本人或管理员可以下架这个技能"
+            if skill.uploader_eid
+            else "这个技能没有登记上传者,只有管理员可以下架",
         )
 
     if skill.storage_path and skill.repo_commit:

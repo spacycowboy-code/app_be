@@ -1,4 +1,4 @@
-"""包上传(tool / agent):包进 GitLab,条目进市场,等人批准才可见。
+"""包上传(tool / agent):包进 GitLab,条目进市场,立刻可见。
 
 和 skill 上传的关系:形状一样(先体检、再发布),存储不一样。skill 全部落在一个 git 仓的
 子目录里;这里每个包一个 GitLab 项目。这样做的直接好处是门户已有的下载与安装令牌两条路径
@@ -286,8 +286,23 @@ async def publish_package(
 ) -> dict:
     """建项目(或复用已有的)、推一版、写市场条目与版本行。
 
-    条目一律 `pending`:除上传者与 admin,别人看不到,也拿不到安装令牌。这是"审计不拦"之后
-    唯一真实的闸门,所以它必须是真的。
+    **条目直接 `approved`,传完即上市。** 原来是 `pending`,等 admin 批。改掉的理由是那个
+    闸门的口径反了、而且它不运转:
+
+    - 反了:登记一个仓库地址(它可以指向任何仓库,内容明天还能改)是即时上市的,而门户唯一
+      能把完整文件清单摆在审核人面前的这条路要等审批。门槛加在了信息最充分的那条路上。
+    - 不运转:能批的只有 `audit_admin_eid` 一个 EID(默认还是 break-glass 那个账号),而且
+      上传后**没有任何通知**。实测生产库:15 条市场条目全是 approved,`pending` 这个状态
+      从上线到现在没有作用在任何一行上 —— 因为上传在今天之前从没成功过。第一个真的落进
+      pending 的包会直接卡死在那儿。
+    - 而它还把人赶向更不安全的那条路:提交完看到"等待审核"、然后什么都不发生,下次就去
+      登记指针了。
+
+    换来的口径是"同事放的,自己看",不是"公司审过":每一行都有 creator、每一版都有 GitLab
+    提交,出问题能追到人,作者和管理员都能自己下架。`pending` 这个状态仍然存在(管理员在
+    审核页拒绝就是它),可见性过滤也照旧,所以下架是即时生效的。
+
+    skill 那条路的状态由它自己的审计闸门决定,不受这里影响。
     """
     # 身份:签名的 JWT 优先(生产),表单字段与请求头只在 auth_enabled=false 时兜底。两者都收,
     # 是因为市场那边的接口用头、skill 上传用表单字段,而这个端点同时被两种调用方式碰到。
@@ -295,6 +310,27 @@ async def publish_package(
     if not acting:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少上传者身份")
     itype = _item_type(item_type)
+    # 授权在环境检查**之前**。谁能改这个条目是关于这个请求的事实,凭据配没配是关于这次部署
+    # 的事实 —— 反过来的话,一个越权请求在部署没配好时会拿到 503「服务不可用」,既误导上传者,
+    # 也把一次越权尝试记成了一次故障。
+    existing = db.get(RpAiMarketItem, item_id) if item_id else None
+    # `creator` 为空时**不放行**。原来是 `existing.creator and ...`,于是同步进来的条目
+    # (creator 是 NULL、id 又是可推出来的 `gl-<项目id>`)谁都能推新版本上去,而页面上作者
+    # 一个字不变 —— 那是内容替换,不是"编辑一个没人认领的条目"。
+    if existing is not None and existing.creator != acting:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有原上传者可以上传这个条目的新版本"
+            if existing.creator
+            else "这个条目没有登记上传者,不能通过上传替换它的内容",
+        )
+    if existing is not None and existing.item_type != itype:
+        # 换类型等于换了它在市场里是什么东西,而卡片、筛选和用法说明都跟着这一格走。静默接受
+        # 会让一个 tool 的新版本把它变成 agent,而上传者只是传了一个包。
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"这个条目是 {existing.item_type},不能作为 {itype} 上传新版本。",
+        )
     target = glw.target_for(itype)
     if not target.token:
         # 早点说清楚:凭据没配的时候,包收下来也无处存,答 503 比收下再丢掉诚实。
@@ -322,18 +358,6 @@ async def publish_package(
     try:
         _secret_stop(tmp / "src", entries)
 
-        existing = db.get(RpAiMarketItem, item_id) if item_id else None
-        if existing is not None and existing.creator and existing.creator != acting:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN, "只有原上传者可以上传这个条目的新版本"
-            )
-        if existing is not None and existing.item_type != itype:
-            # 换类型等于换了它在市场里是什么东西,而卡片、筛选和用法说明都跟着这一格走。
-            # 静默接受会让一个 tool 的新版本把它变成 agent,而上传者只是传了一个包。
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"这个条目是 {existing.item_type},不能作为 {itype} 上传新版本。",
-            )
         cid, category_label = _resolve_category(db, acting, category_id)
         keep_list = _parse_keep(keep)
         prereq_list = _parse_keep(prerequisites)
@@ -417,7 +441,9 @@ async def publish_package(
             # 每一处 `serviceType === 'code' ? repoUrl : serviceUrl` 照旧成立。
             item.service_type = "code"
             item.repo_url = project.web_url
-            item.status = "pending"
+            # 传完即上市 —— 理由见函数开头。仍然写一次而不是靠模型默认值:这一行是这条路的
+            # 策略,读代码的人应该在这里看到它,而不是去翻模型。
+            item.status = "approved"
         item.name = name
         if description is not None:
             item.description = description
