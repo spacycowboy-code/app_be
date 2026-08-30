@@ -225,18 +225,26 @@ def create_project(
 ) -> ProjectRef:
     """在上传组下建一个项目。
 
-    路径撞了就在后面加序号重试:两个人上传同名的包是正常的,而"名字被占"不该变成
-    上传失败。
+    撞名就在后面加序号重试:两个人上传同名的包是正常的,而"名字被占"不该变成上传失败。
+
+    **序号要同时加在路径和名字上。** GitLab 的项目名在组内也要唯一,而原来只改 `path` ——
+    于是一个被占用的**名字**让 5 次重试全部撞在同一处,第 5 次把 GitLab 的原文丢给上传者:
+    `{"name":["has already been taken"]}`。实测踩到过:前两次上传因推送规则失败,失败清理把
+    项目归档了,而**归档不释放名字**,于是同一个包第三次上传连项目都建不出来。
     """
-    base = slug
+    base_path = slug
+    base_name = (name or "").strip()[:255]
+    taken: GitLabWriteError | None = None
     for attempt in range(1, 6):
-        path = base if attempt == 1 else f"{base}-{attempt}"
+        path = base_path if attempt == 1 else f"{base_path}-{attempt}"
+        # 名字里的序号加在括号里:它是给人看的,而 `-2` 在展示名里像是包本身的版本号。
+        display = base_name if attempt == 1 else f"{base_name[:249]} ({attempt})"
         try:
             proj = _api(
                 "POST",
                 "projects",
                 {
-                    "name": name[:255],
+                    "name": display,
                     "path": path,
                     "namespace_id": str(namespace_id(target)),
                     "description": (description or "")[:2000],
@@ -252,9 +260,12 @@ def create_project(
                 target=target,
             )
         except GitLabWriteError as exc:
-            if "has already been taken" in str(exc) and attempt < 5:
-                continue
-            raise
+            if "has already been taken" not in str(exc):
+                raise
+            # 每一轮都记下来再继续。原来的写法在第 5 轮 `attempt < 5` 为假时直接 raise,把
+            # GitLab 的 JSON 原文抛给上传者 —— 而循环末尾那句人话永远走不到。
+            taken = exc
+            continue
         assert isinstance(proj, dict)
         return ProjectRef(
             id=int(proj["id"]),
@@ -263,7 +274,28 @@ def create_project(
             http_url=proj["http_url_to_repo"],
             default_branch=proj.get("default_branch") or "main",
         )
-    raise GitLabWriteError(f"项目路径 {base} 连续 5 次都被占用")
+    raise GitLabWriteError(
+        f"项目名「{base_name}」和路径 {base_path} 连续 5 次都被占用。**归档的项目仍然占着"
+        f"名字和路径** —— 组 {target.group_path} 下可能有同名的归档项目(比如上一次上传失败"
+        f"留下的),请管理员删掉或改名,或者给这个包换一个名字。"
+    ) from taken
+
+
+def rename_project(
+    project_id: int | str, *, path: str, name: str, target: UploadTarget
+) -> None:
+    """给项目改名改路径 —— 推送失败后把原来的名字腾出来。
+
+    存在的理由是归档**不释放**名字和路径。一次失败的上传原来会永久占掉这个包的名字,于是
+    同一个包再传一次连项目都建不出来(GitLab 答 `name has already been taken`),而上传者
+    看到的是一个和"签名""推送规则"毫无关系的 400。所以失败清理的顺序是先改名、再归档。
+    """
+    _api(
+        "PUT",
+        f"projects/{project_id}",
+        {"path": path, "name": name[:255]},
+        target=target,
+    )
 
 
 def archive_project(project_id: int | str, target: UploadTarget) -> None:

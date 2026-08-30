@@ -186,7 +186,18 @@ async def auth_gate(request: Request, call_next):
 
 @app.exception_handler(IntegrityError)
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
-    """Turn DB constraint violations into a clean 400 rather than a 500."""
+    """Turn DB constraint violations into a clean 400 rather than a 500.
+
+    Log it as well. Handing the constraint text to the browser and writing
+    nothing server-side means nobody can tell afterwards which constraint
+    fired: the upload that hit this returned "Database constraint violation"
+    with an empty log, and the cause (a duplicate eid insert) had to be
+    reproduced by hand against the production schema to be found at all.
+    """
+    logger.error(
+        "DB constraint violation on %s %s: %s",
+        request.method, request.url.path, exc.orig,
+    )
     return JSONResponse(
         status_code=400,
         content={"detail": "Database constraint violation", "error": str(exc.orig)},
