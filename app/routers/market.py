@@ -557,7 +557,13 @@ def get_review(
         if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
-    uploader = db.get(RpAiPortal, item.creator) if item.creator else None
+    # 同样按 eid 查,不能用 db.get():主键是自增的 id,eid 只是唯一索引。db.get 在这里不会
+    # 报错,只会永远答 None —— 审核页上传者那一栏就永远只有 EID、没有姓名和部门。
+    uploader = (
+        db.scalar(select(RpAiPortal).where(RpAiPortal.eid == item.creator))
+        if item.creator
+        else None
+    )
     _attach_stats(db, [item])
     return MarketReviewRead(
         item=MarketItemRead.model_validate(item, from_attributes=True),

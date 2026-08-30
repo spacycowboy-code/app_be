@@ -37,10 +37,12 @@ import queue
 import shutil
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from fastapi import Depends
 
@@ -382,7 +384,18 @@ def _resolve_category(db: Session, eid: str, category_id: str | None) -> tuple[s
 
 
 def _ensure_user(db: Session, eid: str) -> None:
-    if db.get(RpAiPortal, eid) is None:
+    """确保 rp_ai_portal 里有这个人 —— 版本行的 uploader_eid 是指向它的外键。
+
+    **必须按 eid 查,不能用 db.get()。** 这张表的主键是自增的 `id`,`eid` 只是一个带唯一索引
+    的普通列,所以 `db.get(RpAiPortal, "EZHGMIO")` 是拿一个 EID 当整数主键去查 —— 永远答
+    None,于是每次上传都插一行重复的 eid,被 MySQL 用
+    `1062 Duplicate entry 'EZHGMIO' for key 'ix_rp_ai_portal_eid'` 拒掉,上传者看到的是
+    400「Database constraint violation」。
+
+    这段代码在生产从未跑到过(推送在它之前就失败了),所以这个洞从上线一直活到现在;同一个
+    仓里另外三个 _ensure_user 都是按 eid 查的,只有这一份复制的时候丢了 where。
+    """
+    if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
         db.add(RpAiPortal(eid=eid))
         db.flush()
 
@@ -503,7 +516,22 @@ async def publish_package(
         except glw.GitLabWriteError as exc:
             if existing is None:
                 # 项目建好了但内容没推上去 —— 留下一个空项目会让下次同名上传撞路径,而且
-                # 没人看得出它是半成品。归档掉,让失败干净地结束。
+                # 没人看得出它是半成品。
+                #
+                # **先改名再归档。** 归档不释放名字和路径,所以只归档的话这个包的名字被永久
+                # 占掉,同一个包再传一次连项目都建不出来(GitLab 答 name has already been
+                # taken),而上传者看到的是一个和本次失败原因毫无关系的 400。实测踩过两次。
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                doomed = project.path_with_namespace.rsplit("/", 1)[-1] or _slug(name)
+                try:
+                    glw.rename_project(
+                        project.id,
+                        path=f"{doomed}-failed-{stamp}"[:255],
+                        name=f"{name} (failed {stamp})",
+                        target=target,
+                    )
+                except glw.GitLabWriteError:
+                    log.warning("推送失败后给项目 %s 改名也失败了", project.id)
                 try:
                     glw.archive_project(project.id, target)
                 except glw.GitLabWriteError:

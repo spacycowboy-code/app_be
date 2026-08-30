@@ -13,6 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from sqlalchemy import select
+
+from app.database import SessionLocal
+from app.models.user import RpAiPortal
+from app.routers.agent_upload import _ensure_user
 from app.services import gitlab_projects as glw
 
 
@@ -308,3 +313,162 @@ def test_unrelated_push_failures_are_left_alone() -> None:
     """认不出来就不要翻译。给一个无关的失败套上签名的说明,比不解释更糟。"""
     assert glw._push_rejection_hint("remote: repository is archived", signed=False) is None
     assert glw._push_rejection_hint("fatal: could not read from remote", signed=True) is None
+
+
+# --- 撞名 --------------------------------------------------------------------
+#
+# 这一组来自第三次上传失败。前两次因为推送规则倒在 git push,失败清理把刚建的项目归档了 ——
+# 而**归档不释放名字**。于是同一个包第三次上传连项目都建不出来:
+#
+#   GitLab 返回 HTTP 400:{"message":{"project_namespace.name":["has already been taken"],
+#                                    "name":["has already been taken"]}}
+#
+# 两个独立的缺陷凑在一起才有这个现象:重试只给 path 加序号(名字永远撞),而第 5 轮又把
+# GitLab 的 JSON 原文抛出去(循环末尾那句人话永远走不到)。
+
+
+def _target(monkeypatch) -> "glw.UploadTarget":
+    monkeypatch.setattr(
+        glw, "get_settings",
+        lambda: SimpleNamespace(
+            gitlab_user_agents_group="g/agents", gitlab_user_agents_token="a",
+            gitlab_user_tools_group="g/tools", gitlab_user_tools_token="t",
+        ),
+    )
+    monkeypatch.setattr(glw, "_namespace_ids", {"g/tools": 22, "g/agents": 11})
+    return glw.target_for("tool")
+
+
+def test_a_taken_name_is_retried_with_a_suffixed_name_too(monkeypatch) -> None:
+    """序号要同时加在路径和名字上。
+
+    只改 path 的话,一个被占用的名字会让 5 次重试全部撞在同一处 —— 这正是第三次上传失败的
+    原因,而报错和真正的起因(前两次留下的归档项目)看不出任何关系。
+    """
+    target = _target(monkeypatch)
+    seen: list[tuple[str, str]] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        seen.append((payload["name"], payload["path"]))
+        if payload["name"] == "Generate EEF":      # 名字被归档项目占着
+            raise glw.GitLabWriteError(
+                'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}'
+            )
+        return {
+            "id": 7, "path_with_namespace": f"g/tools/{payload['path']}",
+            "web_url": "http://x", "http_url_to_repo": "http://x.git",
+        }
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    ref = glw.create_project(slug="generate-eef", name="Generate EEF", target=target)
+    assert ref.id == 7
+    # 第一轮用原名原路径,第二轮两个都带序号。
+    assert seen == [("Generate EEF", "generate-eef"), ("Generate EEF (2)", "generate-eef-2")]
+
+
+def test_running_out_of_names_says_what_is_holding_them(monkeypatch) -> None:
+    """5 轮都被占时给的是人话,而且指向"归档项目仍占名字"这个真实原因。
+
+    原来第 5 轮直接把 GitLab 的 JSON 原文抛给上传者,他从那段 JSON 里既看不出该找谁,也看不出
+    这跟他的包无关。
+    """
+    target = _target(monkeypatch)
+
+    def always_taken(method, path, payload=None, *, target):
+        raise glw.GitLabWriteError(
+            'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}'
+        )
+
+    monkeypatch.setattr(glw, "_api", always_taken)
+    with pytest.raises(glw.GitLabWriteError) as exc:
+        glw.create_project(slug="generate-eef", name="Generate EEF", target=target)
+    detail = exc.value.detail
+    assert "has already been taken" not in detail       # 不再是 GitLab 的原文
+    assert "归档" in detail and "g/tools" in detail      # 说出原因和该去哪个组找
+
+
+def test_a_real_error_is_not_swallowed_by_the_retry(monkeypatch) -> None:
+    """只有"名字被占"才重试。别的失败必须立刻抛出去,否则一个凭据问题会被重试 5 次。"""
+    target = _target(monkeypatch)
+    calls = {"n": 0}
+
+    def refuse(method, path, payload=None, *, target):
+        calls["n"] += 1
+        raise glw.CredentialExpired("凭据已失效")
+
+    monkeypatch.setattr(glw, "_api", refuse)
+    with pytest.raises(glw.CredentialExpired):
+        glw.create_project(slug="x", name="X", target=target)
+    assert calls["n"] == 1
+
+
+def test_rename_frees_the_name(monkeypatch) -> None:
+    """改名走 PUT /projects/:id,path 和 name 一起改 —— 只改一个,另一个仍然占着。"""
+    target = _target(monkeypatch)
+    sent: dict = {}
+
+    def fake_api(method, path, payload=None, *, target):
+        sent.update({"method": method, "path": path, "payload": payload})
+        return {}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    glw.rename_project(7, path="x-failed-20260830", name="X (failed)", target=target)
+    assert sent["method"] == "PUT"
+    assert sent["path"] == "projects/7"
+    assert sent["payload"] == {"path": "x-failed-20260830", "name": "X (failed)"}
+
+
+# --- 上传者那一行 -------------------------------------------------------------
+#
+# 这一组来自第一次真正推送成功的上传:GitLab 那一整段都过了(项目建出来、签名的提交和 tag
+# 都推上去了),然后倒在写库,门户答 400「Database constraint violation」而日志里一个字都没有。
+#
+# 真正的原因是 _ensure_user 用 db.get() 按主键查 eid —— 而 rp_ai_portal 的主键是自增的 id,
+# eid 只是一个带唯一索引的普通列。db.get 永远答 None,于是每次上传都插一行重复的 eid:
+#
+#   (1062, "Duplicate entry 'EZHGMIO' for key 'rp_ai_portal.ix_rp_ai_portal_eid'")
+#
+# 这段代码在生产从未跑到过(推送更早就失败了),所以这个洞从上线活到现在。
+
+
+def test_ensure_user_finds_an_existing_person_by_eid() -> None:
+    """已经在库里的人不能被再插一次。
+
+    这条钉的是"按什么查",不是"插不插" —— db.get(RpAiPortal, eid) 按主键(自增 id)查一个
+    EID 字符串,永远答 None,于是永远走进插入分支。
+    """
+    with SessionLocal() as db:
+        db.add(RpAiPortal(eid="EZHGMIO", display_name="Miao Zhang M"))
+        db.commit()
+
+        _ensure_user(db, "EZHGMIO")      # 不许抛,也不许再插一行
+        db.commit()
+
+        rows = db.scalars(select(RpAiPortal).where(RpAiPortal.eid == "EZHGMIO")).all()
+        assert len(rows) == 1
+        # 原来那一行要保持原样:插新行会把 display_name 冲成空。
+        assert rows[0].display_name == "Miao Zhang M"
+
+
+def test_ensure_user_still_creates_someone_who_is_missing() -> None:
+    """第一次上传的人不在表里 —— 版本行的 uploader_eid 是外键,这一行必须先有。"""
+    with SessionLocal() as db:
+        assert db.scalar(select(RpAiPortal).where(RpAiPortal.eid == "ENEWGUY")) is None
+        _ensure_user(db, "ENEWGUY")
+        db.commit()
+        assert db.scalar(select(RpAiPortal).where(RpAiPortal.eid == "ENEWGUY")) is not None
+
+
+def test_eid_is_not_the_primary_key() -> None:
+    """把这个前提本身钉住。
+
+    这张表哪天真把 eid 变成主键,上面两条会照样通过而 db.get 也重新变得正确 —— 但在那之前,
+    任何"拿 EID 当主键查"的写法都是错的,而它不报错、只是静默地永远查不到人(审核页的上传者
+    姓名就是这么丢的)。
+    """
+    assert [c.name for c in RpAiPortal.__table__.primary_key] == ["id"]
+    with SessionLocal() as db:
+        db.add(RpAiPortal(eid="EZHGMIO"))
+        db.commit()
+        # 人就在库里,db.get 照样答 None —— 这就是那个洞。
+        assert db.get(RpAiPortal, "EZHGMIO") is None
