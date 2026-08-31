@@ -114,9 +114,19 @@ def test_the_allowed_list_is_configurable(client, monkeypatch):
 
 def test_distinct_people_are_counted_once_but_their_logins_add_up(client, db):
     now = _db_now()
-    _login(db, "EONE", now - timedelta(minutes=5))
-    _login(db, "EONE", now - timedelta(minutes=3))
-    _login(db, "ETWO", now - timedelta(minutes=1))
+    # Clamped into today, because the window this asserts on starts at local
+    # midnight: anchoring on ``now - 5 minutes`` put that sign-in in *yesterday*
+    # whenever the suite ran in the first five minutes after midnight, and the
+    # daily count then legitimately said 1. Seen for real — CI failed at 00:02
+    # Beijing with ``assert 1 == 2`` and the same test passed three minutes later.
+    day_start = _to_db_naive(
+        datetime.now(_reporting_tz()).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    )
+    _login(db, "EONE", max(day_start, now - timedelta(minutes=5)))
+    _login(db, "EONE", max(day_start, now - timedelta(minutes=3)))
+    _login(db, "ETWO", max(day_start, now - timedelta(minutes=1)))
 
     body = client.get("/api/login-stats", headers=_headers("EZHGMIO")).json()
 

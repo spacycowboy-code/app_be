@@ -46,7 +46,19 @@ class RpAiMarketItem(TimestampMixin, Base):
     item_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     # code | cloud
     service_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    # manual | gitlab-tools | gitlab-agents
+    # How the row got here. Not an enum in the database, and read in only two
+    # places — market.py checks ``startswith("gitlab")`` to word a duplicate
+    # message, and the review page checks ``!= "upload"`` to explain why it cannot
+    # list files — so a new value behaves like ``manual`` in both, which is what a
+    # registered pointer should do.
+    #   manual                        someone filled in the form
+    #   upload                        a package pushed through /api/market/agent-upload
+    #   gitlab-tools | gitlab-agents  synced from the two GitLab subgroups
+    #   radioai                       the one-off catalogue import, 2026-08-31
+    #                                 (tools/import_radioai_agents.py)
+    # Kept specific rather than lumped into ``manual`` so a batch someone else
+    # produced stays identifiable: it is the only way to find these rows again, to
+    # correct them in bulk, or to take them back out.
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
 
     # Code service -> git repository URL; Cloud service -> running service URL.
