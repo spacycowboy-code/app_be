@@ -339,6 +339,14 @@ def aggregate(
             p = people.get(eid)
             if p is None:
                 continue
+            # Deliberately not filtered on ``signed_in``, and this leaves a seam a
+            # careful reader can find: an import-registered person contributes to
+            # this cell but not to the row's 访问 count, so a department can read
+            # "访问 14 人" beside "上传 agent 9 人 / 12 件" with those 9 not among
+            # the 14. Reviewed and accepted — the alternative is worse. Dropping
+            # them here would hide 12 real assets, and counting them in 访问 would
+            # claim 9 sign-ins that never happened. Both numbers are true as they
+            # stand; only their sum across two columns is not meaningful.
             d = dept_of(p)
             inside = eid in placement or d.small_key.startswith(SCOPE_KEY)
             if inside != in_scope:
