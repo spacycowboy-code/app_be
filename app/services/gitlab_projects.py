@@ -44,12 +44,45 @@ log = logging.getLogger(__name__)
 
 
 class GitLabWriteError(RuntimeError):
-    """写 GitLab 失败。`detail` 已经脱敏,可以直接给用户看。"""
+    """写 GitLab 失败。`detail` 已经脱敏,可以直接给用户看。
 
-    def __init__(self, detail: str, *, retryable: bool = False) -> None:
+    除了给人看的 `detail`,还带上**给代码看的**两样东西:HTTP 状态码,以及 GitLab 在校验
+    失败时逐字段给出的错误(`{"name": [...], "path": [...]}`)。
+
+    为什么这很重要:GitLab 明确告诉了我们是**哪个字段**出问题,而原来这里只留下一个拼好的
+    字符串,调用方只能对整体做子串匹配。于是建项目时分不清"路径被占"和"名字被占",只好把
+    两个一起改 —— 一个本来合法的名字因此被加上了 GitLab 不接受的后缀,最终的报错是"名字有
+    非法字符",把人指向一个跟真实原因无关的方向。
+    """
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        retryable: bool = False,
+        status: int | None = None,
+        errors: dict[str, list[str]] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
         self.retryable = retryable
+        #: HTTP 状态码。None 表示请求根本没发出去(网络层失败)。
+        self.status = status
+        #: GitLab 的逐字段校验错误,字段名 → 消息列表。非校验类失败时为空。
+        self.errors = errors or {}
+
+    def taken(self, *fields: str) -> bool:
+        """这些字段里有没有哪个被 GitLab 判为"已被占用"。"""
+        return any(
+            "has already been taken" in msg
+            for field in fields
+            for msg in self.errors.get(field, ())
+        )
+
+    def rejected(self, field: str) -> bool:
+        """这个字段被拒了,但**不是**因为被占用 —— 也就是格式/字符集不合它的规矩。"""
+        msgs = self.errors.get(field) or []
+        return bool(msgs) and not self.taken(field)
 
 
 class CredentialExpired(GitLabWriteError):
@@ -160,6 +193,31 @@ def _token(target: UploadTarget) -> str:
     return target.token
 
 
+def _field_errors(body: str) -> dict[str, list[str]]:
+    """把 GitLab 的校验错误体解析成 {字段: [消息]}。
+
+    校验失败时 GitLab 答的是 ``{"message": {"name": ["has already been taken"], ...}}``。
+    解析它是为了让调用方能按字段处置,而不是对一整串文本做子串匹配。
+
+    **必须在截断之前解析。** 给人看的 `detail` 只留前 300 字符,而截断会把 JSON 切坏。
+    解析不出来就返回空字典 —— 非校验类的失败(网关错误、HTML 错误页)本来就没有字段。
+    """
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return {}
+    msg = data.get("message") if isinstance(data, dict) else None
+    if not isinstance(msg, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for field, val in msg.items():
+        if isinstance(val, str):
+            out[str(field)] = [val]
+        elif isinstance(val, list):
+            out[str(field)] = [str(v) for v in val]
+    return out
+
+
 def _api(
     method: str, path: str, payload: dict | None = None, *, target: UploadTarget
 ) -> dict | list:
@@ -175,12 +233,16 @@ def _api(
             body = resp.read().decode("utf-8", "replace")
             return json.loads(body) if body else {}
     except urllib.error.HTTPError as exc:
-        detail = (exc.read().decode("utf-8", "replace") or "")[:300]
+        raw = exc.read().decode("utf-8", "replace") or ""
+        # 先按完整响应体解析字段,再截断给人看的那一份。顺序反了会把 JSON 切坏。
+        fields = _field_errors(raw)
+        detail = raw[:300]
         if exc.code in (401, 403):
             log.error("GitLab 拒绝了写请求(%s %s): HTTP %s", method, path, exc.code)
             raise CredentialExpired(
                 f"上传 {target.item_type} 包用的 GitLab 凭据({target.env_var})已失效"
-                "(过期或被吊销),请更新后重试。"
+                "(过期或被吊销),请更新后重试。",
+                status=exc.code,
             ) from exc
         if exc.code == 404 and path.startswith("groups/"):
             # 组查不到,最常见的原因不是组不存在,而是**这个 token 看不到它**:一个只覆盖
@@ -188,10 +250,13 @@ def _api(
             # 会让人去查组名,而组名往往是对的。
             raise GitLabWriteError(
                 f"找不到 GitLab 组 {target.group_path},或者 {target.env_var} 这个凭据"
-                "没有它的访问权限(组访问令牌只能访问它所属的那一个组)。"
+                "没有它的访问权限(组访问令牌只能访问它所属的那一个组)。",
+                status=exc.code,
             ) from exc
         log.warning("GitLab %s %s -> HTTP %s %s", method, path, exc.code, detail)
-        raise GitLabWriteError(f"GitLab 返回 HTTP {exc.code}:{detail}") from exc
+        raise GitLabWriteError(
+            f"GitLab 返回 HTTP {exc.code}:{detail}", status=exc.code, errors=fields
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - 网络/DNS/超时都是同一件事
         log.warning("连不上 GitLab(%s %s): %s", method, path, exc)
         raise GitLabWriteError("暂时连不上 GitLab,请稍后重试。", retryable=True) from exc
@@ -225,20 +290,27 @@ def create_project(
 ) -> ProjectRef:
     """在上传组下建一个项目。
 
-    撞名就在后面加序号重试:两个人上传同名的包是正常的,而"名字被占"不该变成上传失败。
+    **按 GitLab 指出的字段分别处置,不要一遇到冲突就把名字和路径一起改。**
 
-    **序号要同时加在路径和名字上。** GitLab 的项目名在组内也要唯一,而原来只改 `path` ——
-    于是一个被占用的**名字**让 5 次重试全部撞在同一处,第 5 次把 GitLab 的原文丢给上传者:
-    `{"name":["has already been taken"]}`。实测踩到过:前两次上传因推送规则失败,失败清理把
-    项目归档了,而**归档不释放名字**,于是同一个包第三次上传连项目都建不出来。
+    GitLab 在校验失败时会说清是哪个字段的问题(见 `GitLabWriteError.errors`)。原来这里只对
+    整条错误消息做子串匹配,于是"路径被占"也会触发改名字,而改名字用的后缀是 `名字 (2)` ——
+    ASCII 圆括号不在 GitLab 项目名的白名单里,于是第二轮换来一个字符集 400,而那条消息里没有
+    "has already been taken",循环当场把 GitLab 的 JSON 原文抛出去。上传者看到的是"名字有非法
+    字符",而他填的名字本来是合法的:那对括号是我们自己加的。实测现场:组里一个 0 提交的归档
+    项目占着 `emc-agent` 这个名字,于是任何人用这个名字上传都失败。
+
+    退路的安全性来自**构造**,不是来自我们复述 GitLab 的正则:`slug` 的字符集是 `[a-z0-9-]`,
+    是 GitLab 项目名白名单的严格子集,所以它必然合法。GitLab 那条正则是 GitLab 的、会随版本
+    变、还包含 emoji 区间 —— 在这里重新实现一遍只会漂。
     """
     base_path = slug
     base_name = (name or "").strip()[:255]
-    taken: GitLabWriteError | None = None
+    # 必然合法的退路(见上)。用户没填名字时它也是第一选择。
+    safe_name = base_path
+    path = base_path
+    display = base_name or safe_name
+    last: GitLabWriteError | None = None
     for attempt in range(1, 6):
-        path = base_path if attempt == 1 else f"{base_path}-{attempt}"
-        # 名字里的序号加在括号里:它是给人看的,而 `-2` 在展示名里像是包本身的版本号。
-        display = base_name if attempt == 1 else f"{base_name[:249]} ({attempt})"
         try:
             proj = _api(
                 "POST",
@@ -260,11 +332,36 @@ def create_project(
                 target=target,
             )
         except GitLabWriteError as exc:
-            if "has already been taken" not in str(exc):
+            # 只有 GitLab 明确指出字段问题时才值得重试。凭据、网络、5xx 一律直接抛 ——
+            # 重试同一个请求不会有不同结果,而多试 5 次只是让用户多等。
+            path_taken = exc.taken("path")
+            name_taken = exc.taken("name", "project_namespace.name")
+            name_rejected = exc.rejected("name")
+            if not exc.errors and "has already been taken" in str(exc):
+                # 兜底:GitLab 换了错误体的形状(或者答的不是那个 {"message": {...}} 结构),
+                # 我们解析不出字段。这时**不能静默地不重试** —— 那会让"名字被占"重新变成上传
+                # 失败,而且是无声的退化。
+                #
+                # 只推进路径:路径由 slug 派生,字符集是 [a-z0-9-],推进它不可能引入新的失败
+                # 模式;而在不知道是哪个字段的情况下去动名字,恰恰是这次 bug 的成因。
+                path_taken = True
+            if not (path_taken or name_taken or name_rejected):
                 raise
-            # 每一轮都记下来再继续。原来的写法在第 5 轮 `attempt < 5` 为假时直接 raise,把
-            # GitLab 的 JSON 原文抛给上传者 —— 而循环末尾那句人话永远走不到。
-            taken = exc
+            last = exc
+            # 路径被占就推进路径,这一步和名字那边互不相干 —— 放在前面是为了让"名字非法 +
+            # 路径被占"同时发生时一轮就把两件事都纠正,而不是各花一轮。
+            if path_taken:
+                path = f"{base_path}-{attempt + 1}"
+            if name_rejected:
+                # 名字不合 GitLab 的规矩(用户填了括号、冒号之类)。退到必然合法的形式。
+                # 已经在用那个形式还被拒,说明我们的假设错了,再试没有意义。
+                if display == safe_name:
+                    raise
+                display = safe_name
+            elif name_taken:
+                # 名字**只在它自己被占时**才动 —— 路径被占跟名字没关系。序号与路径对齐,
+                # 读起来一眼看得出是第几次重试。
+                display = f"{safe_name}-{attempt + 1}"
             continue
         assert isinstance(proj, dict)
         return ProjectRef(
@@ -275,27 +372,45 @@ def create_project(
             default_branch=proj.get("default_branch") or "main",
         )
     raise GitLabWriteError(
-        f"项目名「{base_name}」和路径 {base_path} 连续 5 次都被占用。**归档的项目仍然占着"
-        f"名字和路径** —— 组 {target.group_path} 下可能有同名的归档项目(比如上一次上传失败"
-        f"留下的),请管理员删掉或改名,或者给这个包换一个名字。"
-    ) from taken
+        f"在组 {target.group_path} 下建项目连续 5 次都没成功(最后一次:名字「{display}」、"
+        f"路径 {path})。**归档的项目仍然占着名字和路径** —— 组里可能有同名的归档项目(比如"
+        f"上一次上传失败留下的),请管理员把它删掉或改名,或者给这个包换一个名字。",
+        status=last.status if last else None,
+        errors=last.errors if last else None,
+    ) from last
 
 
-def rename_project(
-    project_id: int | str, *, path: str, name: str, target: UploadTarget
-) -> None:
-    """给项目改名改路径 —— 推送失败后把原来的名字腾出来。
+def looks_empty(project_id: int | str, target: UploadTarget) -> bool:
+    """这个项目一个提交都没有吗。
 
-    存在的理由是归档**不释放**名字和路径。一次失败的上传原来会永久占掉这个包的名字,于是
-    同一个包再传一次连项目都建不出来(GitLab 答 `name has already been taken`),而上传者
-    看到的是一个和"签名""推送规则"毫无关系的 400。所以失败清理的顺序是先改名、再归档。
+    读 `GET /projects/:id` 的 `empty_repo` 字段,**不要去数 commits**:空仓的
+    `repository/commits` 在 GitLab 上会答 404(仓库还没有默认分支),于是"查不到"和"真的空"
+    长得一模一样 —— 而下面那条保守规则会把 404 当成"有内容",于是最该被删的空项目恰好永远
+    走不到删除分支,这个修复就白做了。`empty_repo` 是项目对象上的字段,不依赖仓库是否已初始化。
+
+    **查不到就答 False。** 这个判断的下游是删除,所以不确定时必须偏向"当成有内容",宁可留
+    一个残骸也不要删掉别人的东西。
     """
-    _api(
-        "PUT",
-        f"projects/{project_id}",
-        {"path": path, "name": name[:255]},
-        target=target,
-    )
+    try:
+        proj = _api("GET", f"projects/{project_id}", target=target)
+    except GitLabWriteError:
+        return False
+    return isinstance(proj, dict) and proj.get("empty_repo") is True
+
+
+def delete_project(project_id: int | str, target: UploadTarget) -> None:
+    """删掉一个项目。**只用于本次请求刚建、而且一个提交都没收到的那种。**
+
+    为什么不是归档:归档既不释放 name 也不释放 path。于是一次失败的上传把这个包的名字**永久**
+    占死,下一个用同名的人连项目都建不出来,而他看到的报错跟真实原因毫无关系。实测的现场就是
+    `rp-ai/rp-ai-user-agents` 里一个 0 提交的归档项目占着 `emc-agent`,任何人用这个名字上传
+    都失败。原来这里试图靠"先改名再归档"来腾出名字,但那个改名自己用了 `名字 (failed …)` ——
+    括号非法,所以它从来没有成功过,只留下一行 warning。
+
+    删除在这个实例上是**延迟删除**,GitLab 会立刻把项目改名(`<原名>-deletion_scheduled-<id>`),
+    名字当场释放,而项目在保留期内仍可恢复。加上这个仓一个提交都没有,没有任何东西可失去。
+    """
+    _api("DELETE", f"projects/{project_id}", target=target)
 
 
 def archive_project(project_id: int | str, target: UploadTarget) -> None:
