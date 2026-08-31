@@ -327,6 +327,34 @@ def test_an_author_who_never_signed_in_gets_a_user_row(client, ivc_category):
         assert skill.creator_label == "New Guy"  # 卡片上显示人名
 
 
+def test_an_imported_author_is_not_counted_as_having_signed_in(client, ivc_category):
+    """导入建的账号行必须标 ``origin='import'``。
+
+    ``rp_ai_portal`` 的行在这一列加上来之前全都是首次登录时建的，所以报告把「表里有一行」
+    读成「这个人用过门户」（figures.py 的 ever_signed_in）。同步在这里打破了那个等价：
+    这些人从未登录，行只是为了把他们的技能挂到一个部门上。默认值是 ``login``，所以不显式
+    写就会让「曾登录过的人数」凭空多出 IVC 那 5 个从未登录的作者。
+    """
+    from app.models.user import RpAiPortal
+
+    _sync(client, {"skills": [_skill(author="enewguy", display_name="New Guy")], "agents": []})
+    with SessionLocal() as db:
+        assert db.query(RpAiPortal).filter(RpAiPortal.eid == "ENEWGUY").first().origin == "import"
+
+
+def test_syncing_does_not_demote_someone_who_really_signed_in(client, ivc_category):
+    """已经登录过的人,导入不该把他的行降级成 import ——那会把他从渗透率里除名。"""
+    from app.models.user import RpAiPortal
+
+    with SessionLocal() as db:
+        db.add(RpAiPortal(eid="EPENYAN", display_name="Kelvin Yang", origin="login"))
+        db.commit()
+
+    _sync(client, {"skills": [_skill(author="epenyan", display_name="Kelvin Yang")], "agents": []})
+    with SessionLocal() as db:
+        assert db.query(RpAiPortal).filter(RpAiPortal.eid == "EPENYAN").first().origin == "login"
+
+
 def test_syncing_twice_updates_rather_than_duplicates(client, ivc_category):
     _sync(client, {"skills": [_skill()], "agents": []})
     again = _sync(client, {"skills": [_skill()], "agents": []}).json()

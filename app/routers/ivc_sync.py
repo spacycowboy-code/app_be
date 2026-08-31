@@ -282,11 +282,19 @@ def _ensured_user(db: Session, eid: str, display_name: str | None) -> str:
     ``uploader_eid`` 是指向 ``rp_ai_portal`` 的外键,而索引里 8 位作者有 5 个从未登录过门户。
     不补这一行,同步会因为外键失败;补一个不带人名的空行,卡片上就只能显示工号。上游给了
     ``display_name``,用它。
+
+    ``origin="import"`` 是必须显式写的。这一列的默认值是 ``login``,因为在它加上来之前这张表
+    的每一行都确实是首次登录时建的 —— 而这里正是打破那个等价的地方:这五个人从未登录过门户,
+    他们的行只是为了把 IVC 的技能挂到一个部门、一个组徽章上。不写这个值,报告里「曾登录过的
+    人数」会凭空多五个人,而这恰好是 rp_ai_portal.origin 这一列被加上来要防的事
+    (见 models/user.py::PORTAL_ROW_ORIGINS)。他们哪天真的登录了,``auth._upsert_user`` 会把
+    这一行提升成 ``login``,所以这里写 import 不会永久把人关在渗透率之外。
     """
     row = db.query(RpAiPortal).filter(RpAiPortal.eid == eid).first()
     if row is None:
-        db.add(RpAiPortal(eid=eid, display_name=display_name or eid))
+        db.add(RpAiPortal(eid=eid, display_name=display_name or eid, origin="import"))
         db.flush()
     elif display_name and (not row.display_name or row.display_name == eid):
+        # 已有的行不动 origin:它可能是真的登录建的,导入不该把它降级。
         row.display_name = display_name
     return eid
