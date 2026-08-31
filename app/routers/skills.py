@@ -1,4 +1,5 @@
 """Skill endpoints: browse, detail, create, update, delete."""
+import hashlib
 import io
 import re
 import uuid
@@ -7,8 +8,18 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -27,6 +38,7 @@ from app.models.download import RpAiSkillDownload
 from app.repositories import skill_content
 from app.schemas.skill import (
     SkillCreate,
+    SkillImageState,
     SkillRead,
     SkillSummary,
     SkillUpdate,
@@ -41,6 +53,8 @@ from app.services.archives import common_top_dir
 from app.services.card_group import groups_for_eids
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
+from app.services import reporting_windows
+from app.services import skill_image
 from app.services.audit_engine import AuditResult, audit_skill
 from app.services.skill_audit import gate
 from app.services.skill_audit import pending as pending_updates
@@ -468,6 +482,13 @@ async def update_skill(
         cat = db.get(RpAiCategory, skill.category_id)
         if cat:
             skill.category = cat.label
+        # 部门默认图也要跟着换。原来这里只刷新了 ``category`` 标签,于是把技能挪到别的部门之后,
+        # 卡片上还挂着**原部门**的图,而界面上没有任何地方能纠正它(封面图此前完全不可编辑)。
+        #
+        # 两个例外都不动:作者传过自己的封面图(那是他的选择,不该被换组悄悄覆盖),或者这次请求
+        # 显式带了 image(调用方指定的优先)。
+        if not skill.has_custom_image and "image" not in scalar_data:
+            skill.image = skill_image.category_image(skill.category_id)
     _apply_children(skill, payload)
 
     # If the raw SKILL.md was edited directly, it is the source of truth:
@@ -649,6 +670,146 @@ async def update_skill(
     # 由 main.py 的处理器答成 409/503,数据库那一行还没写(顺序是先仓库后数据库)。
     # `synced` 字段保留(前端在读),但它现在恒为真;原来那条 sync_warning 分支不可达。
     skill.synced = result.pushed
+    return skill
+
+
+# --- 封面图 -----------------------------------------------------------------
+#
+# 这三个端点**刻意不复用 update_skill**。那条路每次都会重跑一次安全审计、升版本、往 GitLab
+# 提交打 tag、写一行版本历史、并通知所有收藏者"已更新到 vX";而且审计判 suspect 时整份改动会被
+# 暂存进待复核表,于是图片改动根本不生效。为换一张封面付这些代价是错的:封面是展示元数据,不是
+# 技能内容,它变了没有任何人需要重新安装。
+#
+# 所以这里只写那三列,不碰 version / repo_commit / status / audit_* ,也不发通知。
+
+
+def _require_image_owner(
+    skill: RpAiSkill, request: Request, x_user_eid: str | None
+) -> str:
+    """只有上传者本人和管理员能改封面图。返回调用者 EID。
+
+    照 delete_skill / market 那边的规矩:身份取已验证的调用者,不是调用方能随便填的请求头。
+    ``uploader_eid`` 为空时**不放行** —— 官方导入的技能就是没有上传者的,放行等于任何登录用户
+    都能改它们的封面。
+    """
+    requester = acting_eid(request, x_user_eid)
+    if requester == settings.audit_admin_eid:
+        return requester
+    if requester != skill.uploader_eid:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有上传者本人或管理员可以修改封面图"
+            if skill.uploader_eid
+            else "这个技能没有登记上传者,只有管理员可以修改封面图",
+        )
+    return requester
+
+
+@router.put("/{skill_id}/image", response_model=SkillImageState)
+async def set_skill_image(
+    skill_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiSkill:
+    """换掉这个技能的封面图。PUT 而非 POST:同一张图重传两次结果相同。"""
+    skill = _get_skill_or_404(db, skill_id)
+    _require_image_owner(skill, request, x_user_eid)
+
+    # 按块读并累计,不用 `await file.read()` 一口吞下整个 body。注意这拦的是进程内存:
+    # python-multipart 在进到这个函数之前已经把请求体落到临时文件了,真正的传输上限属于边缘
+    # (nginx client_max_body_size)。所以这道闸门的意义是"库里不会出现超限的行",不是省带宽。
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > skill_image.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"图片不能超过 {skill_image.MAX_UPLOAD_BYTES // 1024} KB",
+            )
+        chunks.append(chunk)
+
+    # 解码 + 重新编码是 CPU 活,别占着事件循环(一张 4000px 的图能跑上百毫秒)。
+    try:
+        data, mime = await run_in_threadpool(
+            lambda: skill_image.normalize(b"".join(chunks))
+        )
+    except skill_image.InvalidImage as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    skill.image_blob = data
+    skill.image_mime = mime
+    # 用库的时钟,不用 datetime.utcnow():这一列和 created_at/updated_at 一样存 DB 本地的 naive
+    # 值(那台库是 UTC+2),混用两个时钟正是 audit.py 里记着的那个坑。utcnow() 另外在 3.12 起已弃用。
+    skill.image_updated_at = reporting_windows.db_now()
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
+def _image_etag(skill: RpAiSkill) -> str:
+    """强 ETag。图变了 ``image_updated_at`` 一定变,所以它足够做版本标识。"""
+    stamp = skill.image_updated_at.isoformat() if skill.image_updated_at else "0"
+    return '"' + hashlib.sha256(f"{skill.id}:{stamp}".encode()).hexdigest()[:32] + '"'
+
+
+@router.get("/{skill_id}/image")
+def get_skill_image(
+    skill_id: str, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    """返回作者上传的封面图。没有自定义图就是 404 —— 前端据此回落到部门默认图。
+
+    这里**不做**内容协商也不做缩略图:存进来的时候已经归一化过(≤1024px、无 EXIF、格式限定在
+    PNG/JPEG/WebP),所以直接吐字节。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    if not skill.has_custom_image:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "这个技能没有自定义封面图"
+        )
+
+    etag = _image_etag(skill)
+    headers = {
+        "ETag": etag,
+        # 一分钟的陈旧度换掉市场页几十张图的重复请求;配合 ETag,换图之后最多一分钟就刷新,
+        # 而且刷新是一次 304 不是一次重传。
+        "Cache-Control": "private, max-age=60, must-revalidate",
+        # 这是用户提供过的内容,即使已经重新编码过也不给浏览器自己猜类型的机会。
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": "inline",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+
+    # image_blob 是 deferred 的,这一句才真的把字节读出来 —— 也只有这条路径需要它。
+    return Response(content=skill.image_blob, media_type=skill.image_mime, headers=headers)
+
+
+@router.delete("/{skill_id}/image", response_model=SkillImageState)
+def clear_skill_image(
+    skill_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiSkill:
+    """删掉自定义封面图,回落到部门默认图。
+
+    顺手把 ``image`` 重新按当前部门派一次:这一行原本可能还留着旧部门的图(见 update_skill
+    里那处修复),而作者点"移除封面图"时期望看到的是**现在这个部门**该有的那张。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    _require_image_owner(skill, request, x_user_eid)
+    skill.image_blob = None
+    skill.image_mime = None
+    skill.image_updated_at = None
+    skill.image = skill_image.category_image(skill.category_id or "")
+    db.commit()
+    db.refresh(skill)
     return skill
 
 

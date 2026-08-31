@@ -46,22 +46,11 @@ from app.services.skill_audit import pending as pending_updates
 from app.services.audit_report import build_checks
 from app.repositories import skill_content
 from app.services import gitlab_mr
+from app.services import skill_image
 from fastapi.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/api/skills", tags=["upload"])
 settings = get_settings()
-
-
-def _category_image(category_id: str) -> str:
-    """Frontend image asset for a category group."""
-    # The 'public' group has no dedicated image; reuse tavily art.
-    slug = category_id or "product-system"
-    if slug == "public":
-        return "skill-images/tavily.jpg"
-    # AI team group has no dedicated art; use the shared default image.
-    if slug == "ai-team":
-        return "skill-images/default.png"
-    return f"skill-images/{slug}.jpg"
 
 
 def _slugify(text: str) -> str:
@@ -381,8 +370,10 @@ async def upload_skill(
     skill.author = owner_eid or eid
     skill.category = category_label
     skill.category_id = category_id
-    # Auto-assign the image for this skill's group.
-    skill.image = _category_image(category_id)
+    # Auto-assign the image for this skill's group. 作者上传后可以用
+    # PUT /api/skills/{id}/image 换成自己的图;那条路只写 image_blob,不动这一列,所以
+    # 删掉自定义图之后还能回落到这里派的这一张。
+    skill.image = skill_image.category_image(category_id)
     if parsed_tags:
         skill.tags = parsed_tags
     # 不再写 instructions 这一列:正文的权威在仓库,详情接口按引用读。留着写会长出第二份会漂的
