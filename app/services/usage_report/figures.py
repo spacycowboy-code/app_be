@@ -222,17 +222,28 @@ def collect(conn: Connection) -> list[Metric]:
     # rp_ai_portal gains a row the first time someone signs in (auth.py), so it
     # is the full history of who has ever used the portal. rp_ai_login_event was
     # added later and is the only source for *how often*.
+    #
+    # The origin filter is what keeps the first sentence true. A row can now also
+    # be created by an import, to register work by someone who has never signed
+    # in — see models/user.py. Those rows are deliberately still counted
+    # everywhere else (build_people places their contributions in a department,
+    # and the card group badge reads their department), because none of that is a
+    # claim about signing in. This metric is, so this metric filters.
     add(
         Metric(
             "ever_signed_in",
             "曾登录过的人数",
             "首次登录",
             "用户表的行在首次登录时创建，所以这是「累计有多少人用过门户」，"
-            "口径最长、最适合看覆盖面。它没有次数，只有每人一次的首登记录。",
-            per_eid=_tally(conn, "select eid, 1 from rp_ai_portal"),
+            "口径最长、最适合看覆盖面。它没有次数，只有每人一次的首登记录。"
+            "导入登记的账号行不算在内——那些人没有登录过。",
+            per_eid=_tally(
+                conn, "select eid, 1 from rp_ai_portal where origin = 'login'"
+            ),
             countable=False,
         ),
         "rp_ai_portal",
+        where="origin = 'login'",
     )
     add(
         Metric(

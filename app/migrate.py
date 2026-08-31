@@ -63,6 +63,12 @@ COLUMNS = [
     # Department snapshots for group-level reporting (see services/usage.py).
     ("rp_ai_skill_download", "department", "VARCHAR(64) NULL"),
     ("rp_ai_market_download", "department", "VARCHAR(64) NULL"),
+    # How the row got here: 'login' (first sign-in) or 'import'. NOT NULL with a
+    # default so the rows that predate the column need no backfill — every one of
+    # them was created on a sign-in, which is the whole reason ever_signed_in
+    # could read this table as "people who have used the portal".
+    # See models/user.py::PORTAL_ROW_ORIGINS.
+    ("rp_ai_portal", "origin", "VARCHAR(16) NOT NULL DEFAULT 'login'"),
 ]
 
 
