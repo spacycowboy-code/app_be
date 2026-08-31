@@ -145,8 +145,27 @@ class PendingUpdateRead(CamelModel):
     created_at: datetime | None = None
 
 
+class SkillImageState(CamelModel):
+    """封面图端点的返回形状 —— 刻意只有这三个字段。
+
+    不返回完整的 ``SkillRead``:那些写端点返回的是一个"裸"技能行,``favoriteCount`` 是 0、
+    ``group`` 和 ``pendingUpdate`` 是空(它们由 get_skill 里的辅助函数另外附上)。前端若拿它
+    整体替换本地对象,收藏数就会在界面上被冲成 0 直到下次刷新。窄返回让这件事不可能发生:
+    调用方只能拿到"图现在是什么",也只需要这个。
+    """
+
+    id: str
+    #: 部门默认图的静态资源路径,始终有值。
+    image: str | None = None
+    #: 为真时前端应该指向 GET /api/skills/{id}/image;为假时用上面那个路径。
+    has_custom_image: bool = False
+
+
 class SkillRead(SkillBase, SkillDerived):
     id: str
+    # 作者传过自己的封面图吗。为真时前端应该指向 GET /api/skills/{id}/image;为假时用上面
+    # ``image`` 那个部门默认图的静态路径。不把字节放进 JSON:那会让每次列表/详情都多传几百 KB。
+    has_custom_image: bool = False
     cases: list[SkillCaseSchema] = Field(default_factory=list)
     sub_skills: list[SubSkillSchema] = Field(default_factory=list)
     input_params: list[InputParamSchema] = Field(default_factory=list)
@@ -182,6 +201,8 @@ class SkillSummary(CamelModel):
     category: str | None = None
     category_id: str | None = None
     image: str | None = None
+    # 同 SkillRead.has_custom_image —— 市场卡片就是靠它决定图片指哪。
+    has_custom_image: bool = False
     rating: float = 0.0
     downloads: str = "0"
     is_trending: bool = False

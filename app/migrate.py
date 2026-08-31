@@ -26,6 +26,12 @@ COLUMNS = [
     # 当前发布的这一版对应的审计记录 id。见 models/skill.py:同一秒里的两条记录分不出先后,
     # 所以"哪条结论描述现在这一版"要记下来,不能靠排序猜。
     ("rp_ai_skill", "audit_ref", "VARCHAR(32) NULL"),
+    # 作者自己上传的封面图(见 models/skill.py 里为什么存库而不是存宿主机目录)。
+    # MEDIUMBLOB 而不是 BLOB:后者上限 64 KB,会把一张普通截图直接截断,而截断的图片在库里
+    # 是"存住了"、在页面上是坏图 —— 这种失败最难查。上限 16 MB 远大于端点的 512 KB 闸门。
+    ("rp_ai_skill", "image_blob", "MEDIUMBLOB NULL"),
+    ("rp_ai_skill", "image_mime", "VARCHAR(64) NULL"),
+    ("rp_ai_skill", "image_updated_at", "DATETIME NULL"),
     ("rp_ai_skill_audit_record", "judge_model", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "rules_hash", "VARCHAR(64) NULL"),
     ("rp_ai_skill_finding", "rule_id", "VARCHAR(120) NULL"),
