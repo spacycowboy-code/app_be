@@ -55,6 +55,12 @@ class MarketItemRead(CamelModel):
     is_trending: bool = False
     verified: bool = False
     creator: str | None = None
+    # The name to show as the creator. ``author`` holds the uploader's EID on the
+    # package-upload path, so a card that rendered it printed a bare EID next to
+    # cards showing real names; this is the resolved label (see
+    # ``RpAiMarketItem.creator_label``) and is what the card should display.
+    creator_label: str | None = None
+    uploader_name: str | None = None
     # pending | approved | rejected. Only approved items are visible to others;
     # the field is on the read model so the uploader's own card can say so.
     status: str = "approved"

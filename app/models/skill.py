@@ -124,6 +124,24 @@ class RpAiSkill(TimestampMixin, Base):
     # 老数据是 NULL,收敛器对它们仍按时间倒序取最新一条。
     audit_ref: Mapped[str | None] = mapped_column(String(32))
 
+    # --- 外部托管 ------------------------------------------------------------
+    # 内容不在门户的仓库里,而在别人那儿。第一个来源是 IVC 的 Nexus,它对生产机房整段 TCP
+    # 不可达(ICMP 通而 22/80/443/8081/8443 全部静默超时,且无代理),所以门户拿不到包体,只能
+    # 登记目录并把下载转过去 —— 用户的浏览器在工位网段上是能访问它的。
+    #
+    # 为什么不复用 ``storage_path`` + ``repo_commit``:那两个字段的含义是"内容在我们的仓库里
+    # 的哪个位置、哪一版",下载路径据此真的去读字节。往里塞一个外部 URL 会让"门户存了这份
+    # 内容"这句话在一部分行上悄悄变成假的,而调用方无法分辨。
+    #
+    # 为空即普通技能。老数据全部为空,所以既有读法不受影响。
+    external_url: Mapped[str | None] = mapped_column(String(1024))
+    external_source: Mapped[str | None] = mapped_column(String(32))
+
+    @property
+    def externally_hosted(self) -> bool:
+        """内容在别处,下载要转出去。"""
+        return bool(self.external_url)
+
     @property
     def has_custom_image(self) -> bool:
         """作者传过自己的封面图吗。

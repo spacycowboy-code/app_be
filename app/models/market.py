@@ -19,6 +19,7 @@ from app.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.market_version import RpAiMarketItemVersion
+    from app.models.user import RpAiPortal
 
 ITEM_TYPES = ("tool", "agent", "ai-platform")
 SERVICE_TYPES = ("code", "cloud")
@@ -107,3 +108,40 @@ class RpAiMarketItem(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="RpAiMarketItemVersion.id",
     )
+
+    # Read-only join on the EID string. ``creator`` carries no foreign key (a
+    # GitLab-synced item has no creator at all, and an EID that never signed in
+    # has no user row), so this is ``viewonly`` and must tolerate finding nothing.
+    creator_user: Mapped["RpAiPortal | None"] = relationship(
+        primaryjoin="RpAiMarketItem.creator == RpAiPortal.eid",
+        foreign_keys="RpAiMarketItem.creator",
+        viewonly=True,
+        lazy="selectin",
+    )
+
+    @property
+    def uploader_name(self) -> str | None:
+        """The creator's LDAP display name, from the linked user row."""
+        user = self.creator_user
+        return user.display_name if user else None
+
+    @property
+    def creator_label(self) -> str | None:
+        """The name to show as this item's creator.
+
+        Mirrors ``RpAiSkill.creator_label`` deliberately, because the two markets
+        show the same thing in the same place and two rules would drift. The
+        package-upload path writes the uploader's EID into ``author`` while the
+        manual-registration form lets someone type a real name, so a card showed
+        ``Shawn Xiao`` beside ``EWNGFEI`` — same field, two meanings. Resolving it
+        here rather than in the template keeps that decision in one place.
+
+        When ``author`` differs from the creator's EID it is a label a person
+        chose (``Anthropic``, ``AI Team``, ``RTE RU SW``) and is shown verbatim;
+        otherwise it is just the EID, so the display name is preferred and the EID
+        is the fallback — an unresolvable EID still answers "who uploaded this",
+        an empty label does not.
+        """
+        if self.author and self.author != self.creator:
+            return self.author
+        return self.uploader_name or self.creator

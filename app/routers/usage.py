@@ -266,6 +266,7 @@ def list_tools(
             RpAiUsageEvent.eid == subject,
             RpAiUsageEvent.created_at >= since,
             RpAiUsageEvent.verb.in_([VERB_TOOL_RUN, VERB_TOOL_OPEN]),
+            _object_still_listed(),
         )
         .group_by(RpAiUsageEvent.object_type, RpAiUsageEvent.object_id)
     ).all()
@@ -284,6 +285,27 @@ def list_tools(
     ]
     out.sort(key=lambda t: (t.runs, t.opens, t.last_used_at), reverse=True)
     return out
+
+
+def _object_still_listed():  # noqa: ANN201 - SQLAlchemy expression
+    """True when the thing a usage event describes is still on the market.
+
+    Usage events outlive their subject on purpose: ``rp_ai_usage_event`` carries no
+    foreign key to ``rp_ai_market_item``, and stores ``object_name`` as it was, so a
+    report can still name something that has since gone. The side effect is that a
+    deleted agent keeps accumulating opens and runs in every count derived from this
+    table, which is what this predicate stops.
+
+    Only ``market_item`` rows are checked. ``object_type = 'tool'`` names a built-in
+    portal tool page, which has no row in ``rp_ai_market_item`` and never had one —
+    requiring existence for those would drop every event for the portal's own pages.
+    """
+    return (RpAiUsageEvent.object_type != OBJECT_MARKET_ITEM) | select(
+        RpAiMarketItem.id
+    ).where(
+        RpAiMarketItem.id == RpAiUsageEvent.object_id,
+        RpAiMarketItem.status == "approved",
+    ).exists()
 
 
 def _case_when(condition):  # noqa: ANN001,ANN201 - SQLAlchemy expression
@@ -377,14 +399,20 @@ def usage_report(
     # EID and a timestamp only, by design, so attributing one to a group would
     # mean joining today's department onto a past sign-in.
     group_counts: dict[str, int] = {}
-    for table, ts in (
-        (RpAiSkillDownload, RpAiSkillDownload.created_at),
-        (RpAiMarketDownload, RpAiMarketDownload.created_at),
-        (RpAiUsageEvent, RpAiUsageEvent.created_at),
+    # The third table needs one extra condition the other two do not: usage events
+    # survive the deletion of the market item they describe, so counting them raw
+    # would credit a group for opening something that is no longer on the market.
+    for table, ts, extra in (
+        (RpAiSkillDownload, RpAiSkillDownload.created_at, None),
+        (RpAiMarketDownload, RpAiMarketDownload.created_at, None),
+        (RpAiUsageEvent, RpAiUsageEvent.created_at, _object_still_listed()),
     ):
+        conditions = [ts >= since, ts < until]
+        if extra is not None:
+            conditions.append(extra)
         for dept, count in db.execute(
             select(table.department, func.count())
-            .where(ts >= since, ts < until)
+            .where(*conditions)
             .group_by(table.department)
         ).all():
             label = resolve_group(dept) or "unmapped"
@@ -397,10 +425,16 @@ def usage_report(
     active_groups = len([k for k in group_counts if k != "unmapped"])
 
     # --- Assets added ---
+    # Both counts are narrowed to what is on the market now. A skill taken down is
+    # ``archived``, not removed, so an unfiltered count would keep reporting it as an
+    # asset the reader cannot find in the portal; ``pending`` and ``rejected`` were
+    # never visible to anybody.
     skills_added = (
         db.scalar(
             select(func.count(RpAiSkill.id)).where(
-                RpAiSkill.created_at >= since, RpAiSkill.created_at < until
+                RpAiSkill.created_at >= since,
+                RpAiSkill.created_at < until,
+                RpAiSkill.status == "approved",
             )
         )
         or 0
@@ -408,7 +442,9 @@ def usage_report(
     items_added = (
         db.scalar(
             select(func.count(RpAiMarketItem.id)).where(
-                RpAiMarketItem.created_at >= since, RpAiMarketItem.created_at < until
+                RpAiMarketItem.created_at >= since,
+                RpAiMarketItem.created_at < until,
+                RpAiMarketItem.status == "approved",
             )
         )
         or 0
@@ -471,11 +507,22 @@ def usage_report(
 
     # Assets that existed before the window closed and were not downloaded in
     # it. The candidate list for retirement, which the top-N list cannot show.
+    # Narrowed to what is still listed: a taken-down skill is not a retirement
+    # candidate, it is already retired, and counting it here would inflate the very
+    # number that is supposed to drive take-downs.
     total_assets = (
-        db.scalar(select(func.count(RpAiSkill.id)).where(RpAiSkill.created_at < until)) or 0
+        db.scalar(
+            select(func.count(RpAiSkill.id)).where(
+                RpAiSkill.created_at < until, RpAiSkill.status == "approved"
+            )
+        )
+        or 0
     ) + (
         db.scalar(
-            select(func.count(RpAiMarketItem.id)).where(RpAiMarketItem.created_at < until)
+            select(func.count(RpAiMarketItem.id)).where(
+                RpAiMarketItem.created_at < until,
+                RpAiMarketItem.status == "approved",
+            )
         )
         or 0
     )
@@ -487,6 +534,7 @@ def usage_report(
                 RpAiUsageEvent.verb == VERB_INSTALL_COPIED,
                 RpAiUsageEvent.created_at >= since,
                 RpAiUsageEvent.created_at < until,
+                _object_still_listed(),
             )
         )
         or 0

@@ -19,6 +19,7 @@ from app.routers import (
     comments,
     favorites,
     gerrit_sync,
+    ivc_sync,
     login_stats,
     market,
     market_favorites,
@@ -219,6 +220,7 @@ app.include_router(upload.router)
 app.include_router(audit.router)
 app.include_router(skill_import.router)
 app.include_router(gerrit_sync.router)
+app.include_router(ivc_sync.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
