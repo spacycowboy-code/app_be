@@ -53,6 +53,7 @@ from app.services.archives import common_top_dir
 from app.services.card_group import groups_for_eids
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
+from app.services import asset_content
 from app.services import reporting_windows
 from app.services import skill_image
 from app.services.audit_engine import AuditResult, audit_skill
@@ -73,6 +74,9 @@ def _read_skill_md(skill: RpAiSkill) -> str:
     **读不到就 503,不回落到 `skill.instructions`。** 那一列是同一份正文的第二份副本,
     回落等于把可能过期的内容当成当前版本拿去编辑或审计,而且从响应上看不出来。
     生产 22 个技能的 `storage_path` 与 `repo_commit` 都有值,所以这条回落对现存数据从不生效。
+
+    内容住在哪个上游由 `asset_content` 按 `storage_path` 的前缀分派 —— 从 Gerrit 同步来的
+    技能内容在别人的仓里,而这里的调用方不需要知道这件事。
     """
     if not skill.storage_path or not skill.repo_commit:
         raise HTTPException(
@@ -80,10 +84,8 @@ def _read_skill_md(skill: RpAiSkill) -> str:
             detail="这个技能没有记下内容在仓库里的位置或版本,无法读取正文",
         )
     try:
-        return skill_content.read_text(
-            skill.repo_commit, f"{skill.storage_path}/SKILL.md"
-        )
-    except skill_content.ContentUnavailable as exc:
+        return asset_content.read_text(skill.storage_path, skill.repo_commit, "SKILL.md")
+    except asset_content.ContentUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="暂时读不到技能内容,请稍后重试",
@@ -376,8 +378,8 @@ def download_skill(
             "这个技能没有记下内容在仓库里的位置或版本,无法下载",
         )
     try:
-        tree = skill_content.read_tree(skill.repo_commit, skill.storage_path)
-    except skill_content.ContentUnavailable as exc:
+        tree = asset_content.read_tree(skill.storage_path, skill.repo_commit)
+    except asset_content.ContentUnavailable as exc:
         # 原来这里会用 skill.instructions 合成一个只有 SKILL.md 的 zip。那是同一份正文的第二份
         # 副本,而且下载下来的包看不出它缺了脚本和附件 —— 用户会以为自己拿到了完整的技能。
         raise HTTPException(
@@ -461,6 +463,25 @@ def create_skill(payload: SkillCreate, db: Session = Depends(get_db)) -> RpAiSki
     return skill
 
 
+def _refuse_if_synced(skill: RpAiSkill) -> None:
+    """从上游同步来的技能在门户里是只读的。
+
+    门户是 Gerrit 上 ``radio/ai-assets`` 的**下游**。在这里改或下架有两层问题:一层是徒劳 ——
+    下一次同步会照上游的内容写回来;另一层是真会弄坏东西 —— 这两条路径都会拿
+    ``storage_path`` 当"门户自己那个技能仓里的路径"去写,而同步来的值是 ``gerrit:skill/xxx``,
+    于是 ``skill_storage`` 会在门户的仓里造一个名叫 ``gerrit:skill`` 的目录,或者试图去删一份
+    那里根本不存在的内容。
+
+    所以这里明确拒绝,并说清该去哪改。要真的下架一个同步来的技能,得先从上游那个仓里去掉。
+    """
+    if asset_content.is_gerrit(skill.storage_path):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能是从 Gerrit 的 radio/ai-assets 同步来的,门户只是它的只读下游 —— "
+            "在这里的修改会被下一次同步覆盖回去。请改上游那个仓。",
+        )
+
+
 @router.put("/{skill_id}", response_model=SkillRead)
 async def update_skill(
     skill_id: str, payload: SkillUpdate, request: Request, db: Session = Depends(get_db)
@@ -468,6 +489,7 @@ async def update_skill(
     # Who is editing is the signed-in caller, not a field in the body (see acting_eid).
     editor_eid = acting_eid(request, payload.editor_eid)
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     scalar_data = payload.model_dump(
         exclude_unset=True,
         exclude={"cases", "sub_skills", "input_params", "editor_eid", "skill_md"},
@@ -833,6 +855,7 @@ def delete_skill(
     可以下架。原来这个接口**没有任何鉴权**,任何人可以删任何技能。
     """
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
     # `uploader_eid` 为空时**不放行** —— 官方导入的技能就是没有上传者的,而原来的写法
