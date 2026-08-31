@@ -69,6 +69,11 @@ COLUMNS = [
     # could read this table as "people who have used the portal".
     # See models/user.py::PORTAL_ROW_ORIGINS.
     ("rp_ai_portal", "origin", "VARCHAR(16) NOT NULL DEFAULT 'login'"),
+    # Change detector for assets synced from a git tree: the sha of the asset's
+    # own directory. Distinct from repo_commit / last_activity on purpose — see
+    # the column comments in models/skill.py and models/market.py.
+    ("rp_ai_skill", "content_sha", "VARCHAR(64) NULL"),
+    ("rp_ai_market_item", "content_sha", "VARCHAR(64) NULL"),
     # 外部托管的技能:内容在别人的仓库里,门户只登记它并把下载转过去。第一个来源是 IVC 的
     # Nexus —— 它对生产机房整段 TCP 不可达(ICMP 通、22/80/443/8081/8443 全部静默超时、无代理
     # 配置),所以门户拿不到包体,只拿得到目录。``external_url`` 为空即普通技能,老数据全部为空,

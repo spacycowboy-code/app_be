@@ -18,6 +18,7 @@ from app.routers import (
     categories,
     comments,
     favorites,
+    gerrit_sync,
     ivc_sync,
     login_stats,
     market,
@@ -102,6 +103,10 @@ AUTH_WHITELIST = {
     "/api/auth/login",
     "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
     "/api/skills/import-official",  # official-skill sync CI — skill_import_token
+    # Gerrit radio/ai-assets sync — gerrit_sync_token. Called by a scheduled job,
+    # not a signed-in person: making it carry a JWT would mean issuing a session
+    # that can do everything else too.
+    "/api/integrations/gerrit/ai-assets/sync",
 }
 
 
@@ -214,6 +219,7 @@ app.include_router(skills.router)
 app.include_router(upload.router)
 app.include_router(audit.router)
 app.include_router(skill_import.router)
+app.include_router(gerrit_sync.router)
 app.include_router(ivc_sync.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)

@@ -22,6 +22,33 @@ class Settings(BaseSettings):
     # ingest, called by the rp-ai-skill sync CI). Empty = endpoint disabled.
     skill_import_token: str = ""
 
+    # --- Gerrit: the RSW / RA shared asset repository -----------------------
+    # radio/ai-assets on gerrit-sigma holds skill/, agent/ and tool/ assets,
+    # each a directory with a manifest.yaml. The portal is a read-only consumer.
+    #
+    # Credentials are a Gerrit HTTP password (Settings -> HTTP Credentials),
+    # NOT a domain password, and must belong to a service account: a personal
+    # one breaks when that person rotates it, and files every read in the
+    # directory under their name. The SSH port (29418) accepts publickey only,
+    # so HTTPS Basic is the only option here.
+    gerrit_base_url: str = "https://gerrit-sigma.gic.ericsson.se"
+    gerrit_http_user: str = ""
+    gerrit_http_password: str = ""
+    gerrit_assets_project: str = "radio/ai-assets"
+    gerrit_assets_branch: str = "master"
+    # Same trade-off as ldap_verify_tls: the internal chain is incomplete and
+    # verifying would take the whole feature down.
+    gerrit_verify_tls: bool = False
+    # Bearer token guarding POST /api/integrations/gerrit/ai-assets/sync.
+    # Empty = endpoint disabled, same shape as skill_import_token.
+    gerrit_sync_token: str = ""
+    # Where an asset lands when its manifest ``owner`` resolves to nobody in the
+    # directory. A team name ("radio-ai-platform") or a person the directory has
+    # no entry for still has to be attributed to somebody, or the asset falls out
+    # of every department count. Their manager is the honest answer; the card
+    # still shows the manifest's own owner text as the author.
+    gerrit_owner_fallback_eid: str = "ECUIDEN"
+
     # Comma-separated list of allowed CORS origins.
     cors_origins: str = "http://localhost:4200"
 

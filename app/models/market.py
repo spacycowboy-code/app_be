@@ -81,6 +81,10 @@ class RpAiMarketItem(TimestampMixin, Base):
     response_time: Mapped[str | None] = mapped_column(String(32))
     # ISO timestamp of the last update (GitLab last_activity_at for synced items).
     last_activity: Mapped[str | None] = mapped_column(String(40))
+    # Git object sha of this asset's own directory, for items synced from a git
+    # tree (see services/gerrit_assets). Only a change detector — deliberately
+    # not ``last_activity``, which is a timestamp the card renders.
+    content_sha: Mapped[str | None] = mapped_column(String(64))
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # EID of the user who manually created this item (None for GitLab-synced).

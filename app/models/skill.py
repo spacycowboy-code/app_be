@@ -99,9 +99,21 @@ class RpAiSkill(TimestampMixin, Base):
 
     # --- storage (git repo) -------------------------------------------------
     # Relative path within the skill repo, e.g. "public/tavily_ezhgmio_Tavily".
+    # A ``gerrit:`` prefix means the content lives in the Gerrit asset repository
+    # instead; ``services/asset_content`` dispatches on it.
     storage_path: Mapped[str | None] = mapped_column(String(512))
-    # Latest git commit sha that stored this skill.
+    # Latest git commit sha that stored this skill. Reads resolve paths against
+    # it, so it MUST be a commit — not a tree.
     repo_commit: Mapped[str | None] = mapped_column(String(64))
+    # Git object sha of this skill's own directory, for synced skills only.
+    #
+    # Separate from ``repo_commit`` because they answer different questions: that
+    # one is "which version do I read paths against" (a commit, repo-wide), this
+    # one is "did *this* asset's bytes change" (a tree, per directory). Using the
+    # commit for both would mark all synced assets changed on every upstream
+    # commit and bump every card's timestamp; using the tree for both makes path
+    # reads 404, because a tree sha is not something a path resolves against.
+    content_sha: Mapped[str | None] = mapped_column(String(64))
     # Security-audit derived state: pass | suspect (danger is never stored).
     audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
     # 描述**当前发布内容**的那条审计记录(``rp_ai_skill_audit_record.id``)。
