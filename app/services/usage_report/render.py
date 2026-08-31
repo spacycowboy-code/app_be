@@ -88,6 +88,12 @@ class Person:
     eid: str
     dept: Dept
     source: str
+    #: Whether this person's account row was created by them signing in.
+    #: False for a row an import created to register work on someone's behalf
+    #: (``rp_ai_portal.origin``). Such a person still belongs to a department and
+    #: their assets still count — what must not happen is a head count or a
+    #: penetration rate claiming they used the portal.
+    signed_in: bool = True
 
 
 def build_people(
@@ -105,8 +111,19 @@ def build_people(
     tell a colleague who has never signed in from a test row, and it cannot tell
     this service's own directory bind account from a person, which is why that one
     is excluded by matching configuration rather than by name.
+
+    Deliberately not *dropping* rows by ``origin``: a row created by an import
+    belongs to a real person whose contributions have to land in a department, and
+    that is a different question from whether they ever signed in. Filtering them
+    out here would silently push their work into "无法归属". What the origin does
+    is set ``Person.signed_in``, so the head counts and the penetration rate can
+    leave them out while the asset counts keep them.
     """
-    rows = list(conn.execute(text("select eid, display_name, department from rp_ai_portal")))
+    rows = list(
+        conn.execute(
+            text("select eid, display_name, department, origin from rp_ai_portal")
+        )
+    )
     on_tree = {
         str(rec.get("signum") or signum).strip().upper()
         for signum, rec in tree.get("people", {}).items()
@@ -116,13 +133,14 @@ def build_people(
     people: dict[str, Person] = {}
     excluded: dict[str, str] = {}
     provenance: dict[str, int] = defaultdict(int)
-    for raw_eid, name, db_dept in rows:
+    for raw_eid, name, db_dept, row_origin in rows:
         eid = (raw_eid or "").strip().upper()
         if not eid:
             continue
+        signed_in = (row_origin or "login").strip().lower() != "import"
         known = identities.get(eid, {})
         if eid in on_tree:
-            people[eid] = Person(eid, parse(db_dept), "org tree")
+            people[eid] = Person(eid, parse(db_dept), "org tree", signed_in)
             provenance["组织树"] += 1
             continue
         if eid == bind:
@@ -139,11 +157,11 @@ def build_people(
             if not is_person:
                 excluded[eid] = why
                 continue
-            people[eid] = Person(eid, dept, why)
+            people[eid] = Person(eid, dept, why, signed_in)
             provenance["身份快照"] += 1
             continue
         if (name or "").strip() and (db_dept or "").strip():
-            people[eid] = Person(eid, parse(db_dept), "portal row")
+            people[eid] = Person(eid, parse(db_dept), "portal row", signed_in)
             provenance["门户账号行（推断）"] += 1
         else:
             excluded[eid] = "门户账号行里既没有姓名也没有部门，无法确认是个人"
@@ -308,6 +326,11 @@ def aggregate(
         # Two spellings of one unit share a key; keep the more descriptive label.
         if len(label) > len(g.label):
             g.label = label
+        # The department still gets its row and its label from an import-registered
+        # person — that is how their assets find a home below — but they are not
+        # counted as a user of the portal, because they have not used it.
+        if not p.signed_in:
+            continue
         g.users += 1
         if p.eid in active_eids:
             g.active += 1
@@ -732,10 +755,16 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     # Counted over RP's own users only, to match the card beside it. Mixing the two
     # populations put 76 next to 146 and a percentage worked out against 154, so the
     # obvious division came out at 52% and the printed figure said 49%.
+    #
+    # ``signed_in`` is the second filter and it is load-bearing: every sentence this
+    # set feeds says "登录过". An import-registered account row is a real person in
+    # a real department, but counting them here would raise the penetration rate on
+    # the strength of people who have never opened the portal.
     inside_eids = {
         e
         for e, p_ in people.items()
-        if e in placement or p_.dept.small_key.startswith(SCOPE_KEY)
+        if p_.signed_in
+        and (e in placement or p_.dept.small_key.startswith(SCOPE_KEY))
     }
     active = len(active_eids & inside_eids)
     # "用过门户" is cumulative — a row is written the first time somebody signs in and
@@ -804,7 +833,9 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
 """
 
     inside = sum(g.users for g in small.values())
-    outside = len(people) - inside
+    # Same population as ``inside``, or the difference counts import-registered
+    # rows as users who sit outside the organisation.
+    outside = len([p for p in people.values() if p.signed_in]) - inside
 
     tree_as_of = local_time(tree.get("as_of"))
 

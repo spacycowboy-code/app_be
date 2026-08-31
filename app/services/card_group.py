@@ -11,7 +11,10 @@ this label still says CD. The category answers "who is it for", this answers
 
 Where the data comes from
 -------------------------
-``rp_ai_portal.department``, the raw LDAP path written at every sign-in. The
+``rp_ai_portal.department``, the raw LDAP path written at every sign-in — and,
+for people who have never signed in, written once by an import (see
+``models/user.py``). Either way the value is a directory answer, which is all
+this module needs. The
 directory has no location attribute at all — checked for ``officeLocation``,
 ``city``, ``l`` and ``usageLocation``, none is fetched and none is stored — so
 the site has to be read out of the same path as the two department levels:
