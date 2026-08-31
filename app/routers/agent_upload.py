@@ -109,10 +109,10 @@ async def _read_package(file: UploadFile | None, item_type: str) -> bytes:
             status.HTTP_400_BAD_REQUEST, f"包的格式只能是 {wanted}"
         )
     data = await file.read()
-    if len(data) > settings.max_upload_bytes:
+    if len(data) > settings.max_package_upload_bytes:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"包超过 {settings.max_upload_bytes // (1024 * 1024)} MB 上限",
+            f"包超过 {settings.max_package_upload_bytes // (1024 * 1024)} MB 上限",
         )
     return data
 
@@ -126,7 +126,8 @@ def _unpack(
         entries = pkg.extract_safely(
             data,
             tmp / "src",
-            max_bytes=settings.max_upload_bytes,
+            # 解压后的总字节预算,不是上传字节 —— 两者必须是两个数字,见 config.py。
+            max_bytes=settings.max_package_extract_bytes,
             allow=ALLOWED_KINDS[item_type],
         )
     except pkg.PackageRejected as exc:

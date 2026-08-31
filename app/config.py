@@ -58,7 +58,33 @@ class Settings(BaseSettings):
     # 这么找它的。密钥不能有 passphrase:容器里没有 ssh-agent 可以解锁它。
     git_signing_key: str = ""
     # Max upload artifact size in bytes (default 50 MB).
+    #
+    # **这一项现在只管 skill 上传。** tool/agent 的包走下面那两项 —— 它们是两类东西:skill 是
+    # 一份技能定义(文本为主),包是一个完整的项目(可能带模型、样例数据、依赖)。原来两边共用
+    # 这一个数字,于是给包放宽也会连带把 skill 放宽,而没人要求那件事。
     max_upload_bytes: int = 50 * 1024 * 1024
+
+    # --- tool/agent 包上传的两个上限 ------------------------------------------
+    #
+    # 分成两个数字,因为它们卡的是不同的东西:
+    #
+    # `max_package_upload_bytes` 卡**上传上来的字节**(压缩包本身)。
+    # `max_package_extract_bytes` 卡**解压之后的总字节**,这是 zip bomb 的预算。
+    #
+    # 后者必须 >= 前者,否则一个刚好合规的压缩包会在解压时被自己的上限拒掉 —— 而报错说的是
+    # "解压后的总大小超过 N MB",与用户看到的"我这个包只有 190MB"对不上。原来两处读同一个
+    # 常量,正好踩在这个坑的边上:50MB 的包解压后超过 50MB 就被拒。
+    #
+    # 取 2 倍是给"文本/代码为主、压缩比高"的包留出余量,同时仍然给磁盘一个明确的上界。
+    #
+    # 运维上要知道的两件事(生产机 100.77.162.66):
+    #   * 上传路径是 `await file.read()`,整个 body 进内存,而这个后端容器**没有内存上限**
+    #     (docker inspect Memory=0)。并发几个 200MB 的上传就是几百 MB 的常驻内存。
+    #   * 解压落在容器的 /tmp,也就是宿主机的 `/`,那个盘现在 79% 满(125G 用了 93G)。
+    #     单次上传峰值约 上传字节 + 解压字节;真要长期跑在 200MB 这个量级,得先给这台机器
+    #     补上磁盘清理(它至今没有),否则一次并发上传就可能把盘写满。
+    max_package_upload_bytes: int = 200 * 1024 * 1024
+    max_package_extract_bytes: int = 400 * 1024 * 1024
 
     # --- GitLab (Agent市场 sync) --------------------------------------------
     # Base URL of the GitLab instance.
