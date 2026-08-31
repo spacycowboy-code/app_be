@@ -19,7 +19,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -348,13 +348,20 @@ def _content_disposition(filename: str) -> str:
 @router.get("/{skill_id}/download")
 def download_skill(
     skill_id: str,
+    request: Request,
     eid: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Download a skill as a .zip archive named after the skill's real name.
 
-    ``eid`` (optional) records who downloaded, for per-user leaderboards; the
-    endpoint stays usable anonymously when it is absent.
+    Who downloaded is taken from the JWT the auth middleware verified, falling
+    back to the ``eid`` query param only when auth is off in dev — the same rule
+    the market's download endpoint already follows. It used to read the query
+    param alone, which had two consequences: a caller that omitted it produced a
+    row nobody could be attributed to (ten such rows exist, 2026-08-06 to
+    2026-08-12), and a caller that supplied someone else's EID had its download
+    recorded against them. Neither is acceptable for a figure the report presents
+    as "who uses what".
 
     The archive contains the whole skill folder (SKILL.md + any artifacts +
     manifest) under a top-level directory named after the skill. Skills with
@@ -362,6 +369,20 @@ def download_skill(
     from the stored instructions.
     """
     skill = _get_skill_or_404(db, skill_id)
+    downloader = acting_eid(request, eid)
+
+    if skill.externally_hosted:
+        # 内容在别人那儿(第一个来源是 IVC 的 Nexus),门户没有字节可发。
+        #
+        # **先记事件,再转出去。** 顺序是这里唯一有意义的决定:转出去之后门户什么都看不到了,
+        # 所以记在前面。代价是用户在对方那边失败了我们仍记了一次 —— 与市场那侧同一个取舍
+        # (见 market.py:"记在传输之前,失败会抛"),理由也一样:"没人下得下来"正是这个计数
+        # 应该让人看见的事,而不是应该抹掉的事。
+        _bump_downloads(db, skill, downloader)
+        # 307 而不是 302:保持方法与请求体不变,并且明确这不是一个永久搬迁 —— 防火墙放行之后
+        # 这批技能会改成门户自己存包,那时这个分支对它们就不再成立。
+        return RedirectResponse(skill.external_url, status_code=307)
+
     # Official (anthropic) skills: name the archive after the namespaced id
     # (e.g. "anthropics-xlsx"); user skills after the display name.
     is_official = skill.category_id == "official"
@@ -437,7 +458,7 @@ def download_skill(
             )
 
     buf.seek(0)
-    _bump_downloads(db, skill, eid)
+    _bump_downloads(db, skill, downloader)
     return StreamingResponse(
         buf,
         media_type="application/zip",
