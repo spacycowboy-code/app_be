@@ -48,12 +48,9 @@ PSEUDO_CATEGORY_IDS = frozenset({"all", "official"})
 #: resolution always prefers the longest matching prefix.
 #:
 #: Deliberately absent:
-#: * ``BNEW RTE RP CD`` (Radio Products Chengdu, the largest single group) —
-#:   no portal category represents it, so its members get the full market.
-#:   Note this also covers ``RP CD IVC`` and ``RP CD PS``: those are Chengdu's
-#:   own teams, not the ``IVC`` / ``PS`` the portal groups refer to, and prefix
-#:   matching keeps them apart because the codes sit at a different depth.
-#: * Anything outside ``BNEW RTE RP`` (``EEE``, ``TSM``, ``RCE``) — same reason.
+#: * Anything outside ``BNEW RTE RP`` (``EEE``, ``TSM``, ``RCE``, ``RA``,
+#:   ``BCSS``) — no portal category represents them, so their members get the
+#:   full market and must pick a group by hand when they register something.
 DEPT_GROUP_MAP: dict[str, str] = {
     # A team carved out of its parent unit: listed first for the reader, but it
     # wins because it is longer, not because it is earlier.
@@ -66,6 +63,37 @@ DEPT_GROUP_MAP: dict[str, str] = {
     "BNEW RTE RP SWD": "radio-sw",
     "BNEW RTE RP QA": "qa",
     "BNEW RTE RP PO": "pmo",
+    # Radio Products Chengdu — the largest single group (68 of the 287 people
+    # who have signed in). It was left out while no portal category represented
+    # it; the effect was that every Chengdu upload landed in whatever the
+    # dialog happened to default to.
+    #
+    # It sits LAST in the reader's eye but matters most for one reason: it also
+    # swallows ``RP CD IVC`` and ``RP CD PS``, which are **Chengdu's own** IVC
+    # and PS teams — not the ``IVC`` / ``product-system`` these slugs mean.
+    # Longest-prefix matching is what keeps them apart: ``BNEW RTE RP CD IVC``
+    # matches this key (4 segments) and never ``BNEW RTE RP IVC``, because the
+    # codes sit at a different depth. Filing a ``RP CD IVC`` person under
+    # ``ivc`` would put Chengdu's work under Beijing's name, and nothing in the
+    # UI would look wrong.
+    "BNEW RTE RP CD": "cd",
+}
+
+#: Label used when a group's category row has to be created (see
+#: ``ensure_group_categories``). Only consulted for a slug that has no row yet —
+#: an existing label is never overwritten, because ``POST /api/categories`` lets
+#: a human rename one and that choice should win over this table.
+GROUP_CATEGORY_LABELS: dict[str, str] = {
+    "ai-team": "AI Team",
+    "product-system": "Product System",
+    "ivc": "IVC",
+    "radio-design-1": "Radio Design 1",
+    "radio-design-2": "Radio Design 2",
+    "radio-design-3": "Radio Design 3",
+    "radio-sw": "Radio SW",
+    "qa": "QA",
+    "pmo": "PMO",
+    "cd": "Chengdu",
 }
 
 
@@ -110,3 +138,41 @@ def group_for_eid(db: Session, eid: str | None) -> str | None:
         return None
     row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid))
     return verified_group(db, row.department if row else None)
+
+
+def ensure_group_categories(db: Session) -> list[str]:
+    """Create a category row for every slug in ``DEPT_GROUP_MAP`` that lacks one.
+
+    Returns the slugs it created.
+
+    This exists because the two halves of a group live in different places: the
+    slug is code (the table above) and the category is data (a table row), and
+    ``verified_group`` deliberately refuses a slug with no row behind it. So
+    adding a mapping without the row is a silent no-op — every member of that
+    department keeps resolving to "no group", and the only symptom is a default
+    that never fills in.
+
+    Nothing else creates these rows. The seed script is for a fresh database and
+    is not run on deploy; ``seed_market`` is deprecated. The container entrypoint
+    runs ``app.migrate``, which is why this is called from there.
+
+    Only ever inserts. An existing label is left alone because
+    ``POST /api/categories`` lets a human rename a category, and a migration
+    that runs on every boot must not undo that on the next restart.
+    """
+    created: list[str] = []
+    for slug in sorted(set(DEPT_GROUP_MAP.values())):
+        if db.get(RpAiCategory, slug) is not None:
+            continue
+        label = GROUP_CATEGORY_LABELS.get(slug)
+        if not label:
+            # A mapping was added without a label. Refuse to invent one: the
+            # label is what people read on the tab, and a slug rendered as a tab
+            # title ("radio-design-1") looks like a bug that nobody owns.
+            logger.warning("No label for group %r; category row not created", slug)
+            continue
+        db.add(RpAiCategory(id=slug, label=label, count=0))
+        created.append(slug)
+    if created:
+        db.commit()
+    return created

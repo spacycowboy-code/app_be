@@ -98,7 +98,19 @@ def main() -> None:
     # 1) Create any missing tables.
     Base.metadata.create_all(bind=engine)
 
-    # 2) Add missing columns to existing tables (MySQL-specific introspection).
+    # 2) Ensure every department group has a category row to point at.
+    #    Deliberately before the dialect check below: this is data, not DDL, so
+    #    ``create_all`` does not cover it on any dialect. A group whose row is
+    #    missing resolves to "no group" for every one of its members and the only
+    #    symptom is a default that silently never fills in.
+    from app.database import SessionLocal
+    from app.services.dept_groups import ensure_group_categories
+
+    with SessionLocal() as db:
+        for slug in ensure_group_categories(db):
+            print(f"  + created category row {slug!r}")
+
+    # 3) Add missing columns to existing tables (MySQL-specific introspection).
     #    On other dialects (e.g. sqlite in staging/tests) create_all above already
     #    produced fresh tables with all columns, so skip the ALTER pass.
     if engine.dialect.name != "mysql":
