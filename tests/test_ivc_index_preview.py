@@ -194,6 +194,39 @@ def test_an_agent_owner_without_a_mapping_is_flagged_not_guessed(client):
     assert any("还没有对应的工号" in p for p in entry["problems"])
 
 
+def test_an_agent_owner_that_is_already_an_eid_needs_no_mapping(client):
+    """``owner`` 有时本来就是工号（``EIWEULN``），不该因为映射表里没有它而被挡下。
+
+    映射表存在是因为 ``wenjie.a.liu`` 这种用户名形态推不出工号。已经是工号的走同一张表，
+    意味着要为每个人补一行键与值完全相同的映射 —— 漏一行，资产就归不到部门。
+    """
+    r = client.post(
+        "/api/integrations/ivc/preview",
+        json={"skills": [], "agents": [_agent(owner="EIWEULN")]},
+        headers=_auth(ALLOWED),
+    ).json()
+
+    entry = r["entries"][0]
+    assert entry["rawOwner"] == "EIWEULN"
+    assert entry["eid"] == "EIWEULN"
+    assert entry["problems"] == []
+    assert r["usable"] == 1
+
+
+def test_a_lowercase_owner_in_eid_form_is_normalised(client):
+    """工号归一化成大写，否则同一个人会被算两次 —— 和 skill 的 ``author`` 同一套规则。"""
+    r = client.post(
+        "/api/integrations/ivc/preview",
+        json={"skills": [], "agents": [_agent(owner="eiweuln")]},
+        headers=_auth(ALLOWED),
+    ).json()
+
+    entry = r["entries"][0]
+    assert entry["rawOwner"] == "eiweuln"
+    assert entry["eid"] == "EIWEULN"
+    assert entry["problems"] == []
+
+
 def test_a_download_url_off_the_known_host_is_rejected(client):
     """URL 来自一次人工粘贴。一个能被换成任意地址的下载按钮，比少同步一个资产危险得多。"""
     r = client.post(
