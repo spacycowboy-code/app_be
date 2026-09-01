@@ -37,6 +37,7 @@ from app.models.version import RpAiSkillVersion
 from app.models.download import RpAiSkillDownload
 from app.repositories import skill_content
 from app.schemas.skill import (
+    ExternalDownloadRead,
     SkillCreate,
     SkillImageState,
     SkillRead,
@@ -345,6 +346,40 @@ def _content_disposition(filename: str) -> str:
     the correct filename across browsers."""
     ascii_name = filename.encode("ascii", "ignore").decode().strip() or "download"
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
+
+
+@router.post("/{skill_id}/external-download", response_model=ExternalDownloadRead)
+def record_external_download(
+    skill_id: str,
+    request: Request,
+    eid: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> ExternalDownloadRead:
+    """记一次「用户去上游取这个包」,并把该去的地址交出来。**不传字节。**
+
+    存在的理由是 `download_skill` 的 307 那条分支**在浏览器里走不通**:前端的下载按钮走的是
+    XHR(`responseType: 'blob'`),而 XHR 跟着一个跨域跳转时浏览器会对新域名做 CORS 检查 ——
+    Nexus 不回 `Access-Control-Allow-Origin`,请求在协议层就被掐掉,连状态码都没有。用户看到的
+    是「Network error / Failed to fetch」,而服务端日志里明明白白写着 307。这不是配置问题:只要
+    下载走 XHR,转到一个不给 CORS 头的外部主机就永远失败。
+
+    所以界面改成一个真的链接(顶层导航不受 CORS 约束),而这一次「去取」的计数就落在这里。
+    307 那条分支保留不动:它对 curl / CLI 这类会跟跳转的调用方是对的,只是浏览器用不了。
+
+    **两条路不会重复计数**,因为前端对同一个技能只会走其中一条(按 `externally_hosted` 分岔)。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    if not skill.externally_hosted:
+        # 不是外部托管的技能没有「去上游取」这件事。拒掉而不是静默记一次:否则这个端点就是一个
+        # 谁都能调、不用真的下载任何东西就能把下载量刷上去的入口。
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能的内容在门户自己这边,请用 /download 下载",
+        )
+    _bump_downloads(db, skill, acting_eid(request, eid))
+    return ExternalDownloadRead(
+        id=skill.id, url=skill.external_url, source=skill.external_source
+    )
 
 
 @router.get("/{skill_id}/download")
