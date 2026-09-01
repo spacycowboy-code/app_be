@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
+from app.models.category import RpAiCategory
 from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_version import RpAiMarketItemVersion
@@ -26,6 +27,7 @@ from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.auth_tokens import create_scoped_token
 from app.services.card_group import groups_for_eids
+from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
@@ -371,6 +373,36 @@ def create_item(
             )
 
     data = payload.model_dump()
+
+    # Category: same shape as the skill upload path (routers/upload.py) on
+    # purpose — one behaviour for "which group does this belong to", not two.
+    #
+    # This path used to write ``payload.category_id`` straight through with no
+    # check at all, and the registration dialog defaulted it to 'public'. Because
+    # 'public' is a real, selectable category, nothing looked wrong and nothing
+    # could complain: three IVC agents registered on 2026-09-01 landed in Public
+    # and were simply not there when their author filtered by IVC.
+    #
+    # Validating here and not only in the dialog: the endpoint is public and the
+    # item id is guessable, so "the UI now sends a group" is not the same as "a
+    # row cannot be filed wrong". UI reachability is not a boundary.
+    category_id = (data.get("category_id") or "").strip()
+    if not category_id:
+        category_id = group_for_eid(db, creator) or ""
+    if not category_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "请选择分组:你的部门没有对应的门户分组。",
+        )
+    if category_id in PSEUDO_CATEGORY_IDS:
+        # 'all' is a filter, not a home; 'official' claims we vetted it.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"'{category_id}' 不是可以登记到的分组。"
+        )
+    if db.get(RpAiCategory, category_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"未知分组 '{category_id}'。")
+    data["category_id"] = category_id
+
     base = _slugify(payload.name)
     item_id = base
     n = 2
