@@ -229,6 +229,16 @@ class Settings(BaseSettings):
     # every sign-in between 00:00 and 06:00 Beijing under the previous day.
     stats_timezone: str = "Asia/Shanghai"
 
+    # --- RSW AI Inventory --------------------------------------------------
+    # Directory where the external tool deposits the two pre-generated HTML
+    # reports (full_report_browser.html / delta_report_browser.html).
+    # Empty = feature disabled; the three /api/rsw/inventory/* endpoints
+    # return empty/404 gracefully rather than erroring.
+    rsw_inventory_dir: str = ""
+    # API key for POST /api/rsw/inventory/upload (called by the external tool,
+    # no JWT). Empty = upload endpoint disabled (returns 403).
+    rsw_inventory_api_key: str = ""
+
     # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
     # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /
     # break-glass access. Its EID is `audit_admin_eid` (ADMINMM), so it has

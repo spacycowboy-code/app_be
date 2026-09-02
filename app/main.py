@@ -17,6 +17,7 @@ from app.routers import (
     auth,
     categories,
     comments,
+    departments,
     favorites,
     gerrit_sync,
     ivc_sync,
@@ -24,6 +25,7 @@ from app.routers import (
     market,
     market_favorites,
     reviews,
+    rsw_inventory,
     skill_import,
     skills,
     upload,
@@ -103,6 +105,7 @@ AUTH_WHITELIST = {
     "/api/auth/login",
     "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
     "/api/skills/import-official",  # official-skill sync CI — skill_import_token
+    "/api/rsw/inventory/upload",    # external inventory tool — rsw_inventory_api_key
     # Gerrit radio/ai-assets sync — gerrit_sync_token. Called by a scheduled job,
     # not a signed-in person: making it carry a JWT would mean issuing a session
     # that can do everything else too.
@@ -224,10 +227,12 @@ app.include_router(ivc_sync.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
+app.include_router(departments.router)
 app.include_router(market.router)
 app.include_router(agent_upload.router)
 app.include_router(usage.router)
 app.include_router(usage_report.router)
+app.include_router(rsw_inventory.router)
 
 
 @app.get("/health", tags=["health"])

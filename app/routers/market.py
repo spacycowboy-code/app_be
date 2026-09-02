@@ -4,14 +4,13 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
 from app.models.category import RpAiCategory
-from app.models.market_favorite import RpAiMarketFavorite
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
@@ -25,6 +24,7 @@ from app.schemas.market import (
 )
 from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
+from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
 from app.services.card_group import groups_for_eids
 from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
@@ -102,7 +102,7 @@ def list_items(
             RpAiMarketItem.name.like(like) | RpAiMarketItem.description.like(like)
         )
     items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
-    _attach_stats(db, items)
+    attach_market_stats(db, items)
     return items
 
 
@@ -120,49 +120,6 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
         status.HTTP_403_FORBIDDEN,
         "这个条目还在等待审核,通过之后才能安装。",
     )
-
-
-def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
-    """Attach deduplicated-by-EID favorite/download counts onto each item,
-    plus the creator's org group.
-
-    Favorites are already unique per (eid, item) by table constraint, so the
-    row count is the like count. Downloads are raw events, so we count distinct
-    EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
-
-    The group rides along here rather than in ``list_items`` because every path
-    that returns a ``MarketItemRead`` goes through this function: the list, the
-    single item, and the review page. A card that shows the group on the market
-    and loses it on the detail view reads as a bug in the data.
-    """
-    if not items:
-        return
-    ids = [it.id for it in items]
-    fav = dict(
-        db.execute(
-            select(RpAiMarketFavorite.item_id, func.count(RpAiMarketFavorite.id))
-            .where(RpAiMarketFavorite.item_id.in_(ids))
-            .group_by(RpAiMarketFavorite.item_id)
-        ).all()
-    )
-    dls = dict(
-        db.execute(
-            select(
-                RpAiMarketDownload.item_id,
-                func.count(func.distinct(RpAiMarketDownload.eid)),
-            )
-            .where(RpAiMarketDownload.item_id.in_(ids))
-            .group_by(RpAiMarketDownload.item_id)
-        ).all()
-    )
-    # One query for the whole page. GitLab-synced items have no creator, so they
-    # contribute no EID and end up with no group — correctly: there is no person
-    # to place, and inventing one would credit an office that never uploaded it.
-    groups = groups_for_eids(db, {it.creator for it in items if it.creator})
-    for it in items:
-        it.favorite_count = int(fav.get(it.id, 0))
-        it.download_count = int(dls.get(it.id, 0))
-        it.group = groups.get((it.creator or "").strip().upper())
 
 
 @router.post("/{item_id}/download")
@@ -615,14 +572,12 @@ def get_review(
         if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
-    # 同样按 eid 查,不能用 db.get():主键是自增的 id,eid 只是唯一索引。db.get 在这里不会
-    # 报错,只会永远答 None —— 审核页上传者那一栏就永远只有 EID、没有姓名和部门。
     uploader = (
         db.scalar(select(RpAiPortal).where(RpAiPortal.eid == item.creator))
         if item.creator
         else None
     )
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return MarketReviewRead(
         item=MarketItemRead.model_validate(item, from_attributes=True),
         versions=[
@@ -666,7 +621,7 @@ def decide_review(
     item.reviewed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return item
 
 
