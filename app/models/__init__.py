@@ -26,6 +26,7 @@ from app.models.audit import RpAiSkillAuditRecord, RpAiSkillFinding
 from app.models.login_event import RpAiLoginEvent
 from app.models.usage_event import RpAiUsageEvent
 from app.models.org_snapshot import RpAiOrgSnapshot  # noqa: F401
+from app.models.inventory_report import RpAiInventoryReport  # noqa: F401
 
 __all__ = [
     "RpAiPortal",
@@ -49,4 +50,5 @@ __all__ = [
     "RpAiSkillFinding",
     "RpAiLoginEvent",
     "RpAiUsageEvent",
+    "RpAiInventoryReport",
 ]

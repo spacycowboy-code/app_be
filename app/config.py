@@ -169,6 +169,9 @@ class Settings(BaseSettings):
     # Empty = feature disabled; the three /api/rsw/inventory/* endpoints
     # return empty/404 gracefully rather than erroring.
     rsw_inventory_dir: str = ""
+    # API key for POST /api/rsw/inventory/upload (called by the external tool,
+    # no JWT). Empty = upload endpoint disabled (returns 403).
+    rsw_inventory_api_key: str = ""
 
     # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
     # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /

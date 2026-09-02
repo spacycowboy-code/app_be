@@ -1,59 +1,100 @@
 """RSW AI Inventory endpoints.
 
-Three read-only endpoints that expose pre-generated HTML reports placed on the
-server by an external tool.  The path is configured via RSW_INVENTORY_DIR; if
-the variable is unset or the files are absent every endpoint degrades gracefully
-(empty list / null / 404) rather than erroring.
-
-TODO: add /api/rsw/inventory/content/{filename} to AUTH_WHITELIST in main.py
-      if unauthenticated access is ever needed (e.g. embedding in another tool).
-      For now the standard JWT gate applies.
+POST /upload   — external tool pushes HTML; authenticated by X-API-Key.
+GET  /files    — list available report types (checks DB first, falls back to disk).
+GET  /status   — latest upload timestamp (DB first, falls back to disk).
+GET  /content/{filename} — return HTML (DB first, falls back to disk).
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import HTMLResponse
+import hmac
 
-from app.services.rsw_inventory import INVENTORY_FILES, list_files, latest_modified, read_content
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.database import get_db
+from app.services.rsw_inventory import (
+    INVENTORY_FILES,
+    latest_created_at,
+    latest_modified,
+    list_files,
+    list_files_from_db,
+    read_content,
+    read_content_from_db,
+    save_report,
+)
 
 router = APIRouter(prefix="/api/rsw/inventory", tags=["rsw-inventory"])
 
-# Only these two filenames may be requested via the content endpoint.
 _ALLOWED_FILENAMES = frozenset(INVENTORY_FILES.values())
+
+# ~20 MB in characters — generous upper bound for HTML reports.
+_MAX_CONTENT_CHARS = 20 * 1024 * 1024
+
+
+class UploadRequest(BaseModel):
+    filename: str
+    content: str = Field(max_length=_MAX_CONTENT_CHARS)
+
+
+@router.post("/upload", status_code=status.HTTP_201_CREATED)
+def upload_report(
+    body: UploadRequest,
+    x_api_key: str = Header(default=""),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Receive an HTML report from the external inventory tool.
+
+    Authenticated by ``X-API-Key`` header (not JWT — this is a machine caller).
+    The endpoint must be in AUTH_WHITELIST in main.py so the JWT gate lets it
+    through to this check.
+    """
+    cfg = get_settings()
+    # Constant-time comparison prevents timing attacks; also rejects empty key config.
+    if not cfg.rsw_inventory_api_key or not hmac.compare_digest(
+        x_api_key, cfg.rsw_inventory_api_key
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid or missing API key.")
+    if body.filename not in _ALLOWED_FILENAMES:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown filename '{body.filename}'. Allowed: {sorted(_ALLOWED_FILENAMES)}",
+        )
+    row = save_report(body.filename, body.content, db)
+    return {"id": row.id, "filename": row.filename, "createdAt": row.created_at.isoformat()}
 
 
 @router.get("/files")
-def get_files() -> list[dict]:
-    """List whichever report files currently exist on disk.
+def get_files(db: Session = Depends(get_db)) -> list[dict]:
+    """List available report types.
 
-    Returns an empty list when RSW_INVENTORY_DIR is unset or no files are
-    present — the frontend treats this as the empty state, not an error.
+    Checks the database first; falls back to disk for the transition period.
+    Returns an empty list when neither source has data.
     """
-    return list_files()
+    db_files = list_files_from_db(db)
+    return db_files if db_files else list_files()
 
 
 @router.get("/status")
-def get_status() -> dict:
-    """Timestamp of the most recently modified report file.
-
-    ``lastUpdated`` is null when no files exist.  The frontend polls this
-    endpoint (24 h interval) and reloads content only when the value changes.
-    """
-    return {"lastUpdated": latest_modified()}
+def get_status(db: Session = Depends(get_db)) -> dict:
+    """Timestamp of the most recently uploaded report (DB first, then disk)."""
+    ts = latest_created_at(db) or latest_modified()
+    return {"lastUpdated": ts}
 
 
 @router.get("/content/{filename}", response_class=HTMLResponse)
-def get_content(filename: str) -> HTMLResponse:
-    """Return the raw HTML of the requested report file.
+def get_content(filename: str, db: Session = Depends(get_db)) -> HTMLResponse:
+    """Return the raw HTML of the requested report.
 
-    Only the two fixed filenames are accepted; anything else is a 404.
-    The HTML is returned as-is and rendered via ``srcdoc`` in the frontend
-    iframe, so no sanitisation is applied here — the files are operator-supplied
-    and trusted.
+    Reads the most recent database row first; falls back to disk if the DB has
+    no row yet (transition period). Only the two fixed filenames are accepted.
     """
     if filename not in _ALLOWED_FILENAMES:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Unknown inventory file '{filename}'.")
-    content = read_content(filename)
+    content = read_content_from_db(filename, db) or read_content(filename)
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Inventory file not available.")
     return HTMLResponse(content=content)

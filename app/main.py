@@ -103,6 +103,7 @@ AUTH_WHITELIST = {
     "/api/auth/login",
     "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
     "/api/skills/import-official",  # official-skill sync CI — skill_import_token
+    "/api/rsw/inventory/upload",    # external inventory tool — rsw_inventory_api_key
 }
 
 
