@@ -1,5 +1,6 @@
 """Agent市场 endpoints: list, manual create, GitLab sync, download, review, delete."""
 import io
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -26,7 +27,11 @@ from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
-from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
+from app.services.dept_groups import (
+    FALLBACK_GROUP_ID,
+    PSEUDO_CATEGORY_IDS,
+    group_for_eid,
+)
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
@@ -37,6 +42,8 @@ from app.services.gitlab_sync import (
     fetch_repo_archive,
     list_group_projects,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 settings = get_settings()
@@ -477,7 +484,22 @@ def _upsert_project(
     item.source = source
     item.repo_url = proj.web_url
     item.tags = proj.topics or []
-    item.category = proj.namespace_name
+    # 分组:GitLab 项目没有工号可查(这条路一个 ``creator`` 都不写),所以推不出部门,归 ``others``。
+    #
+    # 以前这里只写 ``item.category = proj.namespace_name``。那是**显示用的标签**,不是分组 id ——
+    # 于是卡片上写着 "RP-AI-AGENT",而 ``category_id`` 是空的:计入 "All",不出现在任何部门标签
+    # 下。两个字段一个填一个不填,看起来像有分组,筛起来没有。
+    #
+    # 现在两个字段一起写,并且 label 取分类行自己的,而不是 GitLab 命名空间 —— 否则卡片显示
+    # "RP-AI-AGENT" 却按 "Others" 过滤,还是同一种口径不一致。
+    # 分类行缺失时不硬塞:``category_id`` 是外键,给一个没有对应行的值会让 INSERT 直接
+    # IntegrityError,整次同步连带其它项目一起挂。
+    cat = db.get(RpAiCategory, FALLBACK_GROUP_ID)
+    if cat is not None:
+        item.category_id = cat.id
+        item.category = cat.label
+    else:
+        log.warning("没有 %r 分类行,%s 先不归组", FALLBACK_GROUP_ID, item_id)
     item.last_activity = proj.last_activity_at
     item.verified = True
     if not item.version:

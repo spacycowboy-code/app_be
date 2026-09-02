@@ -60,7 +60,7 @@ from app.models.user import RpAiPortal
 from app.repositories import gerrit_content
 from app.services.asset_content import GERRIT_PREFIX
 from app.services.asset_owner import OwnerResolver, ResolvedOwner
-from app.services.dept_groups import resolve_group
+from app.services.dept_groups import group_or_fallback
 
 log = logging.getLogger(__name__)
 
@@ -226,19 +226,26 @@ def _ensure_user(db: Session, owner: ResolvedOwner) -> None:
 
 
 def _category_of(db: Session, owner: ResolvedOwner) -> tuple[str | None, str | None]:
-    """``(category_id, label)``,由 owner 的真实部门决定,查不到就留空。
+    """``(category_id, label)``,由 owner 的真实部门决定,映射不到就归 ``others``。
 
-    留空是刻意的:``dept_groups`` 的表只覆盖 ``BNEW RTE RP``,而这个仓一半的作者在
-    ``BNEW RTE RA``。把他们塞进某个 RP 的分组是在编造归属,而空归属的后果只是这张卡片
-    不出现在部门筛选里 —— 可见、可解释、可以以后改。
+    以前这里返回空。空归属的代价不在页面上而在数字里:资产照样计入市场的 "All",却不出现在
+    任何部门标签下,于是标签加起来不等于总数,而**做这件事的行恰好在唯一能暴露它的视图里
+    看不见**。等发现时已经漂出去 10 条。
+
+    ``others`` 不等于"编造归属":它不声称任何一个部门,所以不会把 RA 的人塞进某个 RP 的分组
+    —— 那才是这个函数原来要避免的事,现在仍然避免着。``dept_groups`` 的表只覆盖
+    ``BNEW RTE RP``,而这个仓相当一部分作者在 ``BNEW RTE RA``(RD5 有 5 个资产)。
     """
-    slug = resolve_group(owner.department)
-    if not slug:
-        return None, None
+    slug = group_or_fallback(db, owner.department)
     row = db.get(RpAiCategory, slug)
     if row is None:
-        # 表是代码、分类是数据,两者会漂。给出一个市场没有对应行的 slug 会让每一页都筛成空。
-        log.warning("部门 %r 映射到不存在的分类 %r", owner.department, slug)
+        # 表是代码、分类是数据,两者会漂。``ensure_group_categories`` 每次启动都补 ``others``,
+        # 所以走到这里说明那次补失败了。
+        #
+        # 这里必须退回空,不能硬塞:``category_id`` 是外键,给一个没有对应行的值会让 INSERT
+        # 直接 IntegrityError —— 整次同步连带其它资产一起挂掉。少一个分组只影响这一条,
+        # 挂掉同步影响全部。
+        log.warning("分组 %r 没有对应的分类行(部门 %r),这条资产先不归组", slug, owner.department)
         return None, None
     return slug, row.label
 
