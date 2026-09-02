@@ -26,7 +26,6 @@ from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
-from app.services.card_group import groups_for_eids
 from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of

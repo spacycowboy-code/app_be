@@ -50,8 +50,11 @@ from app.services.skill_manifest import (
     with_frontmatter,
 )
 from app.services.archives import common_top_dir
-from app.services.asset_stats import attach_skill_stats, content_updated_at
-from app.services.card_group import groups_for_eids
+from app.services.asset_stats import (
+    attach_skill_groups,
+    attach_skill_stats,
+    content_updated_at,
+)
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
 from app.services import asset_content
@@ -170,17 +173,6 @@ def list_skills(
     return skills
 
 
-def _attach_group(db: Session, skills: list[RpAiSkill]) -> None:
-    """Attach the uploader's org group (地址 · 大部门 · 小部门) onto each skill.
-
-    Keyed on ``uploader_eid`` rather than ``author``: for the official imports
-    ``author`` is a label like "Anthropic", which is not a person and has no
-    office. Those skills get no group, which is the truthful answer.
-    """
-    groups = groups_for_eids(db, {s.uploader_eid for s in skills if s.uploader_eid})
-    for s in skills:
-        s.group = groups.get((s.uploader_eid or "").strip().upper())
-
 
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
@@ -199,7 +191,7 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill.content_updated_at = content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
-    _attach_group(db, [skill])
+    attach_skill_groups(db, [skill])
     # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
     #
     # 先把模型构出来再改字段,不给 ORM 对象赋值:`instructions` 是真列,赋值会把 session 弄脏,
