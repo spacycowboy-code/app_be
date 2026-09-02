@@ -25,6 +25,9 @@ from app.services.asset_inventory import collect_inventory
 from app.services.auth_tokens import create_token
 
 ADMIN = "EZHGMIO"
+#: 名单里的第二个人,只为证明端点读的是设置而不是写死 ADMIN。刻意用一个中立工号:
+#: 这里放一个真实同事的工号会让测试看起来在断言"这个人应该有权限"。
+LISTED = "ELISTED"
 OUTSIDER = "ENOBODY"
 SECRET = "test-secret-for-admin-assets"
 GROUP = "test-inv"
@@ -91,7 +94,7 @@ def _cleanup(db) -> None:
 def client(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.setenv("AUTH_JWT_SECRET", SECRET)
-    monkeypatch.setenv("DASHBOARD_EIDS", f"{ADMIN},ECUIDEN")
+    monkeypatch.setenv("DASHBOARD_EIDS", f"{ADMIN},{LISTED}")
     get_settings.cache_clear()
     yield TestClient(app)
     get_settings.cache_clear()
@@ -178,25 +181,37 @@ def test_export_needs_an_admin(client) -> None:
     assert r.status_code == 403
 
 
-def test_ecuiden_is_allowed(client) -> None:
-    """这次加进名单的人。
+def test_a_listed_eid_is_allowed(client) -> None:
+    """名单里的人能导出。
 
     只证明端点尊重 ``dashboard_eids`` 这个设置 —— ``client`` fixture 用环境变量盖掉了出厂
-    默认值,所以把 ECUIDEN 从 ``config.py`` 删掉它照样会绿。下面那条才是钉出厂名单的。
+    默认值,所以这条与 ``config.py`` 里到底写了谁无关。下面那条才是钉出厂名单的。
+
+    （这条原来叫 ``test_ecuiden_is_allowed``,针对当时刚加进名单的那个人。她已于 2026-09-02
+    移除,所以改成用一个中立的工号 —— 断言的东西一个字没变。）
     """
-    assert client.get("/api/admin/assets.csv", headers=_headers("ECUIDEN")).status_code == 200
+    assert client.get("/api/admin/assets.csv", headers=_headers(LISTED)).status_code == 200
 
 
-def test_the_shipped_default_list_includes_ecuiden(monkeypatch) -> None:
+def test_the_shipped_default_list_does_not_include_ecuiden(monkeypatch) -> None:
     """不带环境覆盖,看代码里发出去的那份名单。
 
     生产没有设 ``DASHBOARD_EIDS``(查过容器 env),所以 ``config.py`` 的默认值就是线上实际
-    生效的名单 —— 改它才真的让 Tracy 看得见那个按钮。
+    生效的名单 —— 改它才真的改变谁看得见什么。
+
+    **这条原来是反过来的**(``assert "ECUIDEN" in ...``),钉的是"她需要 RSW 同步页所以加进
+    名单"那个决定。2026-09-02 按操作者要求移除,所以断言跟着反转。
+
+    保留这条而不是删掉,因为它现在防的是另一件事:这张名单同时守着**逐人使用报告**,而下一个
+    收到"给 Tracy 开个同步权限"请求的人,顺手把工号加回这里就等于把每个人的姓名和用量一起给
+    出去。真要给同步权限,得先把名单拆成两个(见 ``config.py`` 里那段注释)。
     """
     monkeypatch.delenv("DASHBOARD_EIDS", raising=False)
     get_settings.cache_clear()
     try:
-        assert "ECUIDEN" in get_settings().dashboard_eid_list
+        assert "ECUIDEN" not in get_settings().dashboard_eid_list
+        # 顺手钉住其余四个还在,否则"整张名单被清空"也会让上面那条变绿。
+        assert get_settings().dashboard_eid_list == ["EZHGMIO", "ADMINMM", "EHUIWUU", "EBAOXUE"]
     finally:
         get_settings.cache_clear()
 

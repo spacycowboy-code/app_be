@@ -210,12 +210,22 @@ class Settings(BaseSettings):
     # Dashboard from everyone else, but hiding a link is not access control.
     # Comma-separated; compared uppercase.
     # EZHGMIO Miao Zhang M, ADMINMM the break-glass admin, EHUIWUU Vivie Wu A,
-    # EBAOXUE Baosheng Xue, ECUIDEN Tracy Deng (RSW — owns the Gerrit
-    # `radio/ai-assets` repo the RSW sync reads, so she needs the page that
-    # triggers it). Also gates the department usage report, which names
+    # EBAOXUE Baosheng Xue. Gates the department usage report, which names
     # individuals — adding someone here shows them per-person output, not just
     # a sync button. That is the reason this list is short.
-    dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE,ECUIDEN"
+    #
+    # ECUIDEN (Tracy Deng) 曾在这张名单上,2026-09-02 按操作者要求移除。加她进来的理由是
+    # 她需要 RSW 的同步页(她拥有那个页面读取的 Gerrit `radio/ai-assets` 仓),而这张名单
+    # **同时**守着上面那份逐人报告 —— 一张名单管两件权限面差得很远的事,所以给她一个同步
+    # 按钮的同时也给了她每个人的姓名和用量。
+    #
+    # 移除她因此也一并收走了 RSW 同步页。这是那次决定的已知代价,不是疏漏。真正的解法是把
+    # 这张名单拆成两个(一个窄的「能跑同步」名单 + 现在这个「能看逐人报告」名单),那是一次
+    # 独立改动;在拆之前,任何"只想给某人同步权限"的请求都会连带给出逐人报告。
+    #
+    # **生产没有设 DASHBOARD_EIDS 环境变量**(查过容器 env),所以这里的默认值就是线上实际
+    # 生效的名单 —— 改它才真的生效,前端 dashboard-access.ts 那份只决定显不显示入口。
+    dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE"
     # --- Department usage report ---------------------------------------------
     # Snapshot of the Microsoft Graph reporting tree — the same graph the Teams org
     # chart draws. Every head count and every percentage in the report is derived
