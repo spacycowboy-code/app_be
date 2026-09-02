@@ -198,43 +198,6 @@ def test_oversized_unpacked_tar_is_rejected(tmp_path: Path) -> None:
         pkg.extract_safely(data, tmp_path / "src", max_bytes=100_000)
 
 
-# --- 送审计的那份字节 -------------------------------------------------------
-
-
-def test_tar_is_repacked_as_zip_for_the_audit(tmp_path: Path) -> None:
-    data = mktar({"my-agent/README.md": README, "my-agent/main.py": "print(1)\n"})
-    entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
-    blob, filename = up._audit_artifact(
-        data, tmp_path / "src", entries, "my-agent.tar.gz"
-    )
-    # 引擎只解 zip(skill_audit/pipeline.py 按 is_zipfile 判)。
-    assert pkg.archive_kind(blob) == "zip"
-    # 文件名也要换掉:引擎会按它决定怎么落地这份附件。
-    assert filename == "my-agent.zip"
-    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-        assert sorted(zf.namelist()) == ["my-agent/README.md", "my-agent/main.py"]
-        assert zf.read("my-agent/main.py") == b"print(1)\n"
-
-
-def test_a_zip_is_sent_to_the_audit_untouched(tmp_path: Path) -> None:
-    """zip 原样送。重打一遍会换掉内容哈希,而审计的缓存和留痕都按那个哈希走。"""
-    data = mkzip({"a/x.py": "1"})
-    entries = pkg.extract_safely(data, tmp_path / "src", max_bytes=MAX)
-    blob, filename = up._audit_artifact(data, tmp_path / "src", entries, "a.zip")
-    assert blob is data
-    assert filename == "a.zip"
-
-
-def test_repack_is_byte_identical_across_calls(tmp_path: Path) -> None:
-    """体检和发布各打一次,引擎按内容哈希缓存 —— 两次不一样就要多跑一遍几十秒的审计。"""
-    data = mktar({"my-agent/main.py": "print(1)\n", "my-agent/a/b.txt": "x\n"})
-    first = pkg.extract_safely(data, tmp_path / "one", max_bytes=MAX)
-    second = pkg.extract_safely(data, tmp_path / "two", max_bytes=MAX)
-    assert pkg.repack_as_zip(tmp_path / "one", first) == pkg.repack_as_zip(
-        tmp_path / "two", second
-    )
-
-
 # --- 类型策略 ---------------------------------------------------------------
 
 

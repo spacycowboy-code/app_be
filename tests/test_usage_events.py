@@ -279,7 +279,14 @@ def test_the_report_names_no_individuals(client, db):
     """
     last_week = current_week(weeks_back=1)
     when = last_week.since + timedelta(hours=1)
-    db.add(RpAiSkill(id="s1", name="Skill One", category_id="public", created_at=when))
+    db.add(
+        RpAiSkill(
+            id="s1", name="Skill One", category_id="public", created_at=when,
+            # Explicit: the model defaults to ``pending``, and the report counts only
+            # what is on the market. Left implicit this row is an unreviewed upload.
+            status="approved",
+        )
+    )
     db.commit()
     db.add_all(
         [
@@ -303,7 +310,14 @@ def test_the_report_names_no_individuals(client, db):
 def test_the_report_counts_people_and_assets_for_the_last_full_week(client, db):
     last_week = current_week(weeks_back=1)
     when = last_week.since + timedelta(hours=1)
-    db.add(RpAiSkill(id="s1", name="Skill One", category_id="public", created_at=when))
+    db.add(
+        RpAiSkill(
+            id="s1", name="Skill One", category_id="public", created_at=when,
+            # Explicit for the same reason as above: the model defaults to ``pending``
+            # and ``skillsAdded`` counts only what is on the market.
+            status="approved",
+        )
+    )
     db.commit()
     db.add_all(
         [
@@ -336,13 +350,83 @@ def test_this_week_is_marked_incomplete(client):
     assert body["complete"] is False
 
 
+def test_events_for_a_deleted_market_item_stop_counting(client, db):
+    """Deleting an agent must take its opens out of the numbers, not just its row.
+
+    ``rp_ai_usage_event`` carries no foreign key to ``rp_ai_market_item`` — on
+    purpose, so a report can still name something that has since gone, and the row
+    keeps ``object_name`` as it was. The side effect was that ``market.delete_item``
+    hard-deleted the item, the cascade took its downloads and favourites, and the
+    opens and runs went on being counted against a thing nobody could find any more.
+
+    Both halves are asserted from one fixture: the surviving item's event counts, the
+    deleted one's does not, so a filter that simply dropped every market event would
+    fail here too.
+    """
+    last_week = current_week(weeks_back=1)
+    when = last_week.since + timedelta(hours=1)
+    db.add_all(
+        [
+            RpAiMarketItem(
+                id="still-here", name="Still Here", item_type="agent",
+                service_type="cloud", created_at=when, status="approved",
+            ),
+            RpAiMarketItem(
+                id="deleted-later", name="Deleted Later", item_type="agent",
+                service_type="cloud", created_at=when, status="approved",
+            ),
+        ]
+    )
+    db.commit()
+    db.add_all(
+        [
+            RpAiUsageEvent(
+                eid=ME, verb="tool_open", object_type="market_item",
+                object_id="still-here", object_name="Still Here", created_at=when,
+            ),
+            RpAiUsageEvent(
+                eid=ME, verb="tool_open", object_type="market_item",
+                object_id="deleted-later", object_name="Deleted Later", created_at=when,
+            ),
+            # A built-in portal tool page: object_type 'tool', and it has no row in
+            # rp_ai_market_item and never had one. It must keep counting, which is why
+            # the filter checks the object type before requiring existence.
+            RpAiUsageEvent(
+                eid=ME, verb="tool_run", object_type="tool",
+                object_id="product-structure", object_name="Product Structure",
+                created_at=when,
+            ),
+        ]
+    )
+    db.commit()
+
+    before = client.get(f"/api/users/{ME}/tools?days=30", headers=_auth(ME)).json()
+    assert {t["objectId"] for t in before} == {
+        "still-here",
+        "deleted-later",
+        "product-structure",
+    }
+
+    db.delete(db.get(RpAiMarketItem, "deleted-later"))
+    db.commit()
+
+    after = client.get(f"/api/users/{ME}/tools?days=30", headers=_auth(ME)).json()
+    assert {t["objectId"] for t in after} == {"still-here", "product-structure"}
+
+
 def test_an_asset_nobody_downloaded_is_reported_as_unused(client, db):
     last_week = current_week(weeks_back=1)
     when = last_week.since + timedelta(hours=1)
     db.add_all(
         [
-            RpAiSkill(id="used", name="Used", category_id="public", created_at=when),
-            RpAiSkill(id="ignored", name="Ignored", category_id="public", created_at=when),
+            RpAiSkill(
+                id="used", name="Used", category_id="public", created_at=when,
+                status="approved",
+            ),
+            RpAiSkill(
+                id="ignored", name="Ignored", category_id="public", created_at=when,
+                status="approved",
+            ),
         ]
     )
     db.commit()

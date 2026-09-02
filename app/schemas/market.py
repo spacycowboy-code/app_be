@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from app.schemas.card_group import CardGroupRead
 from app.schemas.common import CamelModel
 
 ItemType = Literal["tool", "agent", "ai-platform"]
@@ -54,6 +55,12 @@ class MarketItemRead(CamelModel):
     is_trending: bool = False
     verified: bool = False
     creator: str | None = None
+    # The name to show as the creator. ``author`` holds the uploader's EID on the
+    # package-upload path, so a card that rendered it printed a bare EID next to
+    # cards showing real names; this is the resolved label (see
+    # ``RpAiMarketItem.creator_label``) and is what the card should display.
+    creator_label: str | None = None
+    uploader_name: str | None = None
     # pending | approved | rejected. Only approved items are visible to others;
     # the field is on the read model so the uploader's own card can say so.
     status: str = "approved"
@@ -64,6 +71,9 @@ class MarketItemRead(CamelModel):
     download_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    # Where the creator sits: 地址 · 大部门 · 小部门. None for GitLab-synced items,
+    # which have no creator at all, and for a creator outside Radio Products.
+    group: CardGroupRead | None = None
 
 
 class MarketItemVersionRead(CamelModel):

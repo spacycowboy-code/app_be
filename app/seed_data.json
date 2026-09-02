@@ -54,6 +54,11 @@
       "id": "pmo",
       "label": "PMO",
       "count": 3
+    },
+    {
+      "id": "cd",
+      "label": "Chengdu",
+      "count": 0
     }
   ],
   "skills": [

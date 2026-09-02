@@ -26,6 +26,12 @@ COLUMNS = [
     # 当前发布的这一版对应的审计记录 id。见 models/skill.py:同一秒里的两条记录分不出先后,
     # 所以"哪条结论描述现在这一版"要记下来,不能靠排序猜。
     ("rp_ai_skill", "audit_ref", "VARCHAR(32) NULL"),
+    # 作者自己上传的封面图(见 models/skill.py 里为什么存库而不是存宿主机目录)。
+    # MEDIUMBLOB 而不是 BLOB:后者上限 64 KB,会把一张普通截图直接截断,而截断的图片在库里
+    # 是"存住了"、在页面上是坏图 —— 这种失败最难查。上限 16 MB 远大于端点的 512 KB 闸门。
+    ("rp_ai_skill", "image_blob", "MEDIUMBLOB NULL"),
+    ("rp_ai_skill", "image_mime", "VARCHAR(64) NULL"),
+    ("rp_ai_skill", "image_updated_at", "DATETIME NULL"),
     ("rp_ai_skill_audit_record", "judge_model", "VARCHAR(120) NULL"),
     ("rp_ai_skill_audit_record", "rules_hash", "VARCHAR(64) NULL"),
     ("rp_ai_skill_finding", "rule_id", "VARCHAR(120) NULL"),
@@ -57,6 +63,23 @@ COLUMNS = [
     # Department snapshots for group-level reporting (see services/usage.py).
     ("rp_ai_skill_download", "department", "VARCHAR(64) NULL"),
     ("rp_ai_market_download", "department", "VARCHAR(64) NULL"),
+    # How the row got here: 'login' (first sign-in) or 'import'. NOT NULL with a
+    # default so the rows that predate the column need no backfill — every one of
+    # them was created on a sign-in, which is the whole reason ever_signed_in
+    # could read this table as "people who have used the portal".
+    # See models/user.py::PORTAL_ROW_ORIGINS.
+    ("rp_ai_portal", "origin", "VARCHAR(16) NOT NULL DEFAULT 'login'"),
+    # Change detector for assets synced from a git tree: the sha of the asset's
+    # own directory. Distinct from repo_commit / last_activity on purpose — see
+    # the column comments in models/skill.py and models/market.py.
+    ("rp_ai_skill", "content_sha", "VARCHAR(64) NULL"),
+    ("rp_ai_market_item", "content_sha", "VARCHAR(64) NULL"),
+    # 外部托管的技能:内容在别人的仓库里,门户只登记它并把下载转过去。第一个来源是 IVC 的
+    # Nexus —— 它对生产机房整段 TCP 不可达(ICMP 通、22/80/443/8081/8443 全部静默超时、无代理
+    # 配置),所以门户拿不到包体,只拿得到目录。``external_url`` 为空即普通技能,老数据全部为空,
+    # 读法不变。
+    ("rp_ai_skill", "external_url", "VARCHAR(1024) NULL"),
+    ("rp_ai_skill", "external_source", "VARCHAR(32) NULL"),
 ]
 
 
@@ -75,7 +98,19 @@ def main() -> None:
     # 1) Create any missing tables.
     Base.metadata.create_all(bind=engine)
 
-    # 2) Add missing columns to existing tables (MySQL-specific introspection).
+    # 2) Ensure every department group has a category row to point at.
+    #    Deliberately before the dialect check below: this is data, not DDL, so
+    #    ``create_all`` does not cover it on any dialect. A group whose row is
+    #    missing resolves to "no group" for every one of its members and the only
+    #    symptom is a default that silently never fills in.
+    from app.database import SessionLocal
+    from app.services.dept_groups import ensure_group_categories
+
+    with SessionLocal() as db:
+        for slug in ensure_group_categories(db):
+            print(f"  + created category row {slug!r}")
+
+    # 3) Add missing columns to existing tables (MySQL-specific introspection).
     #    On other dialects (e.g. sqlite in staging/tests) create_all above already
     #    produced fresh tables with all columns, so skip the ALTER pass.
     if engine.dialect.name != "mysql":

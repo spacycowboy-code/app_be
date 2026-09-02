@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import Field, field_validator
 
+from app.schemas.card_group import CardGroupRead
 from app.schemas.common import CamelModel
 
 SkillStatus = Literal["pending", "approved", "rejected"]
@@ -144,8 +145,50 @@ class PendingUpdateRead(CamelModel):
     created_at: datetime | None = None
 
 
+class SkillImageState(CamelModel):
+    """封面图端点的返回形状 —— 刻意只有这三个字段。
+
+    不返回完整的 ``SkillRead``:那些写端点返回的是一个"裸"技能行,``favoriteCount`` 是 0、
+    ``group`` 和 ``pendingUpdate`` 是空(它们由 get_skill 里的辅助函数另外附上)。前端若拿它
+    整体替换本地对象,收藏数就会在界面上被冲成 0 直到下次刷新。窄返回让这件事不可能发生:
+    调用方只能拿到"图现在是什么",也只需要这个。
+    """
+
+    id: str
+    #: 部门默认图的静态资源路径,始终有值。
+    image: str | None = None
+    #: 为真时前端应该指向 GET /api/skills/{id}/image;为假时用上面那个路径。
+    has_custom_image: bool = False
+
+
+class ExternalDownloadRead(CamelModel):
+    """外部托管技能的「去上游取」的返回形状 —— 刻意只有这三个字段。
+
+    ``url`` 是这一行**当前**的上游地址。界面上那个链接的 ``href`` 用的是读模型里的
+    ``externalUrl``(真链接必须在点击之前就有地址,不能等一次请求回来),所以这里返回它不是为了
+    给浏览器用,而是为了让这个端点对不渲染页面的调用方(脚本、以后的 CLI)自成一体:记一次账、
+    同时知道该去哪儿,不必再取一遍整个技能。
+    """
+
+    id: str
+    url: str | None = None
+    #: 哪个上游(如 ``nexus-ivc``),让界面能说出名字。
+    source: str | None = None
+
+
 class SkillRead(SkillBase, SkillDerived):
     id: str
+    # 作者传过自己的封面图吗。为真时前端应该指向 GET /api/skills/{id}/image;为假时用上面
+    # ``image`` 那个部门默认图的静态路径。不把字节放进 JSON:那会让每次列表/详情都多传几百 KB。
+    has_custom_image: bool = False
+    # 内容在别人那儿(第一个来源是 IVC 的 Nexus)。前端要靠这几个字段把「下载」换成一个指向上游
+    # 的链接:门户手里没有字节,而一个长得和普通下载一样的按钮只会让人拿到一个解释不了的报错 ——
+    # XHR 跟不了跨域跳转,浏览器连状态码都不给。``external_url`` 一并给出,让链接指向的主机在界面
+    # 上看得见:下载得先能访问那台机器,这件事该让人自己看出来,而不是点了才知道。
+    externally_hosted: bool = False
+    external_url: str | None = None
+    #: 哪个上游同步来的(如 ``nexus-ivc``)。让界面能说出名字,而不是笼统的"外部"。
+    external_source: str | None = None
     cases: list[SkillCaseSchema] = Field(default_factory=list)
     sub_skills: list[SubSkillSchema] = Field(default_factory=list)
     input_params: list[InputParamSchema] = Field(default_factory=list)
@@ -166,6 +209,10 @@ class SkillRead(SkillBase, SkillDerived):
     # 压在已发布版本之外、正在人工复核的那次更新(没有就是 None)。上面所有字段描述的都是已发布的
     # 那一版,这个字段是唯一说"还有一份在等复核"的地方。
     pending_update: PendingUpdateRead | None = None
+    # Where the uploader sits: 地址 · 大部门 · 小部门. None when the person cannot
+    # be placed (no department recorded, or a department outside Radio Products)
+    # or when there is no real uploader at all — the official imports.
+    group: CardGroupRead | None = None
 
 
 class SkillSummary(CamelModel):
@@ -177,6 +224,13 @@ class SkillSummary(CamelModel):
     category: str | None = None
     category_id: str | None = None
     image: str | None = None
+    # 同 SkillRead.has_custom_image —— 市场卡片就是靠它决定图片指哪。
+    has_custom_image: bool = False
+    # 同 SkillRead —— 市场卡片上的下载按钮也要按它分岔,否则从卡片点下载照样是那个
+    # 解释不了的网络错误。
+    externally_hosted: bool = False
+    external_url: str | None = None
+    external_source: str | None = None
     rating: float = 0.0
     downloads: str = "0"
     is_trending: bool = False
@@ -199,3 +253,5 @@ class SkillSummary(CamelModel):
     # as an "Update", so that bookkeeping writes to the row (download counters,
     # ratings, repo bookkeeping) cannot announce a skill as updated.
     content_updated_at: datetime | None = None
+    # Where the uploader sits: 地址 · 大部门 · 小部门. See ``SkillRead.group``.
+    group: CardGroupRead | None = None

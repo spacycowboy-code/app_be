@@ -19,14 +19,12 @@ from app.models.market_download import RpAiMarketDownload
 from app.models.market_favorite import RpAiMarketFavorite
 from app.models.skill import RpAiSkill
 from app.models.version import RpAiSkillVersion
+from app.services.card_group import groups_for_eids
 
 
 def attach_market_stats(db: Session, items: list[RpAiMarketItem]) -> None:
-    """Attach deduplicated-by-EID favorite/download counts onto each item.
-
-    Favorites are already unique per (eid, item) by table constraint, so the
-    row count is the like count. Downloads are raw events, so we count distinct
-    EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
+    """Attach deduplicated-by-EID favorite/download counts onto each item,
+    plus the creator's org group.
     """
     if not items:
         return
@@ -48,9 +46,11 @@ def attach_market_stats(db: Session, items: list[RpAiMarketItem]) -> None:
             .group_by(RpAiMarketDownload.item_id)
         ).all()
     )
+    groups = groups_for_eids(db, {it.creator for it in items if it.creator})
     for it in items:
         it.favorite_count = int(fav.get(it.id, 0))
         it.download_count = int(dls.get(it.id, 0))
+        it.group = groups.get((it.creator or "").strip().upper())
 
 
 def content_updated_at(

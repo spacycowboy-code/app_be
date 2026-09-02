@@ -1,4 +1,5 @@
 """Skill endpoints: browse, detail, create, update, delete."""
+import hashlib
 import io
 import re
 import uuid
@@ -6,8 +7,18 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -25,7 +36,9 @@ from app.models.version import RpAiSkillVersion
 from app.models.download import RpAiSkillDownload
 from app.repositories import skill_content
 from app.schemas.skill import (
+    ExternalDownloadRead,
     SkillCreate,
+    SkillImageState,
     SkillRead,
     SkillSummary,
     SkillUpdate,
@@ -38,8 +51,12 @@ from app.services.skill_manifest import (
 )
 from app.services.archives import common_top_dir
 from app.services.asset_stats import attach_skill_stats, content_updated_at
+from app.services.card_group import groups_for_eids
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
+from app.services import asset_content
+from app.services import reporting_windows
+from app.services import skill_image
 from app.services.audit_engine import AuditResult, audit_skill
 from app.services.skill_audit import gate
 from app.services.skill_audit import pending as pending_updates
@@ -58,6 +75,9 @@ def _read_skill_md(skill: RpAiSkill) -> str:
     **读不到就 503,不回落到 `skill.instructions`。** 那一列是同一份正文的第二份副本,
     回落等于把可能过期的内容当成当前版本拿去编辑或审计,而且从响应上看不出来。
     生产 22 个技能的 `storage_path` 与 `repo_commit` 都有值,所以这条回落对现存数据从不生效。
+
+    内容住在哪个上游由 `asset_content` 按 `storage_path` 的前缀分派 —— 从 Gerrit 同步来的
+    技能内容在别人的仓里,而这里的调用方不需要知道这件事。
     """
     if not skill.storage_path or not skill.repo_commit:
         raise HTTPException(
@@ -65,10 +85,8 @@ def _read_skill_md(skill: RpAiSkill) -> str:
             detail="这个技能没有记下内容在仓库里的位置或版本,无法读取正文",
         )
     try:
-        return skill_content.read_text(
-            skill.repo_commit, f"{skill.storage_path}/SKILL.md"
-        )
-    except skill_content.ContentUnavailable as exc:
+        return asset_content.read_text(skill.storage_path, skill.repo_commit, "SKILL.md")
+    except asset_content.ContentUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="暂时读不到技能内容,请稍后重试",
@@ -152,6 +170,18 @@ def list_skills(
     return skills
 
 
+def _attach_group(db: Session, skills: list[RpAiSkill]) -> None:
+    """Attach the uploader's org group (地址 · 大部门 · 小部门) onto each skill.
+
+    Keyed on ``uploader_eid`` rather than ``author``: for the official imports
+    ``author`` is a label like "Anthropic", which is not a person and has no
+    office. Those skills get no group, which is the truthful answer.
+    """
+    groups = groups_for_eids(db, {s.uploader_eid for s in skills if s.uploader_eid})
+    for s in skills:
+        s.group = groups.get((s.uploader_eid or "").strip().upper())
+
+
 @router.get("/{skill_id}", response_model=SkillRead)
 def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill = _get_skill_or_404(db, skill_id)
@@ -169,6 +199,7 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill.content_updated_at = content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
+    _attach_group(db, [skill])
     # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
     #
     # 先把模型构出来再改字段,不给 ORM 对象赋值:`instructions` 是真列,赋值会把 session 弄脏,
@@ -260,16 +291,57 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
+@router.post("/{skill_id}/external-download", response_model=ExternalDownloadRead)
+def record_external_download(
+    skill_id: str,
+    request: Request,
+    eid: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> ExternalDownloadRead:
+    """记一次「用户去上游取这个包」,并把该去的地址交出来。**不传字节。**
+
+    存在的理由是 `download_skill` 的 307 那条分支**在浏览器里走不通**:前端的下载按钮走的是
+    XHR(`responseType: 'blob'`),而 XHR 跟着一个跨域跳转时浏览器会对新域名做 CORS 检查 ——
+    Nexus 不回 `Access-Control-Allow-Origin`,请求在协议层就被掐掉,连状态码都没有。用户看到的
+    是「Network error / Failed to fetch」,而服务端日志里明明白白写着 307。这不是配置问题:只要
+    下载走 XHR,转到一个不给 CORS 头的外部主机就永远失败。
+
+    所以界面改成一个真的链接(顶层导航不受 CORS 约束),而这一次「去取」的计数就落在这里。
+    307 那条分支保留不动:它对 curl / CLI 这类会跟跳转的调用方是对的,只是浏览器用不了。
+
+    **两条路不会重复计数**,因为前端对同一个技能只会走其中一条(按 `externally_hosted` 分岔)。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    if not skill.externally_hosted:
+        # 不是外部托管的技能没有「去上游取」这件事。拒掉而不是静默记一次:否则这个端点就是一个
+        # 谁都能调、不用真的下载任何东西就能把下载量刷上去的入口。
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能的内容在门户自己这边,请用 /download 下载",
+        )
+    _bump_downloads(db, skill, acting_eid(request, eid))
+    return ExternalDownloadRead(
+        id=skill.id, url=skill.external_url, source=skill.external_source
+    )
+
+
 @router.get("/{skill_id}/download")
 def download_skill(
     skill_id: str,
+    request: Request,
     eid: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Download a skill as a .zip archive named after the skill's real name.
 
-    ``eid`` (optional) records who downloaded, for per-user leaderboards; the
-    endpoint stays usable anonymously when it is absent.
+    Who downloaded is taken from the JWT the auth middleware verified, falling
+    back to the ``eid`` query param only when auth is off in dev — the same rule
+    the market's download endpoint already follows. It used to read the query
+    param alone, which had two consequences: a caller that omitted it produced a
+    row nobody could be attributed to (ten such rows exist, 2026-08-06 to
+    2026-08-12), and a caller that supplied someone else's EID had its download
+    recorded against them. Neither is acceptable for a figure the report presents
+    as "who uses what".
 
     The archive contains the whole skill folder (SKILL.md + any artifacts +
     manifest) under a top-level directory named after the skill. Skills with
@@ -277,6 +349,20 @@ def download_skill(
     from the stored instructions.
     """
     skill = _get_skill_or_404(db, skill_id)
+    downloader = acting_eid(request, eid)
+
+    if skill.externally_hosted:
+        # 内容在别人那儿(第一个来源是 IVC 的 Nexus),门户没有字节可发。
+        #
+        # **先记事件,再转出去。** 顺序是这里唯一有意义的决定:转出去之后门户什么都看不到了,
+        # 所以记在前面。代价是用户在对方那边失败了我们仍记了一次 —— 与市场那侧同一个取舍
+        # (见 market.py:"记在传输之前,失败会抛"),理由也一样:"没人下得下来"正是这个计数
+        # 应该让人看见的事,而不是应该抹掉的事。
+        _bump_downloads(db, skill, downloader)
+        # 307 而不是 302:保持方法与请求体不变,并且明确这不是一个永久搬迁 —— 防火墙放行之后
+        # 这批技能会改成门户自己存包,那时这个分支对它们就不再成立。
+        return RedirectResponse(skill.external_url, status_code=307)
+
     # Official (anthropic) skills: name the archive after the namespaced id
     # (e.g. "anthropics-xlsx"); user skills after the display name.
     is_official = skill.category_id == "official"
@@ -291,8 +377,8 @@ def download_skill(
             "这个技能没有记下内容在仓库里的位置或版本,无法下载",
         )
     try:
-        tree = skill_content.read_tree(skill.repo_commit, skill.storage_path)
-    except skill_content.ContentUnavailable as exc:
+        tree = asset_content.read_tree(skill.storage_path, skill.repo_commit)
+    except asset_content.ContentUnavailable as exc:
         # 原来这里会用 skill.instructions 合成一个只有 SKILL.md 的 zip。那是同一份正文的第二份
         # 副本,而且下载下来的包看不出它缺了脚本和附件 —— 用户会以为自己拿到了完整的技能。
         raise HTTPException(
@@ -352,7 +438,7 @@ def download_skill(
             )
 
     buf.seek(0)
-    _bump_downloads(db, skill, eid)
+    _bump_downloads(db, skill, downloader)
     return StreamingResponse(
         buf,
         media_type="application/zip",
@@ -376,6 +462,25 @@ def create_skill(payload: SkillCreate, db: Session = Depends(get_db)) -> RpAiSki
     return skill
 
 
+def _refuse_if_synced(skill: RpAiSkill) -> None:
+    """从上游同步来的技能在门户里是只读的。
+
+    门户是 Gerrit 上 ``radio/ai-assets`` 的**下游**。在这里改或下架有两层问题:一层是徒劳 ——
+    下一次同步会照上游的内容写回来;另一层是真会弄坏东西 —— 这两条路径都会拿
+    ``storage_path`` 当"门户自己那个技能仓里的路径"去写,而同步来的值是 ``gerrit:skill/xxx``,
+    于是 ``skill_storage`` 会在门户的仓里造一个名叫 ``gerrit:skill`` 的目录,或者试图去删一份
+    那里根本不存在的内容。
+
+    所以这里明确拒绝,并说清该去哪改。要真的下架一个同步来的技能,得先从上游那个仓里去掉。
+    """
+    if asset_content.is_gerrit(skill.storage_path):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能是从 Gerrit 的 radio/ai-assets 同步来的,门户只是它的只读下游 —— "
+            "在这里的修改会被下一次同步覆盖回去。请改上游那个仓。",
+        )
+
+
 @router.put("/{skill_id}", response_model=SkillRead)
 async def update_skill(
     skill_id: str, payload: SkillUpdate, request: Request, db: Session = Depends(get_db)
@@ -383,6 +488,7 @@ async def update_skill(
     # Who is editing is the signed-in caller, not a field in the body (see acting_eid).
     editor_eid = acting_eid(request, payload.editor_eid)
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     scalar_data = payload.model_dump(
         exclude_unset=True,
         exclude={"cases", "sub_skills", "input_params", "editor_eid", "skill_md"},
@@ -397,6 +503,13 @@ async def update_skill(
         cat = db.get(RpAiCategory, skill.category_id)
         if cat:
             skill.category = cat.label
+        # 部门默认图也要跟着换。原来这里只刷新了 ``category`` 标签,于是把技能挪到别的部门之后,
+        # 卡片上还挂着**原部门**的图,而界面上没有任何地方能纠正它(封面图此前完全不可编辑)。
+        #
+        # 两个例外都不动:作者传过自己的封面图(那是他的选择,不该被换组悄悄覆盖),或者这次请求
+        # 显式带了 image(调用方指定的优先)。
+        if not skill.has_custom_image and "image" not in scalar_data:
+            skill.image = skill_image.category_image(skill.category_id)
     _apply_children(skill, payload)
 
     # If the raw SKILL.md was edited directly, it is the source of truth:
@@ -581,6 +694,146 @@ async def update_skill(
     return skill
 
 
+# --- 封面图 -----------------------------------------------------------------
+#
+# 这三个端点**刻意不复用 update_skill**。那条路每次都会重跑一次安全审计、升版本、往 GitLab
+# 提交打 tag、写一行版本历史、并通知所有收藏者"已更新到 vX";而且审计判 suspect 时整份改动会被
+# 暂存进待复核表,于是图片改动根本不生效。为换一张封面付这些代价是错的:封面是展示元数据,不是
+# 技能内容,它变了没有任何人需要重新安装。
+#
+# 所以这里只写那三列,不碰 version / repo_commit / status / audit_* ,也不发通知。
+
+
+def _require_image_owner(
+    skill: RpAiSkill, request: Request, x_user_eid: str | None
+) -> str:
+    """只有上传者本人和管理员能改封面图。返回调用者 EID。
+
+    照 delete_skill / market 那边的规矩:身份取已验证的调用者,不是调用方能随便填的请求头。
+    ``uploader_eid`` 为空时**不放行** —— 官方导入的技能就是没有上传者的,放行等于任何登录用户
+    都能改它们的封面。
+    """
+    requester = acting_eid(request, x_user_eid)
+    if requester == settings.audit_admin_eid:
+        return requester
+    if requester != skill.uploader_eid:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有上传者本人或管理员可以修改封面图"
+            if skill.uploader_eid
+            else "这个技能没有登记上传者,只有管理员可以修改封面图",
+        )
+    return requester
+
+
+@router.put("/{skill_id}/image", response_model=SkillImageState)
+async def set_skill_image(
+    skill_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiSkill:
+    """换掉这个技能的封面图。PUT 而非 POST:同一张图重传两次结果相同。"""
+    skill = _get_skill_or_404(db, skill_id)
+    _require_image_owner(skill, request, x_user_eid)
+
+    # 按块读并累计,不用 `await file.read()` 一口吞下整个 body。注意这拦的是进程内存:
+    # python-multipart 在进到这个函数之前已经把请求体落到临时文件了,真正的传输上限属于边缘
+    # (nginx client_max_body_size)。所以这道闸门的意义是"库里不会出现超限的行",不是省带宽。
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > skill_image.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                f"图片不能超过 {skill_image.MAX_UPLOAD_BYTES // 1024} KB",
+            )
+        chunks.append(chunk)
+
+    # 解码 + 重新编码是 CPU 活,别占着事件循环(一张 4000px 的图能跑上百毫秒)。
+    try:
+        data, mime = await run_in_threadpool(
+            lambda: skill_image.normalize(b"".join(chunks))
+        )
+    except skill_image.InvalidImage as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    skill.image_blob = data
+    skill.image_mime = mime
+    # 用库的时钟,不用 datetime.utcnow():这一列和 created_at/updated_at 一样存 DB 本地的 naive
+    # 值(那台库是 UTC+2),混用两个时钟正是 audit.py 里记着的那个坑。utcnow() 另外在 3.12 起已弃用。
+    skill.image_updated_at = reporting_windows.db_now()
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
+def _image_etag(skill: RpAiSkill) -> str:
+    """强 ETag。图变了 ``image_updated_at`` 一定变,所以它足够做版本标识。"""
+    stamp = skill.image_updated_at.isoformat() if skill.image_updated_at else "0"
+    return '"' + hashlib.sha256(f"{skill.id}:{stamp}".encode()).hexdigest()[:32] + '"'
+
+
+@router.get("/{skill_id}/image")
+def get_skill_image(
+    skill_id: str, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    """返回作者上传的封面图。没有自定义图就是 404 —— 前端据此回落到部门默认图。
+
+    这里**不做**内容协商也不做缩略图:存进来的时候已经归一化过(≤1024px、无 EXIF、格式限定在
+    PNG/JPEG/WebP),所以直接吐字节。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    if not skill.has_custom_image:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "这个技能没有自定义封面图"
+        )
+
+    etag = _image_etag(skill)
+    headers = {
+        "ETag": etag,
+        # 一分钟的陈旧度换掉市场页几十张图的重复请求;配合 ETag,换图之后最多一分钟就刷新,
+        # 而且刷新是一次 304 不是一次重传。
+        "Cache-Control": "private, max-age=60, must-revalidate",
+        # 这是用户提供过的内容,即使已经重新编码过也不给浏览器自己猜类型的机会。
+        "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": "inline",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+
+    # image_blob 是 deferred 的,这一句才真的把字节读出来 —— 也只有这条路径需要它。
+    return Response(content=skill.image_blob, media_type=skill.image_mime, headers=headers)
+
+
+@router.delete("/{skill_id}/image", response_model=SkillImageState)
+def clear_skill_image(
+    skill_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiSkill:
+    """删掉自定义封面图,回落到部门默认图。
+
+    顺手把 ``image`` 重新按当前部门派一次:这一行原本可能还留着旧部门的图(见 update_skill
+    里那处修复),而作者点"移除封面图"时期望看到的是**现在这个部门**该有的那张。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    _require_image_owner(skill, request, x_user_eid)
+    skill.image_blob = None
+    skill.image_mime = None
+    skill.image_updated_at = None
+    skill.image = skill_image.category_image(skill.category_id or "")
+    db.commit()
+    db.refresh(skill)
+    return skill
+
+
 @router.delete("/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_skill(
     skill_id: str,
@@ -601,11 +854,17 @@ def delete_skill(
     可以下架。原来这个接口**没有任何鉴权**,任何人可以删任何技能。
     """
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
-    if not is_admin and skill.uploader_eid and requester != skill.uploader_eid:
+    # `uploader_eid` 为空时**不放行** —— 官方导入的技能就是没有上传者的,而原来的写法
+    # (`skill.uploader_eid and ...`)让任何登录用户都能把它们下架。
+    if not is_admin and requester != skill.uploader_eid:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "只有上传者本人或管理员可以下架这个技能"
+            status.HTTP_403_FORBIDDEN,
+            "只有上传者本人或管理员可以下架这个技能"
+            if skill.uploader_eid
+            else "这个技能没有登记上传者,只有管理员可以下架",
         )
 
     if skill.storage_path and skill.repo_commit:

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
+from app.models.category import RpAiCategory
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
@@ -25,6 +26,8 @@ from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
 from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
+from app.services.card_group import groups_for_eids
+from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
@@ -74,8 +77,12 @@ def list_items(
 ) -> list[RpAiMarketItem]:
     """列出市场条目,只包含请求者看得到的那些。
 
-    上传的 agent 包在被批准之前是 ``pending``:除上传者和 admin,任何人都看不到。审计只出
-    结论不拦截之后,这条规则**就是**唯一的闸门,所以它必须落在数据层,而不是靠界面不显示。
+    ``pending`` 的条目除上传者和 admin 谁都看不到。包上传现在传完即上市,所以新条目不会是
+    pending —— 这条规则留着是因为**下架靠的就是它**:管理员在审核页拒绝,条目立刻从所有人
+    的列表里消失,而上传者仍然看得到自己的那一条(否则他不知道发生了什么)。
+
+    过滤必须落在数据层而不是靠界面不显示:条目 id 是可推出来的(``gl-<GitLab 项目 id>``),
+    "列表里看不见"和"接口取不到"是两件事,少一件等于没有。
     """
     stmt = select(RpAiMarketItem)
     requester = acting_eid(request, x_user_eid)
@@ -323,6 +330,36 @@ def create_item(
             )
 
     data = payload.model_dump()
+
+    # Category: same shape as the skill upload path (routers/upload.py) on
+    # purpose — one behaviour for "which group does this belong to", not two.
+    #
+    # This path used to write ``payload.category_id`` straight through with no
+    # check at all, and the registration dialog defaulted it to 'public'. Because
+    # 'public' is a real, selectable category, nothing looked wrong and nothing
+    # could complain: three IVC agents registered on 2026-09-01 landed in Public
+    # and were simply not there when their author filtered by IVC.
+    #
+    # Validating here and not only in the dialog: the endpoint is public and the
+    # item id is guessable, so "the UI now sends a group" is not the same as "a
+    # row cannot be filed wrong". UI reachability is not a boundary.
+    category_id = (data.get("category_id") or "").strip()
+    if not category_id:
+        category_id = group_for_eid(db, creator) or ""
+    if not category_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "请选择分组:你的部门没有对应的门户分组。",
+        )
+    if category_id in PSEUDO_CATEGORY_IDS:
+        # 'all' is a filter, not a home; 'official' claims we vetted it.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"'{category_id}' 不是可以登记到的分组。"
+        )
+    if db.get(RpAiCategory, category_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"未知分组 '{category_id}'。")
+    data["category_id"] = category_id
+
     base = _slugify(payload.name)
     item_id = base
     n = 2
@@ -351,8 +388,16 @@ def delete_item(
     # header the caller controls.
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
-    if not is_admin and item.creator and requester != item.creator:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only admin or creator can delete")
+    # `item.creator` 为空时**不放行**。原来的写法是 `item.creator and requester != ...`,
+    # 于是没有主人的条目谁都能动 —— 而同步进来的条目 creator 就是 NULL,它们的 id 又是可以
+    # 推出来的 `gl-<GitLab 项目 id>`。查不到主人时该做的是交给管理员,不是对所有人开放。
+    if not is_admin and requester != item.creator:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有上传者本人或管理员可以删除这个条目"
+            if item.creator
+            else "这个条目没有登记上传者,只有管理员可以删除",
+        )
     db.delete(item)
     db.commit()
 
@@ -365,15 +410,29 @@ def update_item(
     db: Session = Depends(get_db),
     x_user_eid: str | None = Header(None),
 ) -> RpAiMarketItem:
-    """Edit a market item. Only the creator (or items without a creator) may edit."""
+    """Edit a market item. Only its creator, or an admin.
+
+    原来这里写的是"creator 本人,**或者没有 creator 的条目**",而那不是一条规则、是一个洞:
+    `MarketItemCreate` 里带 `repo_url` / `service_url`,所以"任何人可以编辑没有主人的条目"
+    等于任何人可以把一个同步进来的条目改指向自己的仓库,而卡片、名字、下载入口一个字不变。
+    没有主人的条目现在交给管理员。
+    """
     item = db.get(RpAiMarketItem, item_id)
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Item not found")
 
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
-    if not is_admin and item.creator and requester != item.creator:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "只有创建者本人可以编辑")
+    # `item.creator` 为空时**不放行**。原来的写法是 `item.creator and requester != ...`,
+    # 于是没有主人的条目谁都能动 —— 而同步进来的条目 creator 就是 NULL,它们的 id 又是可以
+    # 推出来的 `gl-<GitLab 项目 id>`。查不到主人时该做的是交给管理员,不是对所有人开放。
+    if not is_admin and requester != item.creator:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "只有创建者本人可以编辑"
+            if item.creator
+            else "这个条目没有登记创建者,只有管理员可以编辑",
+        )
 
     if payload.item_type == "ai-platform" and not is_admin:
         raise HTTPException(
@@ -513,7 +572,11 @@ def get_review(
         if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
-    uploader = db.get(RpAiPortal, item.creator) if item.creator else None
+    uploader = (
+        db.scalar(select(RpAiPortal).where(RpAiPortal.eid == item.creator))
+        if item.creator
+        else None
+    )
     attach_market_stats(db, [item])
     return MarketReviewRead(
         item=MarketItemRead.model_validate(item, from_attributes=True),
@@ -536,12 +599,16 @@ def decide_review(
     db: Session = Depends(get_db),
     x_user_eid: str | None = Header(None),
 ) -> RpAiMarketItem:
-    """Approve or reject an uploaded package. Admin only, and recorded.
+    """Take an uploaded package off the market, or put it back. Admin only, and recorded.
 
-    This is the interim mechanism: there is no reviewing workflow yet, so one
-    person flips the state. Recording *who* and *when* is the part that must not
-    wait for that workflow — with the audit reporting only, this decision is the
-    whole gate, and "who let this in" has to be answerable afterwards.
+    This is no longer a gate on the way in — packages are approved on upload, so
+    nothing waits here. What it is now is the retract switch: `rejected` (or
+    `pending`) hides the item from everyone except its uploader, immediately,
+    because `list_items` filters in the data layer.
+
+    Recording *who* and *when* still matters, and more than before: with no entry
+    gate, "who took this down" (or put it back) is the only trace of a judgement
+    call anyone made about this item.
     """
     requester = acting_eid(request, x_user_eid)
     if requester != settings.audit_admin_eid:

@@ -6,14 +6,17 @@ Mirrors the frontend SkillDetail interface. List-valued display fields
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    DateTime,
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -47,6 +50,27 @@ class RpAiSkill(TimestampMixin, Base):
     )
 
     image: Mapped[str | None] = mapped_column(String(512))
+    # --- 作者自己上传的封面图 -------------------------------------------------
+    # 上面那个 ``image`` 是**前端静态资源路径**(skill-images/<部门>.jpg),按部门自动派,作者
+    # 对它没有选择权。下面三列是作者自己上传的那一张,存字节。两者并存而不是替换:自定义图被删
+    # 掉之后自然回落到部门默认图,老数据也不用迁。
+    #
+    # **为什么存进库,而不是宿主机上一个目录。** platform-ci 的 backup.sh 只做 MySQL(mysqldump
+    # 之后起一个临时实例导进去、逐表比行数验证还原)。新开一个宿主机目录等于凭空造出一份没人备份
+    # 的状态,而这些字节是用户提供的、不可重建 —— 丢了就是丢了,而且没人会发现它没被备份,直到那
+    # 一天。存进库就自动落在那条已经在跑、且已验证能还原的路径上;顺带不给后端增加新的机器绑定,
+    # 多副本也不需要共享盘。代价是库变大,按 512 KB 上限算完全可以忽略。
+    #
+    # ``deferred=True`` 不是优化,是必需的:列表接口一次返回几十个技能,不 defer 的话每次都会把
+    # 每一行的图片字节都拖过来 —— 而那个接口连图都不显示。只有 GET /image 会真的碰它。
+    image_blob: Mapped[bytes | None] = mapped_column(
+        LargeBinary(length=(1 << 24) - 1), deferred=True
+    )
+    # 回吐时用的 MIME。它同时充当"有没有自定义图"的判据(见 has_custom_image):判据不用
+    # image_blob 是因为读那一列会触发 deferred 加载,把刚才省下的字节又拖回来。
+    image_mime: Mapped[str | None] = mapped_column(String(64))
+    # 图换过的时间,只用来算 ETag / 缓存校验。
+    image_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     rating: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     # Frontend displays a formatted string like "5.6K".
     downloads: Mapped[str] = mapped_column(String(32), default="0", nullable=False)
@@ -75,9 +99,21 @@ class RpAiSkill(TimestampMixin, Base):
 
     # --- storage (git repo) -------------------------------------------------
     # Relative path within the skill repo, e.g. "public/tavily_ezhgmio_Tavily".
+    # A ``gerrit:`` prefix means the content lives in the Gerrit asset repository
+    # instead; ``services/asset_content`` dispatches on it.
     storage_path: Mapped[str | None] = mapped_column(String(512))
-    # Latest git commit sha that stored this skill.
+    # Latest git commit sha that stored this skill. Reads resolve paths against
+    # it, so it MUST be a commit — not a tree.
     repo_commit: Mapped[str | None] = mapped_column(String(64))
+    # Git object sha of this skill's own directory, for synced skills only.
+    #
+    # Separate from ``repo_commit`` because they answer different questions: that
+    # one is "which version do I read paths against" (a commit, repo-wide), this
+    # one is "did *this* asset's bytes change" (a tree, per directory). Using the
+    # commit for both would mark all synced assets changed on every upstream
+    # commit and bump every card's timestamp; using the tree for both makes path
+    # reads 404, because a tree sha is not something a path resolves against.
+    content_sha: Mapped[str | None] = mapped_column(String(64))
     # Security-audit derived state: pass | suspect (danger is never stored).
     audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
     # 描述**当前发布内容**的那条审计记录(``rp_ai_skill_audit_record.id``)。
@@ -87,6 +123,34 @@ class RpAiSkill(TimestampMixin, Base):
     # 而 id 是随机 uuid,拿它做次级排序等于抛硬币。所以这里把答案记下来,而不是每次去猜。
     # 老数据是 NULL,收敛器对它们仍按时间倒序取最新一条。
     audit_ref: Mapped[str | None] = mapped_column(String(32))
+
+    # --- 外部托管 ------------------------------------------------------------
+    # 内容不在门户的仓库里,而在别人那儿。第一个来源是 IVC 的 Nexus,它对生产机房整段 TCP
+    # 不可达(ICMP 通而 22/80/443/8081/8443 全部静默超时,且无代理),所以门户拿不到包体,只能
+    # 登记目录并把下载转过去 —— 用户的浏览器在工位网段上是能访问它的。
+    #
+    # 为什么不复用 ``storage_path`` + ``repo_commit``:那两个字段的含义是"内容在我们的仓库里
+    # 的哪个位置、哪一版",下载路径据此真的去读字节。往里塞一个外部 URL 会让"门户存了这份
+    # 内容"这句话在一部分行上悄悄变成假的,而调用方无法分辨。
+    #
+    # 为空即普通技能。老数据全部为空,所以既有读法不受影响。
+    external_url: Mapped[str | None] = mapped_column(String(1024))
+    external_source: Mapped[str | None] = mapped_column(String(32))
+
+    @property
+    def externally_hosted(self) -> bool:
+        """内容在别处,下载要转出去。"""
+        return bool(self.external_url)
+
+    @property
+    def has_custom_image(self) -> bool:
+        """作者传过自己的封面图吗。
+
+        判据是 ``image_mime`` 而不是 ``image_blob``:后者是 deferred 的,读它会把字节拖过来,
+        而这个属性会在每一行读模型上被求值一次。前端拿它决定是指向 ``/api/skills/{id}/image``
+        还是用 ``image`` 那个部门默认图路径。
+        """
+        return bool(self.image_mime)
 
     @property
     def uploader_name(self) -> str | None:

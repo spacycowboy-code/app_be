@@ -88,6 +88,12 @@ def _upsert_user(db: Session, user: ldap_auth.LdapUser) -> None:
         row.display_name = user.display_name[:128]
     if user.department:
         row.department = user.department[:64]
+    # This *is* a sign-in, so the row is a sign-in row from now on. It matters for
+    # a row an import created ahead of the person (origin='import', see
+    # models/user.py): leaving that value in place would keep them out of the
+    # report's penetration rate forever, including after they started using the
+    # portal for real.
+    row.origin = "login"
     db.commit()
 
 

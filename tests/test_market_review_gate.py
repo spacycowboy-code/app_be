@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -24,7 +25,10 @@ ITEM_ID = "gl-4242"
 def _seed(status: str = "pending") -> None:
     with SessionLocal() as db:
         for eid in (OWNER, STRANGER, ADMIN):
-            if db.get(RpAiPortal, eid) is None:
+            # 按 eid 查,不能用 db.get():这张表的主键是自增的 id,eid 只是唯一索引,所以
+            # db.get 拿一个 EID 当主键去查永远答 None —— 在这里它碰巧无害(每条测试的表都是
+            # 新的),但同一个写法在 agent_upload 里让每次上传都插重复 eid、撞 1062。
+            if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
                 db.add(RpAiPortal(eid=eid))
         db.add(RpAiMarketItem(
             id=ITEM_ID, name="Pending Agent", item_type="agent", service_type="code",
@@ -183,3 +187,28 @@ def test_decision_vocabulary_is_closed(client) -> None:
     r = client.post(f"/api/market/{ITEM_ID}/review", json={"status": "approve"},
                     headers={"X-User-Eid": ADMIN})
     assert r.status_code == 422
+
+
+def test_review_names_the_uploader_not_just_the_eid(client) -> None:
+    """审核页要说出上传者是谁,而不是只给一串 EID。
+
+    原来这里用 `db.get(RpAiPortal, item.creator)` 按主键查 —— 这张表的主键是自增的 `id`,
+    `eid` 只是一个带唯一索引的普通列,所以它永远答 None,uploaderName 一路兜底成 EID。
+    它不报错,只是静默地永远查不到人:审核的人看到 EZHGMIO 而不是姓名,也就没法判断这个包
+    该不该由这个人来传。同一个误用在 agent_upload 的 _ensure_user 里是会炸的那一版。
+    """
+    _seed()
+    with SessionLocal() as db:
+        row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == OWNER))
+        row.display_name = "Miao Zhang M"
+        db.commit()
+
+    body = client.get(f"/api/market/{ITEM_ID}/review", headers={"X-User-Eid": ADMIN}).json()
+    assert body["uploaderName"] == "Miao Zhang M"
+
+
+def test_review_falls_back_to_the_eid_when_there_is_no_name(client) -> None:
+    """LDAP 没同步过的人只有 EID —— 那也要显示,不能是空的。"""
+    _seed()
+    body = client.get(f"/api/market/{ITEM_ID}/review", headers={"X-User-Eid": ADMIN}).json()
+    assert body["uploaderName"] == OWNER

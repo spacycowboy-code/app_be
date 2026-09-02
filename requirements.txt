@@ -8,6 +8,9 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20
+# 技能封面图的解码/重编码(services/skill_image.py)。它处理的是**用户上传的字节**,所以钉在
+# 当前的补丁线上而不是一个老版本:Pillow 的历史 CVE 基本都在图像解码器里。
+Pillow==12.3.0
 detect-secrets==1.5.0
 # 读/写 agent 包里的 portal-agent.yaml(自描述文件)。此前是 detect-secrets 的
 # 传递依赖,既然直接 import 就直接声明:传递依赖会随上游改动消失。

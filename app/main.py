@@ -19,6 +19,8 @@ from app.routers import (
     comments,
     departments,
     favorites,
+    gerrit_sync,
+    ivc_sync,
     login_stats,
     market,
     market_favorites,
@@ -104,6 +106,10 @@ AUTH_WHITELIST = {
     "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
     "/api/skills/import-official",  # official-skill sync CI — skill_import_token
     "/api/rsw/inventory/upload",    # external inventory tool — rsw_inventory_api_key
+    # Gerrit radio/ai-assets sync — gerrit_sync_token. Called by a scheduled job,
+    # not a signed-in person: making it carry a JWT would mean issuing a session
+    # that can do everything else too.
+    "/api/integrations/gerrit/ai-assets/sync",
 }
 
 
@@ -189,7 +195,18 @@ async def auth_gate(request: Request, call_next):
 
 @app.exception_handler(IntegrityError)
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
-    """Turn DB constraint violations into a clean 400 rather than a 500."""
+    """Turn DB constraint violations into a clean 400 rather than a 500.
+
+    Log it as well. Handing the constraint text to the browser and writing
+    nothing server-side means nobody can tell afterwards which constraint
+    fired: the upload that hit this returned "Database constraint violation"
+    with an empty log, and the cause (a duplicate eid insert) had to be
+    reproduced by hand against the production schema to be found at all.
+    """
+    logger.error(
+        "DB constraint violation on %s %s: %s",
+        request.method, request.url.path, exc.orig,
+    )
     return JSONResponse(
         status_code=400,
         content={"detail": "Database constraint violation", "error": str(exc.orig)},
@@ -205,6 +222,8 @@ app.include_router(skills.router)
 app.include_router(upload.router)
 app.include_router(audit.router)
 app.include_router(skill_import.router)
+app.include_router(gerrit_sync.router)
+app.include_router(ivc_sync.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
