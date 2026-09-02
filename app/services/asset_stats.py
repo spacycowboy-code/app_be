@@ -78,11 +78,32 @@ def content_updated_at(
     return skill.updated_at
 
 
+def attach_skill_groups(db: Session, skills: list[RpAiSkill]) -> None:
+    """把上传者的组（地址 · 大部门 · 小部门）挂到每个 skill 上。
+
+    按 ``uploader_eid`` 而不是 ``author``:官方导入的那批 ``author`` 是 "Anthropic" 这类标签,
+    不是人、也没有办公地点。那些 skill 没有组,而这就是诚实的答案。
+
+    单独抽出来是因为有两条路要用它:列表走 ``attach_skill_stats``,而单条详情端点自己算那两个
+    统计字段、不调 ``attach_skill_stats``。原先的写法是路由里另有一份实现,只在详情那条路上被
+    调用 —— 列表端点从没调过,于是 Skill Market 每张卡片的组徽标都是空的,详情页却有,而这个
+    差别没有任何报错。
+    """
+    groups = groups_for_eids(db, {s.uploader_eid for s in skills if s.uploader_eid})
+    for s in skills:
+        # 大小写统一成大写:``uploader_eid`` 的历史数据里 ``ezhgmio`` 和 ``EZHGMIO`` 都有。
+        s.group = groups.get((s.uploader_eid or "").strip().upper())
+
+
 def attach_skill_stats(db: Session, skills: list[RpAiSkill]) -> None:
-    """Attach the deduplicated like count and the content-change timestamp.
+    """Attach the deduplicated like count, the content-change timestamp, and the
+    uploader's org group.
 
     Favorites are unique per (eid, skill) by table constraint, so the row count
     is the like count.
+
+    组也在这里挂,和 ``attach_market_stats`` 一致 —— 两个市场做同一件事就该走同一条路,否则
+    只会在其中一条上退化。
     """
     if not skills:
         return
@@ -116,3 +137,4 @@ def attach_skill_stats(db: Session, skills: list[RpAiSkill]) -> None:
     for s in skills:
         s.favorite_count = int(counts.get(s.id, 0))
         s.content_updated_at = content_updated_at(s, *version_stats.get(s.id, (0, None)))
+    attach_skill_groups(db, skills)
