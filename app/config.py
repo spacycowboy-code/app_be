@@ -49,6 +49,18 @@ class Settings(BaseSettings):
     # still shows the manifest's own owner text as the author.
     gerrit_owner_fallback_eid: str = "ECUIDEN"
 
+    # --- IVC / RVC 用量推送 ---------------------------------------------------
+    # 守 POST /api/integrations/ivc/usage/events 的 bearer token。对方的系统用它把下载 /
+    # 点赞事件推过来。为空 = 端点关闭(答 503 并点名缺哪个变量),形状与 gerrit_sync_token 一致。
+    #
+    # **为什么是一个静态 token 而不是一个门户账号。** 调用方是对方机房里的一个无人值守服务:
+    # 走门户的 JWT 就得给它一个 LDAP 账号并让它交互登录,而那个账号一旦存在就能做门户里的
+    # 每一件事 —— 而它只需要往一张流水表里追加行。这个 token 的作用域正好是那一个端点。
+    #
+    # 轮换:改这个变量并重启,然后把新值给对方。没有第二个受影响的地方 —— 它不签任何东西,
+    # 也不在浏览器里出现过。
+    ivc_push_token: str = ""
+
     # Comma-separated list of allowed CORS origins.
     cors_origins: str = "http://localhost:4200"
 
@@ -198,9 +210,12 @@ class Settings(BaseSettings):
     # Dashboard from everyone else, but hiding a link is not access control.
     # Comma-separated; compared uppercase.
     # EZHGMIO Miao Zhang M, ADMINMM the break-glass admin, EHUIWUU Vivie Wu A,
-    # EBAOXUE Baosheng Xue. Also gates the department usage report, which names
-    # individuals.
-    dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE"
+    # EBAOXUE Baosheng Xue, ECUIDEN Tracy Deng (RSW — owns the Gerrit
+    # `radio/ai-assets` repo the RSW sync reads, so she needs the page that
+    # triggers it). Also gates the department usage report, which names
+    # individuals — adding someone here shows them per-person output, not just
+    # a sync button. That is the reason this list is short.
+    dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE,ECUIDEN"
     # --- Department usage report ---------------------------------------------
     # Snapshot of the Microsoft Graph reporting tree — the same graph the Teams org
     # chart draws. Every head count and every percentage in the report is derived
