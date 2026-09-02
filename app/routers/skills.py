@@ -167,6 +167,7 @@ def list_skills(
         )
     skills = list(db.scalars(stmt).all())
     attach_skill_stats(db, skills)
+    _attach_group(db, skills)
     return skills
 
 
