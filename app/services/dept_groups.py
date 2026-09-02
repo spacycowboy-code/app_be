@@ -21,10 +21,25 @@ Why longest-match-first: it lets one team be pulled out of its parent's group
 without touching the parent (``RP PS AI`` -> ``ai-team`` while the rest of
 ``RP PS`` stays ``product-system``).
 
-Why an unmapped department yields ``None`` rather than a catch-all group:
-a wrong group is worse than no group. The skill would be filed under someone
-else's filter, where its uploader will never notice it. ``None`` means "let the
-person choose", and on the market page it means "show everything".
+Why an unmapped department yields ``None`` rather than *some other department's*
+group: a wrong group is worse than no group. The asset would be filed under
+someone else's filter, where its uploader will never notice it. ``None`` means
+"we do not know", and that is deliberately not the same value as "we know it
+belongs nowhere".
+
+``FALLBACK_GROUP_ID`` (``others``) is what "belongs nowhere" resolves to, and it
+does not contradict the paragraph above: it claims no department, so it cannot
+misattribute one. It exists because ``None`` had a cost that only showed up in
+the numbers — an asset with no group is counted in a market's "All" tab and
+appears under no department tab, so the tabs stopped adding up to the total, and
+the rows doing it were invisible in exactly the view that would have revealed
+them. Ten rows had drifted out this way before anyone noticed.
+
+Who applies the fallback matters. The **automatic** importers use it, because
+there is no human in the loop to ask and their alternative is a row nobody can
+see. The **upload dialogs** do not: a person is right there, ``others`` is a
+选项 they can pick, and defaulting for them is how the old ``public`` default
+quietly swallowed a year of Chengdu uploads.
 """
 from __future__ import annotations
 
@@ -79,6 +94,16 @@ DEPT_GROUP_MAP: dict[str, str] = {
     "BNEW RTE RP CD": "cd",
 }
 
+#: The group for an asset whose owner has a department that no prefix above
+#: covers — today that is everyone outside ``BNEW RTE RP`` (``RA RD5`` is the
+#: live case: 5 assets from 5 real employees). Only the automatic importers file
+#: into it; see the module docstring for why the upload dialogs do not.
+#:
+#: It is a real, fileable category, unlike ``PSEUDO_CATEGORY_IDS``: a person in
+#: an unmapped department has to be able to pick it, otherwise their only way
+#: past the "选择分组" check is to claim a department that is not theirs.
+FALLBACK_GROUP_ID = "others"
+
 #: Label used when a group's category row has to be created (see
 #: ``ensure_group_categories``). Only consulted for a slug that has no row yet —
 #: an existing label is never overwritten, because ``POST /api/categories`` lets
@@ -94,6 +119,7 @@ GROUP_CATEGORY_LABELS: dict[str, str] = {
     "qa": "QA",
     "pmo": "PMO",
     "cd": "Chengdu",
+    FALLBACK_GROUP_ID: "Others",
 }
 
 
@@ -140,10 +166,32 @@ def group_for_eid(db: Session, eid: str | None) -> str | None:
     return verified_group(db, row.department if row else None)
 
 
+def group_or_fallback(db: Session, department: str | None) -> str:
+    """``verified_group`` but never ``None`` — an unmapped department gives ``others``.
+
+    For the **automatic** importers only. They have no human to ask, and their
+    old answer (no group at all) produced rows that were counted in a market's
+    "All" tab and reachable from no department tab. ``others`` is the honest
+    version of that: still "not one of our departments", but visible.
+
+    Returns the fallback even if the ``others`` row is somehow missing, unlike
+    ``verified_group``'s refusal to hand out an unbacked slug: the row is created
+    on every boot by ``ensure_group_categories``, and a filter that shows nothing
+    is a smaller failure than a row that shows up in no filter at all.
+    """
+    return verified_group(db, department) or FALLBACK_GROUP_ID
+
+
 def ensure_group_categories(db: Session) -> list[str]:
-    """Create a category row for every slug in ``DEPT_GROUP_MAP`` that lacks one.
+    """Create a category row for every group slug that lacks one.
 
     Returns the slugs it created.
+
+    Covers ``DEPT_GROUP_MAP``'s values **plus** ``FALLBACK_GROUP_ID``, which is
+    not in that table because it is not a department prefix — it is where the
+    importers put an owner no prefix matches. Leaving it out would make
+    ``group_or_fallback`` hand out a slug with no row, i.e. a tab that does not
+    exist, which is the bug it was written to fix.
 
     This exists because the two halves of a group live in different places: the
     slug is code (the table above) and the category is data (a table row), and
@@ -161,7 +209,7 @@ def ensure_group_categories(db: Session) -> list[str]:
     that runs on every boot must not undo that on the next restart.
     """
     created: list[str] = []
-    for slug in sorted(set(DEPT_GROUP_MAP.values())):
+    for slug in sorted(set(DEPT_GROUP_MAP.values()) | {FALLBACK_GROUP_ID}):
         if db.get(RpAiCategory, slug) is not None:
             continue
         label = GROUP_CATEGORY_LABELS.get(slug)

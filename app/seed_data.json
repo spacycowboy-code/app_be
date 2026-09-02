@@ -59,6 +59,11 @@
       "id": "cd",
       "label": "Chengdu",
       "count": 0
+    },
+    {
+      "id": "others",
+      "label": "Others",
+      "count": 0
     }
   ],
   "skills": [
