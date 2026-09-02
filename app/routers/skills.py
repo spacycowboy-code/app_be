@@ -169,8 +169,12 @@ def list_skills(
             | (RpAiSkill.uploader_eid == requester)
         )
     skills = list(db.scalars(stmt).all())
+    # 组由 attach_skill_stats 一并挂上（services/asset_stats.attach_skill_groups）。
+    # 这里曾经还有一句 _attach_group(db, skills)：同一个缺陷被两个人各修一次，一个补了调用、
+    # 一个把实现收成一处并删掉了旧函数，两个都通过了自己的 CI，合到一起就成了对已删符号的
+    # 调用 —— GET /api/skills 直接 500。tools/check_undefined_names.py 能抓到它，但 CI 跑的
+    # 是各自合并前的基线。
     attach_skill_stats(db, skills)
-    _attach_group(db, skills)
     return skills
 
 
