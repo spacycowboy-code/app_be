@@ -316,6 +316,46 @@ def test_an_owner_outside_BNEW_RTE_RP_goes_to_others(gerrit):
     assert cid not in set(DEPT_GROUP_MAP.values()), "RA 的人不能落进任何一个 RP 部门的分组"
 
 
+def test_an_unchanged_asset_still_gets_its_group_recomputed(gerrit):
+    """内容没变也要重算分组 —— 这是差点漏掉的那一步。
+
+    ``content_sha`` 短路的本意是别重复读 Gerrit 的 blob,但归属和分组**不是**从内容推出来的:
+    它们来自 LDAP 和门户自己的分类表,两者都会独立于内容变化(人换部门、新增分组、兜底规则改了)。
+
+    原来的写法把这些字段冻结在"内容最后一次变动时"的取值上。实测代价:线上 8 条 Gerrit 资产
+    没有分组,而把兜底逻辑修好、跑一次同步,它们**一条都不会变** —— 内容 sha 没变,压根走不到
+    算分组那一步。所以这条测试先同步一次,再把分组抹掉模拟历史数据,然后再同步,要求它自己长回来。
+    """
+    _run()
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, "gerrit-skill-commit-message-creator")
+        assert skill.category_id == "others", "前置条件:第一次同步就该归到 others"
+        skill.category_id = None  # 模拟修复之前落库的历史行
+        skill.category = None
+        db.commit()
+
+    report = _by_dir(_run())["skill/commit-message-creator"]
+    assert report["action"] == "unchanged", "内容确实没变,结论仍然是 unchanged"
+
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, "gerrit-skill-commit-message-creator").category_id == "others"
+
+
+def test_an_unchanged_asset_keeps_its_content(gerrit):
+    """重算派生字段不能顺手把正文也重写 —— 那样 ``content_sha`` 这个短路就没有意义了。"""
+    _run()
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, "gerrit-skill-commit-message-creator")
+        skill.description = "手工改过的说明"
+        db.commit()
+
+    _run()
+
+    with SessionLocal() as db:
+        skill = db.get(RpAiSkill, "gerrit-skill-commit-message-creator")
+        assert skill.description == "手工改过的说明", "内容没变时不该回写正文字段"
+
+
 def test_a_creator_who_never_signed_in_gets_an_import_row(gerrit):
     """没有账号行的人,报表认不出他、卡片也没有组徽标。
 

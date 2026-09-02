@@ -250,6 +250,29 @@ def _category_of(db: Session, owner: ResolvedOwner) -> tuple[str | None, str | N
     return slug, row.label
 
 
+def _refresh_owner_and_group(db: Session, row, owner: ResolvedOwner) -> str:
+    """把归属人和分组重算到 ``row`` 上,返回一句描述改了什么(没改就返回空串)。
+
+    只碰这两组**派生**字段,不碰任何从 Gerrit 内容读出来的东西 —— 调用它的地方正处在"内容
+    没变"的分支上,重写正文类字段会让 ``content_sha`` 这个短路失去意义。有一条测试钉这一点。
+
+    ``uploader_eid`` / ``creator`` 用哪个名字由行的类型决定,所以这里按属性存在与否分派,而不是
+    传一个标志进来:两张表这一列名字不同是既成事实,判断放在一处比让两个调用点各记一遍好。
+    """
+    changes: list[str] = []
+    cat_id, cat_label = _category_of(db, owner)
+    if row.category_id != cat_id:
+        changes.append(f"分组 {row.category_id!r} -> {cat_id!r}")
+        row.category_id = cat_id
+        row.category = cat_label
+    eid_field = "uploader_eid" if hasattr(row, "uploader_eid") else "creator"
+    if getattr(row, eid_field) != owner.eid:
+        changes.append(f"归属 {getattr(row, eid_field)!r} -> {owner.eid!r}")
+        setattr(row, eid_field, owner.eid)
+        row.author = owner.display_name
+    return ";".join(changes)
+
+
 def _sync_skill(
     db: Session, ref: str, directory: str, manifest: dict, owner: ResolvedOwner, tree_sha: str
 ) -> AssetOutcome:
@@ -260,8 +283,16 @@ def _sync_skill(
     skill = existing or RpAiSkill(id=skill_id)
 
     if not is_new and skill.content_sha == tree_sha:
+        # 内容没变,但**归属和分组不是从内容推出来的** —— 它们来自 LDAP 和门户自己的分类表,
+        # 两者都会独立于 Gerrit 的内容变化:人换部门、新增一个分组、或者(这次)兜底规则改了。
+        #
+        # 原来这里直接返回,于是这些字段被冻结在"内容最后一次变动时"的取值上。实测后果:线上
+        # 8 条 Gerrit 资产没有分组,而修好代码、跑一次同步,它们**一条都不会变** —— 内容 sha
+        # 没变,压根走不到算分组那一步。所以刷新放在短路之前。
+        refreshed = _refresh_owner_and_group(db, skill, owner)
         return AssetOutcome(
-            "skill", directory, skill_id, "unchanged", "内容 sha 未变",
+            "skill", directory, skill_id, "unchanged",
+            "内容 sha 未变" + (f",但重算了归属/分组({refreshed})" if refreshed else ""),
             owner.eid, owner.display_name, skill.category_id, owner.how, owner.fell_back,
         )
 
@@ -308,8 +339,11 @@ def _sync_market(
     item = existing or RpAiMarketItem(id=item_id)
 
     if not is_new and item.content_sha == tree_sha:
+        # 同 ``_sync_skill``:归属和分组不是从内容推出来的,所以内容没变也要重算。见那里的注释。
+        refreshed = _refresh_owner_and_group(db, item, owner)
         return AssetOutcome(
-            kind, directory, item_id, "unchanged", "内容 sha 未变",
+            kind, directory, item_id, "unchanged",
+            "内容 sha 未变" + (f",但重算了归属/分组({refreshed})" if refreshed else ""),
             owner.eid, owner.display_name, item.category_id, owner.how, owner.fell_back,
         )
 
