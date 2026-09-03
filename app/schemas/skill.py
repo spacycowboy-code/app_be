@@ -71,7 +71,7 @@ class SkillDerived(CamelModel):
     """
 
     rating: float = 0.0
-    downloads: str = "0"
+    downloads: int = 0
     is_trending: bool = False
     version: str | None = None
     author: str | None = None
@@ -232,7 +232,7 @@ class SkillSummary(CamelModel):
     external_url: str | None = None
     external_source: str | None = None
     rating: float = 0.0
-    downloads: str = "0"
+    downloads: int = 0
     is_trending: bool = False
     is_free: bool = True
     tags: list[str] = Field(default_factory=list)

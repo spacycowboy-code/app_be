@@ -300,7 +300,7 @@ def _sync_skill(
         db.add(skill)
         # 运行期字段只在建行时初始化;之后是门户自己的数据,同步不该碰。
         skill.rating = 0.0
-        skill.downloads = "0"
+        skill.downloads = 0
         skill.review_count = 0
         skill.is_trending = False
         skill.is_free = True

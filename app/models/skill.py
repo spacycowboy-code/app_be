@@ -21,7 +21,6 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 from app.database import Base
 from app.models.mixins import TimestampMixin
 
@@ -31,6 +30,29 @@ if TYPE_CHECKING:
     from app.models.review import RpAiSkillReview
     from app.models.user import RpAiPortal
     from app.models.version import RpAiSkillVersion
+
+def as_download_count(value: object) -> int:
+    """把**外部来源**的下载数转成这一列能存的整数,转不了就是 0。
+
+    只给读外部 JSON 的两个地方用:种子数据和上游官方目录的 manifest。它们的值不是我们写的,
+    历史上出现过 ``"5.6K"`` 这种给人看的写法 —— 以前列是字符串,这种值能原样存进去,然后让每一个
+    读取方各自防一手(``_bump_downloads`` 里就为它留过一个分支)。
+
+    现在列是整数,所以转换必须发生在写入之前,而且**在这里失败要静默归零而不是抛异常**:一个
+    展示用的计数格式不对,不足以让整批导入失败。真实的下载数由事件表 ``rp_ai_skill_download``
+    记录,这个计数器只是它的缓存。
+    """
+    if isinstance(value, bool):  # bool 是 int 的子类,但它显然不是一个计数
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    try:
+        return max(0, int(str(value).strip()))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
 
 # Skill review workflow states.
 SKILL_STATUSES = ("pending", "approved", "rejected")
@@ -72,8 +94,17 @@ class RpAiSkill(TimestampMixin, Base):
     # 图换过的时间,只用来算 ETag / 缓存校验。
     image_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     rating: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    # Frontend displays a formatted string like "5.6K".
-    downloads: Mapped[str] = mapped_column(String(32), default="0", nullable=False)
+    # 累计下载次数。曾经是 ``String(32)``,注释写的理由是"前端显示成 5.6K 这样的格式化字符串" ——
+    # 前端从来没有那么做过:模板直接渲染这一列的原始值,排序还要先 ``parseInt``。所以那个理由早就
+    # 不成立了,而字符串留下了三个真实代价:
+    #
+    # 1. SQL 层面任何 ``ORDER BY downloads`` 都按字典序排,"43" 排在 "5" 后面。前端那一处排序
+    #    因为先 parseInt 而侥幸是对的,但这是调用方在替存储兜底,下一个人写 SQL 就会踩到。
+    # 2. 自增必须读出来、转成 int、加一、再转回字符串写回去 —— 一次读-改-写,两个并发下载会
+    #    双双读到 N 然后都写 N+1,丢一次计数。整数列可以直接 ``downloads = downloads + 1``,
+    #    由数据库保证原子性。
+    # 3. 非数字值(比如真写进一个 "5.6K")能存进去,然后让每一个读取方都得防一手。
+    downloads: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_free: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
