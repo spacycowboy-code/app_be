@@ -50,8 +50,11 @@ from app.services.skill_manifest import (
     with_frontmatter,
 )
 from app.services.archives import common_top_dir
-from app.services.asset_stats import attach_skill_stats, content_updated_at
-from app.services.card_group import groups_for_eids
+from app.services.asset_stats import (
+    attach_skill_groups,
+    attach_skill_stats,
+    content_updated_at,
+)
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
 from app.services import asset_content
@@ -166,21 +169,14 @@ def list_skills(
             | (RpAiSkill.uploader_eid == requester)
         )
     skills = list(db.scalars(stmt).all())
+    # 组由 attach_skill_stats 一并挂上（services/asset_stats.attach_skill_groups）。
+    # 这里曾经还有一句 _attach_group(db, skills)：同一个缺陷被两个人各修一次，一个补了调用、
+    # 一个把实现收成一处并删掉了旧函数，两个都通过了自己的 CI，合到一起就成了对已删符号的
+    # 调用 —— GET /api/skills 直接 500。tools/check_undefined_names.py 能抓到它，但 CI 跑的
+    # 是各自合并前的基线。
     attach_skill_stats(db, skills)
-    _attach_group(db, skills)
     return skills
 
-
-def _attach_group(db: Session, skills: list[RpAiSkill]) -> None:
-    """Attach the uploader's org group (地址 · 大部门 · 小部门) onto each skill.
-
-    Keyed on ``uploader_eid`` rather than ``author``: for the official imports
-    ``author`` is a label like "Anthropic", which is not a person and has no
-    office. Those skills get no group, which is the truthful answer.
-    """
-    groups = groups_for_eids(db, {s.uploader_eid for s in skills if s.uploader_eid})
-    for s in skills:
-        s.group = groups.get((s.uploader_eid or "").strip().upper())
 
 
 @router.get("/{skill_id}", response_model=SkillRead)
@@ -200,7 +196,7 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill.content_updated_at = content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
-    _attach_group(db, [skill])
+    attach_skill_groups(db, [skill])
     # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
     #
     # 先把模型构出来再改字段,不给 ORM 对象赋值:`instructions` 是真列,赋值会把 session 弄脏,
@@ -255,13 +251,35 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
     Naming ``updated_at`` in the SET clause suppresses ``onupdate`` and carries
     the existing value forward, so only real edits move it.
     """
+def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
+    """Record a download: log a timestamped event row (with the downloader's
+    EID when known, for per-user leaderboards) and increment the cumulative
+    counter. Best-effort — a logging failure must never break the download.
+
+    A download is NOT a modification of the skill, so this must not move
+    ``updated_at``. That column carries ``onupdate=func.now()`` (TimestampMixin),
+    which fires on any UPDATE that does not name it — and the Home page's
+    "What's New" feed reports a skill as updated whenever
+    ``updated_at > created_at``, so bumping the counter through the ORM made
+    every download surface as a bogus "Update" card with an unchanged version.
+    Naming ``updated_at`` in the SET clause suppresses ``onupdate`` and carries
+    the existing value forward, so only real edits move it.
+
+    The increment is done **in SQL** (``downloads + 1``), not read-modify-write
+    in Python. The old code read the counter, parsed it, added one and wrote the
+    result back; two downloads landing together both read ``N`` and both wrote
+    ``N + 1``, so one of them was lost. Letting the database do the addition
+    makes it atomic, and it is only expressible this way because the column is
+    now an integer.
+
+    The event row is written and committed **before** the counter, in its own
+    transaction. The two are not equally important: ``rp_ai_skill_download`` is
+    the record of what happened and is what the inventory and the department
+    reports count, while ``downloads`` is a cache of it. Putting both in one
+    transaction meant a failed counter update rolled the event row back too —
+    losing the truth because the cache failed.
+    """
     downloader = (eid or "").strip() or None
-    try:
-        next_count = str(int(str(skill.downloads or "0")) + 1)
-    except (ValueError, TypeError):
-        # Non-numeric counter (e.g. "5.6K"): keep the event row but leave the
-        # counter alone rather than guess at its numeric value.
-        next_count = None
     try:
         db.add(
             RpAiSkillDownload(
@@ -270,15 +288,18 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
                 department=department_of(db, downloader),
             )
         )
-        if next_count is not None:
-            db.execute(
-                update(RpAiSkill)
-                .where(RpAiSkill.id == skill.id)
-                .values(downloads=next_count, updated_at=RpAiSkill.updated_at)
-            )
-            # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
-            # a later read in this session sees the stored values.
-            db.expire(skill, ["downloads", "updated_at"])
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(
+            update(RpAiSkill)
+            .where(RpAiSkill.id == skill.id)
+            .values(downloads=RpAiSkill.downloads + 1, updated_at=RpAiSkill.updated_at)
+        )
+        # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
+        # a later read in this session sees the stored values.
+        db.expire(skill, ["downloads", "updated_at"])
         db.commit()
     except Exception:
         db.rollback()

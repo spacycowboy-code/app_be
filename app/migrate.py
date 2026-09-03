@@ -82,6 +82,25 @@ COLUMNS = [
     ("rp_ai_skill", "external_source", "VARCHAR(32) NULL"),
 ]
 
+# (table, column, 期望的 information_schema.column_type, MODIFY 用的类型声明) 四元组。
+#
+# 和上面的 COLUMNS 分开是因为两件事的判断依据不同:加列看"存不存在",改类型看"是不是已经是想要
+# 的类型"。合成一张表就得为每一行记住该用哪种判断。
+#
+# 第三个字段是**小写的 column_type 原样**,不是 DDL —— MySQL 会把 `INT NOT NULL DEFAULT 0`
+# 存成 column_type=`int`,两者对不上,所以要分别写。写错的表现是每次启动都白跑一次 ALTER,
+# 不会坏数据但会在大表上很慢。
+#
+# 第四个字段**只写类型声明,不带列名**。列名由第二个字段提供、拼 SQL 时补上,所以整行里列名
+# 只出现一次。上一版把列名也写进这里,而拼 SQL 的地方又拼了一遍,生成的是
+# `MODIFY COLUMN downloads downloads INT ...` —— MySQL 1064,迁移每次启动都失败。
+COLUMN_TYPES = [
+    # downloads 建表时是 VARCHAR(32)。理由(前端显示 "5.6K")从未实现,而字符串让 SQL 层的
+    # ORDER BY 变成字典序、让自增只能读-改-写。见 models/skill.py 里那段注释。
+    # MySQL 会把 '43' 这样的值自动转成 43;线上核对过,52 行全是纯数字,没有需要人工处理的值。
+    ("rp_ai_skill", "downloads", "int", "INT NOT NULL DEFAULT 0"),
+]
+
 
 # Initial RSW admins seeded on first deploy.
 _INITIAL_ADMINS = ["ECUIDEN", "EZHGMIO"]
@@ -270,6 +289,35 @@ def _column_exists(conn, table: str, column: str) -> bool:
     return bool(row)
 
 
+def _retype_sql(table: str, column: str, type_decl: str) -> str:
+    """The ``ALTER`` that changes one column's type.
+
+    Split out of the loop so the statement can be asserted on **without a MySQL
+    server**: the retype pass only runs where ``information_schema`` answers, so
+    on SQLite it is skipped and a malformed statement here reaches production
+    without a single test going red. That is exactly how
+    ``MODIFY COLUMN downloads downloads INT ...`` shipped.
+
+    ``type_decl`` carries no column name — it is supplied here, once.
+    """
+    return f"ALTER TABLE {table} MODIFY COLUMN {column} {type_decl}"
+
+
+def _column_type(conn, table: str, column: str) -> str | None:
+    """当前的列类型(``information_schema.column_type``,例如 ``varchar(32)`` / ``int``)。
+
+    列不存在时返回 ``None`` —— 那种情况归上面的"加列"那一趟管,不是这里。
+    """
+    row = conn.execute(
+        text(
+            "SELECT column_type FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = :t AND column_name = :c"
+        ),
+        {"t": table, "c": column},
+    ).first()
+    return None if row is None else str(row[0]).lower()
+
+
 def main() -> None:
     # 1) Create any missing tables.
     Base.metadata.create_all(bind=engine)
@@ -301,6 +349,21 @@ def main() -> None:
             else:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
                 print(f"  + added {table}.{column}")
+
+    # 4) Change the type of columns whose declared type has moved on.
+    #    ``create_all`` never touches an existing column, and the pass above only
+    #    adds missing ones — so a column that was created with the wrong type stays
+    #    wrong forever unless it is named here.
+    with engine.begin() as conn:
+        for table, column, want, type_decl in COLUMN_TYPES:
+            have = _column_type(conn, table, column)
+            if have is None:
+                print(f"  ! {table}.{column} missing, cannot retype")
+            elif have == want:
+                print(f"  = {table}.{column} already {want}")
+            else:
+                conn.execute(text(_retype_sql(table, column, type_decl)))
+                print(f"  ~ {table}.{column}: {have} -> {want}")
     print("Migration complete.")
 
 

@@ -30,6 +30,7 @@ from app.config import get_settings
 from app.models.category import RpAiCategory
 from app.repositories import skill_content
 from app.models.skill import (
+    as_download_count,
     RpAiInputParam,
     RpAiSkill,
     RpAiSkillCase,
@@ -157,7 +158,7 @@ def import_official_skills(db: Session, *, refresh: bool = True) -> dict:
             # Seed runtime fields once, from the manifest defaults (0s).
             skill.rating = float(manifest.get("rating") or 0.0)
             skill.rating_dist = manifest.get("ratingDist")
-            skill.downloads = str(manifest.get("downloads") or "0")
+            skill.downloads = as_download_count(manifest.get("downloads"))
             skill.review_count = int(manifest.get("reviewCount") or 0)
             skill.is_trending = bool(manifest.get("isTrending") or False)
         # else: preserve the existing runtime fields (do not touch them).

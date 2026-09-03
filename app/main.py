@@ -12,6 +12,7 @@ from app.version import __version__
 from app.services.auth_tokens import TokenError, check_token_scope, decode_token
 from app.services.audit_engine import BundleTooLarge
 from app.routers import (
+    admin_assets,
     agent_upload,
     audit,
     auth,
@@ -235,6 +236,7 @@ app.include_router(usage.router)
 app.include_router(usage_report.router)
 app.include_router(rsw_inventory.router)
 app.include_router(rdg.router)
+app.include_router(admin_assets.router)
 
 
 @app.get("/health", tags=["health"])

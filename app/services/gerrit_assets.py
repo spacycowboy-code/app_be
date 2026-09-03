@@ -60,7 +60,7 @@ from app.models.user import RpAiPortal
 from app.repositories import gerrit_content
 from app.services.asset_content import GERRIT_PREFIX
 from app.services.asset_owner import OwnerResolver, ResolvedOwner
-from app.services.dept_groups import resolve_group
+from app.services.dept_groups import group_or_fallback
 
 log = logging.getLogger(__name__)
 
@@ -226,21 +226,51 @@ def _ensure_user(db: Session, owner: ResolvedOwner) -> None:
 
 
 def _category_of(db: Session, owner: ResolvedOwner) -> tuple[str | None, str | None]:
-    """``(category_id, label)``,由 owner 的真实部门决定,查不到就留空。
+    """``(category_id, label)``,由 owner 的真实部门决定,映射不到就归 ``others``。
 
-    留空是刻意的:``dept_groups`` 的表只覆盖 ``BNEW RTE RP``,而这个仓一半的作者在
-    ``BNEW RTE RA``。把他们塞进某个 RP 的分组是在编造归属,而空归属的后果只是这张卡片
-    不出现在部门筛选里 —— 可见、可解释、可以以后改。
+    以前这里返回空。空归属的代价不在页面上而在数字里:资产照样计入市场的 "All",却不出现在
+    任何部门标签下,于是标签加起来不等于总数,而**做这件事的行恰好在唯一能暴露它的视图里
+    看不见**。等发现时已经漂出去 10 条。
+
+    ``others`` 不等于"编造归属":它不声称任何一个部门,所以不会把 RA 的人塞进某个 RP 的分组
+    —— 那才是这个函数原来要避免的事,现在仍然避免着。``dept_groups`` 的表只覆盖
+    ``BNEW RTE RP``,而这个仓相当一部分作者在 ``BNEW RTE RA``(RD5 有 5 个资产)。
     """
-    slug = resolve_group(owner.department)
-    if not slug:
-        return None, None
+    slug = group_or_fallback(db, owner.department)
     row = db.get(RpAiCategory, slug)
     if row is None:
-        # 表是代码、分类是数据,两者会漂。给出一个市场没有对应行的 slug 会让每一页都筛成空。
-        log.warning("部门 %r 映射到不存在的分类 %r", owner.department, slug)
+        # 表是代码、分类是数据,两者会漂。``ensure_group_categories`` 每次启动都补 ``others``,
+        # 所以走到这里说明那次补失败了。
+        #
+        # 这里必须退回空,不能硬塞:``category_id`` 是外键,给一个没有对应行的值会让 INSERT
+        # 直接 IntegrityError —— 整次同步连带其它资产一起挂掉。少一个分组只影响这一条,
+        # 挂掉同步影响全部。
+        log.warning("分组 %r 没有对应的分类行(部门 %r),这条资产先不归组", slug, owner.department)
         return None, None
     return slug, row.label
+
+
+def _refresh_owner_and_group(db: Session, row, owner: ResolvedOwner) -> str:
+    """把归属人和分组重算到 ``row`` 上,返回一句描述改了什么(没改就返回空串)。
+
+    只碰这两组**派生**字段,不碰任何从 Gerrit 内容读出来的东西 —— 调用它的地方正处在"内容
+    没变"的分支上,重写正文类字段会让 ``content_sha`` 这个短路失去意义。有一条测试钉这一点。
+
+    ``uploader_eid`` / ``creator`` 用哪个名字由行的类型决定,所以这里按属性存在与否分派,而不是
+    传一个标志进来:两张表这一列名字不同是既成事实,判断放在一处比让两个调用点各记一遍好。
+    """
+    changes: list[str] = []
+    cat_id, cat_label = _category_of(db, owner)
+    if row.category_id != cat_id:
+        changes.append(f"分组 {row.category_id!r} -> {cat_id!r}")
+        row.category_id = cat_id
+        row.category = cat_label
+    eid_field = "uploader_eid" if hasattr(row, "uploader_eid") else "creator"
+    if getattr(row, eid_field) != owner.eid:
+        changes.append(f"归属 {getattr(row, eid_field)!r} -> {owner.eid!r}")
+        setattr(row, eid_field, owner.eid)
+        row.author = owner.display_name
+    return ";".join(changes)
 
 
 def _sync_skill(
@@ -253,8 +283,16 @@ def _sync_skill(
     skill = existing or RpAiSkill(id=skill_id)
 
     if not is_new and skill.content_sha == tree_sha:
+        # 内容没变,但**归属和分组不是从内容推出来的** —— 它们来自 LDAP 和门户自己的分类表,
+        # 两者都会独立于 Gerrit 的内容变化:人换部门、新增一个分组、或者(这次)兜底规则改了。
+        #
+        # 原来这里直接返回,于是这些字段被冻结在"内容最后一次变动时"的取值上。实测后果:线上
+        # 8 条 Gerrit 资产没有分组,而修好代码、跑一次同步,它们**一条都不会变** —— 内容 sha
+        # 没变,压根走不到算分组那一步。所以刷新放在短路之前。
+        refreshed = _refresh_owner_and_group(db, skill, owner)
         return AssetOutcome(
-            "skill", directory, skill_id, "unchanged", "内容 sha 未变",
+            "skill", directory, skill_id, "unchanged",
+            "内容 sha 未变" + (f",但重算了归属/分组({refreshed})" if refreshed else ""),
             owner.eid, owner.display_name, skill.category_id, owner.how, owner.fell_back,
         )
 
@@ -262,7 +300,7 @@ def _sync_skill(
         db.add(skill)
         # 运行期字段只在建行时初始化;之后是门户自己的数据,同步不该碰。
         skill.rating = 0.0
-        skill.downloads = "0"
+        skill.downloads = 0
         skill.review_count = 0
         skill.is_trending = False
         skill.is_free = True
@@ -301,8 +339,11 @@ def _sync_market(
     item = existing or RpAiMarketItem(id=item_id)
 
     if not is_new and item.content_sha == tree_sha:
+        # 同 ``_sync_skill``:归属和分组不是从内容推出来的,所以内容没变也要重算。见那里的注释。
+        refreshed = _refresh_owner_and_group(db, item, owner)
         return AssetOutcome(
-            kind, directory, item_id, "unchanged", "内容 sha 未变",
+            kind, directory, item_id, "unchanged",
+            "内容 sha 未变" + (f",但重算了归属/分组({refreshed})" if refreshed else ""),
             owner.eid, owner.display_name, item.category_id, owner.how, owner.fell_back,
         )
 

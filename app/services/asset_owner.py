@@ -196,21 +196,36 @@ class OwnerResolver:
                 log.warning(
                     "owner %r 按%s匹配到 %d 个人,取了 %s。", raw, how, len(rows), eid
                 )
+            if not (dept or "").strip():
+                # 目录里有这个人,但他没有部门 —— 实测是外部人员(显示名带 (EXT))。
+                # 部门是唯一能推出分组的东西,没有部门就没有归属,资产会计入 "All" 却不出现在
+                # 任何部门标签下。所以记到兜底工号名下,和"目录里根本查不到"走同一条路:
+                # 这两种情况对门户的意义相同 —— **没有一个能负责的内部人**。
+                #
+                # 代价说清楚:``author`` 会变成兜底那个人的名字,原作者的署名不再显示。
+                # 这是有意的取舍(有人负责 > 署名准确),不是漏掉。
+                return self._fallback(
+                    fallback, f"{raw!r} 在目录里没有部门,记到 {fallback} 名下"
+                )
             return ResolvedOwner(
                 eid=eid.strip().upper(),
                 display_name=display.strip() or eid.strip().upper(),
-                department=dept.strip() or None,
+                department=dept.strip(),
                 how=how,
             )
 
         # 走到这里说明目录里没有这个 owner:团队名、离职的人、或者名字拼错了。
+        return self._fallback(fallback, f"目录里查不到 {raw!r},兜底到 {fallback}")
+
+    def _fallback(self, fallback: str, how: str) -> ResolvedOwner:
+        """把资产记到兜底工号名下,连带取它的部门(分组是从部门推的)。"""
         rows = self._dir.search(f"(sAMAccountName={_esc(fallback)})") if fallback else []
         display, dept = (rows[0][1], rows[0][2]) if rows else ("", "")
         return ResolvedOwner(
             eid=fallback,
             display_name=display.strip() or fallback,
             department=dept.strip() or None,
-            how=f"目录里查不到 {raw!r},兜底到 {fallback}",
+            how=how,
             fell_back=True,
         )
 
