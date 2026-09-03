@@ -44,7 +44,11 @@ DEPARTMENTS: tuple[Department, ...] = (
     Department("radio-design-2", "RD2", "Radio Design 2"),
     Department("radio-design-3", "RD3", "Radio Design 3"),
     Department("radio-sw", "RSW", "Radio SW"),
-    Department("qa", "QA", "QA"),
+    # Label is ``Q&A``, code stays ``QA``: the code is the org short form that
+    # lines up with PS / RD1 / RSW beside it, and the report's LDAP segment names
+    # (``dept_groups.DEPT_GROUP_MAP``, ``BNEW RTE RP QA``) are a separate
+    # namespace that this rename does not touch.
+    Department("qa", "QA", "Q&A"),
     Department("pmo", "PMO", "PMO"),
     Department("cd", "CD", "Radio Products Chengdu"),
 )
