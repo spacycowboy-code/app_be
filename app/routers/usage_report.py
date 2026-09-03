@@ -31,6 +31,7 @@ from app.models.org_snapshot import RpAiOrgSnapshot
 from app.services.reporting_windows import reporting_tz
 from app.services.usage_report import graph_walk
 from app.services.usage_report import OrgSnapshotMissing, build_html
+from app.services.usage_report.i18n import DEFAULT_LANG, LANGS
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,20 @@ def require_dashboard_eid(request: Request) -> str:
 def usage_report(
     db: Session = Depends(get_db),
     _eid: str = Depends(require_dashboard_eid),
+    lang: str = Query(
+        DEFAULT_LANG,
+        description="Skeleton language: zh (default) or en. "
+                    "The methodology prose stays Chinese in both.",
+    ),
 ) -> HTMLResponse:
+    if lang not in LANGS:
+        # 422 rather than silently falling back to Chinese: a typo in a bookmarked
+        # URL should be visible, otherwise someone shares ?lang=eng and quietly
+        # gets the Chinese page while believing they sent English.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"Unknown lang '{lang}'. Allowed: {', '.join(LANGS)}.",
+        )
     settings = get_settings()
     try:
         page = build_html(
@@ -70,6 +84,7 @@ def usage_report(
             settings.usage_report_org_snapshot,
             settings.usage_report_identity_snapshot or None,
             settings.ldap_bind_user,
+            lang=lang,
         )
     except OrgSnapshotMissing as exc:
         # 503 rather than 500: the service is fine, an input it needs is not here,

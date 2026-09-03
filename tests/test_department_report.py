@@ -689,3 +689,107 @@ def test_the_appendix_counts_items_not_times(client):
     body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
     assert "共 2 个 skill，未计入" in body
     assert "共 2 次，未计入" not in body
+
+
+# --- language ---------------------------------------------------------------
+#
+# Skeleton only, on purpose. The last test in this block pins the half that is
+# *not* translated, so that "the 口径 paragraphs are still Chinese" reads as a
+# decision rather than as an unfinished job.
+
+
+def test_without_a_language_the_report_is_chinese(client):
+    """An existing bookmark must not change meaning when the switch ships."""
+    _seed_people()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert "RP AI Portal 使用情况报告" in body
+    assert '<html lang="zh-CN">' in body
+
+
+def test_asking_for_english_translates_the_skeleton(client):
+    _seed_people()
+    body = client.get(
+        "/api/department-report?lang=en", headers=_headers("EZHGMIO")
+    ).text
+    assert '<html lang="en">' in body
+    # Headings, KPI labels, table headers, metric names.
+    for wanted in (
+        "RP AI Portal usage report",
+        "1. Departments (second level) compared",
+        "4. Contributors: who made things, and whose things get used",
+        "Appendix",
+        "People in RP",
+        "Of those, have used the portal",
+        "Adoption",
+        "Skill downloads",
+    ):
+        assert wanted in body, wanted
+    # And the Chinese skeleton is gone. Checked in its tag-delimited form, because
+    # several of these words legitimately survive inside the 口径 prose that this
+    # feature deliberately leaves in Chinese — asserting on the bare word would
+    # fail for the right behaviour. (``渗透率`` in the note above the cards is
+    # exactly that case.)
+    for gone in (
+        "<h1>RP AI Portal 使用情况报告</h1>",
+        "<h2>一、大部门（二级部门）对比</h2>",
+        ">RP 组织在职人数<",
+        ">渗透率<",
+        '<td class="l">合计</td>',
+    ):
+        assert gone not in body, gone
+
+
+def test_the_methodology_prose_stays_chinese_in_the_english_page(client):
+    """The agreed scope: skeleton translated, 口径 paragraphs not.
+
+    If this ever fails because the prose became English too, that is fine — but
+    it is a scope change and should be a deliberate edit to this test, not a
+    silent one.
+    """
+    _seed_people()
+    body = client.get(
+        "/api/department-report?lang=en", headers=_headers("EZHGMIO")
+    ).text
+    assert "点表头可排序" in body
+    assert "「用过门户」和「近期登录」不是同一件事" in body
+
+
+def test_an_unknown_language_is_refused_rather_than_silently_chinese(client):
+    _seed_people()
+    r = client.get("/api/department-report?lang=eng", headers=_headers("EZHGMIO"))
+    assert r.status_code == 422
+    assert "eng" in r.json()["detail"]
+
+
+def test_the_language_switch_does_not_change_any_number(client):
+    """Same query, same figures — only the wording may differ."""
+    _seed_people()
+    zh = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    en = client.get(
+        "/api/department-report?lang=en", headers=_headers("EZHGMIO")
+    ).text
+    # The head-count card is the number every percentage in the report divides by.
+    assert ">5</div>" in zh and ">5</div>" in en
+
+
+def test_no_downloads_yet_shows_a_dash_not_the_word_none(client):
+    """The fixtures have no downloads, which is exactly the empty-portal case.
+
+    ``first_seen`` is None then, and interpolating it straight into the KPI card
+    gave "since None" / "None 起". Pinned in both languages because the card is
+    built from one template.
+
+    Scoped to the card on purpose: the same value is also interpolated into the
+    Chinese ``口径`` paragraphs ("登录明细表上线的 None 之后"), which this change
+    does not touch. That is a pre-existing wart on ``main``, only reachable with an
+    empty database, and asserting on the whole page would fail for it instead.
+    """
+    _seed_people()
+    zh = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
+    assert "None 起" not in zh
+    assert "—" in zh
+    en = client.get(
+        "/api/department-report?lang=en", headers=_headers("EZHGMIO")
+    ).text
+    assert "since None" not in en
+    assert "since —" in en
