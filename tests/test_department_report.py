@@ -739,19 +739,51 @@ def test_asking_for_english_translates_the_skeleton(client):
         assert gone not in body, gone
 
 
-def test_the_methodology_prose_stays_chinese_in_the_english_page(client):
-    """The agreed scope: skeleton translated, 口径 paragraphs not.
+def test_the_english_page_has_no_chinese_wording_left_in_it(client):
+    """``lang=en`` means the whole page, prose included.
 
-    If this ever fails because the prose became English too, that is fine — but
-    it is a scope change and should be a deliberate edit to this test, not a
-    silent one.
+    This replaces an earlier test that pinned the opposite — skeleton translated,
+    口径 paragraphs left Chinese. That scope was deliberate at the time and has
+    been superseded, so the test was inverted rather than deleted: the assertion
+    that the page is *not* half-translated is the one worth keeping.
+
+    Asserted as "no CJK anywhere" rather than by listing paragraphs, because a
+    list only covers the paragraphs somebody remembered. The fixtures' own data
+    (departments, names) is all ASCII, so any CJK found here is untranslated
+    wording rather than Chinese content. Real data can of course contain Chinese
+    names, and those are data — this test is about the template.
     """
     _seed_people()
     body = client.get(
         "/api/department-report?lang=en", headers=_headers("EZHGMIO")
     ).text
+    leftover = re.findall(r"[\u4e00-\u9fff]+", body)
+    assert not leftover, f"untranslated wording on the English page: {leftover[:10]}"
+
+
+def test_the_english_page_really_does_carry_the_translated_prose(client):
+    """The counterpart to the check above, which an empty page would also pass."""
+    _seed_people()
+    body = client.get(
+        "/api/department-report?lang=en", headers=_headers("EZHGMIO")
+    ).text
+    assert "The headers sort." in body
+    assert "are not the same thing" in body
+    assert "is not the sum of the columns to its right" in body
+    assert "Each entry states what it actually counts" in body
+
+
+def test_the_chinese_page_still_carries_the_chinese_prose(client):
+    """The prose moved out of the template into the wording table.
+
+    Pinned because that move is exactly the kind of refactor that can drop a
+    paragraph without any other test noticing.
+    """
+    _seed_people()
+    body = client.get("/api/department-report", headers=_headers("EZHGMIO")).text
     assert "点表头可排序" in body
     assert "「用过门户」和「近期登录」不是同一件事" in body
+    assert "口径写在这里而不是脚注" in body
 
 
 def test_an_unknown_language_is_refused_rather_than_silently_chinese(client):
