@@ -83,6 +83,182 @@ COLUMNS = [
 ]
 
 
+# Initial RSW admins seeded on first deploy.
+_INITIAL_ADMINS = ["ECUIDEN", "EZHGMIO"]
+
+
+def _seed_rdg(db) -> None:
+    """Idempotent seed: insert initial nodes, tool mappings, and admins."""
+    from app.models.rdg import RpAiRdgAdmin, RpAiRdgNode, RpAiRdgToolMapping
+    from sqlalchemy import select
+
+    # ── Admins ────────────────────────────────────────────────────────────────
+    existing_admins = {r.eid for r in db.scalars(select(RpAiRdgAdmin)).all()}
+    for eid in _INITIAL_ADMINS:
+        if eid not in existing_admins:
+            db.add(RpAiRdgAdmin(eid=eid))
+            print(f"  + rdg admin: {eid}")
+    db.commit()
+
+    # ── Nodes (skip entirely if any node already exists) ──────────────────────
+    if db.scalars(select(RpAiRdgNode).limit(1)).first():
+        print("  = rdg nodes already seeded, skipping")
+        return
+
+    def _n(stage, key, label, order, parent_key=None):
+        return (stage, key, label, "node", order, parent_key)
+    def _pg(stage, key, order):
+        return (stage, key, "", "parallel-group", order, None)
+    def _c(stage, key, label, order):
+        return (stage, key, label, "continuous", order, None)
+
+    # (stage_key, node_key, label, node_type, sort_order, parent_key)
+    RAW = [
+        # early-phase
+        _n("early-phase","pcs","PCS",0), _n("early-phase","oa-scope","OA Scope",1),
+        _pg("early-phase","pg-ep-1",2),
+        _n("early-phase","pre-otac-prepare","Pre-OTAC Prepare",0,"pg-ep-1"),
+        _n("early-phase","lmc-mdc-define","LMC/MDC Define",1,"pg-ep-1"),
+        _n("early-phase","oa-writing","OA Writing",2,"pg-ep-1"),
+        _pg("early-phase","pg-ep-2",3),
+        _n("early-phase","pre-otac-review","Pre-OTAC Review",0,"pg-ep-2"),
+        _n("early-phase","oa-review","OA Review",1,"pg-ep-2"),
+        # study
+        _n("study","ps-study","PS Study",0),
+        _pg("study","pg-st-1",1),
+        _n("study","solution-study","Solution Study",0,"pg-st-1"),
+        _n("study","otac-prepare","OTAC Prepare",1,"pg-st-1"),
+        _n("study","solution-proposal","Solution Proposal",2),
+        _pg("study","pg-st-2",3),
+        _n("study","signal-path-review","Signal Path Review",0,"pg-st-2"),
+        _n("study","iwd-review","IWD Review",1,"pg-st-2"),
+        _n("study","datasheet-review","Datasheet Review",2,"pg-st-2"),
+        _n("study","fs-fd-review","FS/FD Review",4), _n("study","solution-review","Solution Review",5),
+        _n("study","sa-writing","SA Writing",6), _n("study","nds-writing","NDS Writing",7),
+        _pg("study","pg-st-3",8),
+        _n("study","sa-review","SA Review",0,"pg-st-3"),
+        _n("study","otac-review","OTAC Review",1,"pg-st-3"),
+        _n("study","nds-review","NDS Review",9),
+        # development
+        _pg("development","pg-dev-1",0),
+        _n("development","db-impl","DB Implementation",0,"pg-dev-1"),
+        _n("development","func-impl","Function Implementation",1,"pg-dev-1"),
+        _n("development","coli-impl","Coli Implementation",2,"pg-dev-1"),
+        _n("development","iface-impl","Interface Implementation",3,"pg-dev-1"),
+        _n("development","ut-impl","UT Implementation",1),
+        _n("development","rsim-impl","RSIM Implementation",2),
+        _n("development","code-review","Code Review",3),
+        _pg("development","pg-dev-2",4),
+        _n("development","code-self-verify","Code Self Verification",0,"pg-dev-2"),
+        _n("development","dvs-writing","DVS Writing",1,"pg-dev-2"),
+        _pg("development","pg-dev-3",5),
+        _n("development","bug-analysis","Bug Analysis",0,"pg-dev-3"),
+        _n("development","bug-fixing","Bug Fixing",1,"pg-dev-3"),
+        _n("development","fix-verify","Fix Verify",6),
+        _n("development","follow-your-commit","Follow Your Commit",7),
+        _n("development","backmapping","Backmapping",8),
+        _c("development","sdk-lmc-build","SDK/LMC Build",9),
+        _c("development","integration-pair","Integration Pair-work",10),
+        _c("development","design-test","Design Test",11),
+        # test
+        _pg("test","pg-tst-1",0),
+        _n("test","dtar-prepare","DTAR Prepare",0,"pg-tst-1"),
+        _n("test","coverage-analysis","Coverage Analysis",1,"pg-tst-1"),
+        _n("test","test-material","Test Material Prepare",2,"pg-tst-1"),
+        _n("test","vs-prepare","VS Prepare",3,"pg-tst-1"),
+        _pg("test","pg-tst-2",1),
+        _n("test","env-prepare","Env Prepare",0,"pg-tst-2"),
+        _n("test","rsim-env-prepare","RSIM Env Prepare",1,"pg-tst-2"),
+        _pg("test","pg-tst-3",2),
+        _n("test","dvs-case-run","DVS Case Run",0,"pg-tst-3"),
+        _n("test","load-checker","Load Checker",1,"pg-tst-3"),
+        _n("test","sst-coding","SST Coding",3),
+        _pg("test","pg-tst-4",4),
+        _n("test","sst-case-run","SST Case Run",0,"pg-tst-4"),
+        _n("test","pdl-loop-run","PDL Loop Run",1,"pg-tst-4"),
+        _n("test","node-fv-run","Node FV Case Run",2,"pg-tst-4"),
+        _n("test","local-bdc","Local BDC",3,"pg-tst-4"),
+        _n("test","failed-case-analysis","Failed Case Analysis",5),
+        _n("test","test-report","Test Report",6),
+        _n("test","slip-analysis","Slip Analysis",7),
+        # ci
+        _n("ci","ci-env-uplift","Env Uplift",0),
+        _n("ci","ci-script-uplift","Script Uplift",1),
+        _n("ci","ci-handover-intro","Handover Introduction",2),
+        _n("ci","ci-support","CI Support",3),
+        # driver
+        _n("driver","drv-make-plan","Make Plan",0),
+        _pg("driver","pg-drv-1",1),
+        _n("driver","drv-resource-alloc","Resource Allocation",0,"pg-drv-1"),
+        _n("driver","drv-manage-backlog","Manage Backlog",1,"pg-drv-1"),
+        _c("driver","drv-routine-meeting","Routine Meeting",2),
+        _c("driver","drv-routine-report","Routine Report",3),
+        _c("driver","drv-risk-mgmt","Risk Management",4),
+        _n("driver","drv-ext-sync","External Team Sync Up",5),
+        _n("driver","drv-document","Document",6),
+        _n("driver","drv-f-decision","F Decision",7),
+        _pg("driver","pg-drv-2",8),
+        _n("driver","drv-retro","Retro",0,"pg-drv-2"),
+        _n("driver","drv-release-prepare","Release Prepare",1,"pg-drv-2"),
+        # debug
+        _n("debug","dbg-ticket","Ticket Create",0),
+        _n("debug","dbg-preliminary","Preliminary Analysis",1),
+        _pg("debug","pg-dbg-1",2),
+        _n("debug","dbg-reproduce","Reproduce",0,"pg-dbg-1"),
+        _n("debug","dbg-diagnose","Diagnose",1,"pg-dbg-1"),
+        _pg("debug","pg-dbg-2",3),
+        _n("debug","dbg-fix","Fix",0,"pg-dbg-2"),
+        _n("debug","dbg-verify","Verify",1,"pg-dbg-2"),
+        _n("debug","dbg-deliver","Deliver",2,"pg-dbg-2"),
+        _pg("debug","pg-dbg-3",4),
+        _n("debug","dbg-doc","Doc",0,"pg-dbg-3"),
+        _n("debug","dbg-retro","Retro",1,"pg-dbg-3"),
+    ]
+
+    key_to_id: dict[str, int] = {}
+    for stage_key, node_key, label, node_type, sort_order, parent_key in RAW:
+        parent_id = key_to_id.get(parent_key) if parent_key else None
+        row = RpAiRdgNode(
+            stage_key=stage_key, node_key=node_key, label=label,
+            node_type=node_type, sort_order=sort_order, parent_id=parent_id,
+        )
+        db.add(row)
+        db.flush()
+        key_to_id[node_key] = row.id
+    db.commit()
+    print(f"  + rdg nodes seeded ({len(RAW)} rows)")
+
+    # ── Tool mappings ─────────────────────────────────────────────────────────
+    MAPPINGS = [
+        ("COLI Assistant",          ["stage:development"],                                    ["coli-impl"]),
+        ("Radio Log Analysis",      ["stage:development","stage:test","stage:debug"],         ["bug-analysis","dbg-preliminary","dbg-diagnose"]),
+        ("Knowledge Shards Hub",    ["stage:debug","stage:study","stage:driver"],             ["solution-study","drv-retro","dbg-retro"]),
+        ("Meeting Transcripter",    ["stage:driver"],                                         ["drv-routine-report","drv-routine-meeting"]),
+        ("DFE Copilot",             ["stage:development","stage:test","stage:study"],         ["func-impl","solution-study"]),
+        ("SST Assistant",           ["stage:test"],                                           ["sst-case-run","failed-case-analysis"]),
+        ("Automated Test",          ["stage:development","stage:test"],                       ["dvs-case-run","node-fv-run","design-test"]),
+        ("EzBridge",                ["stage:development","stage:test","stage:debug"],         ["bug-analysis","dbg-preliminary","dbg-diagnose"]),
+        ("TxChangeCycle Explorer",  ["stage:study"],                                          ["solution-study"]),
+        ("kiro market",             ["stage:development","stage:test"],                       []),
+        ("oneClick",                ["stage:development","stage:test","stage:debug"],         ["code-self-verify","bug-analysis","failed-case-analysis","sst-case-run","design-test","dbg-reproduce","dbg-diagnose","dbg-verify"]),
+        ("int-test-assistant",      ["stage:development"],                                    ["sdk-lmc-build"]),
+        ("radioAssist-vscode",      ["stage:development","stage:test"],                       ["sdk-lmc-build","sst-case-run"]),
+        ("kiro-jira",               ["stage:development","stage:debug","stage:driver"],       ["dbg-ticket","drv-manage-backlog"]),
+        ("AC Onboarding Assistant", ["stage:early-phase","stage:study","stage:development"],  ["solution-study","pcs"]),
+        ("EVCC Domain Expert",      ["stage:study","stage:development","stage:debug"],        ["bug-analysis","dbg-preliminary","dbg-diagnose"]),
+        ("Radio SW Chatbot",        ["stage:early-phase","stage:study","stage:development"],  ["solution-study","pcs"]),
+        ("afv-analyzer",            ["stage:test"],                                           ["local-bdc","node-fv-run"]),
+        ("DP Slot Info Decode",     ["stage:test","stage:development","stage:debug"],         ["bug-analysis","dbg-preliminary","dbg-diagnose"]),
+    ]
+    count = 0
+    for tool_name, stage_keys, activity_keys in MAPPINGS:
+        for key in stage_keys + activity_keys:
+            db.add(RpAiRdgToolMapping(node_key=key, tool_name=tool_name))
+            count += 1
+    db.commit()
+    print(f"  + rdg tool mappings seeded ({count} rows)")
+
+
 def _column_exists(conn, table: str, column: str) -> bool:
     row = conn.execute(
         text(
@@ -99,10 +275,6 @@ def main() -> None:
     Base.metadata.create_all(bind=engine)
 
     # 2) Ensure every department group has a category row to point at.
-    #    Deliberately before the dialect check below: this is data, not DDL, so
-    #    ``create_all`` does not cover it on any dialect. A group whose row is
-    #    missing resolves to "no group" for every one of its members and the only
-    #    symptom is a default that silently never fills in.
     from app.database import SessionLocal
     from app.services.dept_groups import ensure_group_categories
 
@@ -110,7 +282,11 @@ def main() -> None:
         for slug in ensure_group_categories(db):
             print(f"  + created category row {slug!r}")
 
-    # 3) Add missing columns to existing tables (MySQL-specific introspection).
+    # 3) Seed R&D Guide initial data (idempotent — skips if already present).
+    with SessionLocal() as db:
+        _seed_rdg(db)
+
+    # 4) Add missing columns to existing tables (MySQL-specific introspection).
     #    On other dialects (e.g. sqlite in staging/tests) create_all above already
     #    produced fresh tables with all columns, so skip the ALTER pass.
     if engine.dialect.name != "mysql":

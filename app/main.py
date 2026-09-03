@@ -26,6 +26,7 @@ from app.routers import (
     market_favorites,
     reviews,
     rsw_inventory,
+    rdg,
     skill_import,
     skills,
     upload,
@@ -233,6 +234,7 @@ app.include_router(agent_upload.router)
 app.include_router(usage.router)
 app.include_router(usage_report.router)
 app.include_router(rsw_inventory.router)
+app.include_router(rdg.router)
 
 
 @app.get("/health", tags=["health"])

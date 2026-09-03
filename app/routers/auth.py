@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.category import RpAiCategory
 from app.models.login_event import RpAiLoginEvent
+from app.models.rdg import RpAiRdgAdmin
 from app.models.user import RpAiPortal
 from app.services import ldap_auth
 from app.services.auth_tokens import create_token
@@ -67,6 +68,7 @@ class LoginResponse(GroupInfo):
 class MeResponse(GroupInfo):
     eid: str
     displayName: str | None = None
+    isRswAdmin: bool = False
 
 
 def group_of(db: Session, department: str | None) -> GroupInfo:
@@ -194,9 +196,11 @@ def me(request: Request, db: Session = Depends(get_db)) -> MeResponse:
     if not eid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
     row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid))
+    is_rsw_admin = db.scalar(select(RpAiRdgAdmin).where(RpAiRdgAdmin.eid == eid.upper())) is not None
     return MeResponse(
         eid=eid,
         displayName=getattr(request.state, "display_name", None),
+        isRswAdmin=is_rsw_admin,
         **group_of(db, row.department if row else None).model_dump(),
     )
 
