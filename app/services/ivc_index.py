@@ -139,6 +139,13 @@ def _entry_from_agent(raw: dict) -> Entry:
     problems: list[str] = []
     owner = (raw.get("owner") or "").strip()
     eid = _norm_eid(OWNER_TO_EID.get(owner)) if owner else None
+    if eid is None and owner:
+        # ``owner`` 两种形态都出现过：``wenjie.a.liu`` 是用户名，要查表；``EIWEULN`` 本身就是
+        # 工号。形态对得上就直接用，判据和 skill 的 ``author`` 同一个 —— 否则映射表得为每个
+        # 已经是工号的人补一行键与值完全相同的映射，而漏补的代价是资产归不到部门。
+        candidate = _norm_eid(owner)
+        if _looks_like_eid(candidate):
+            eid = candidate
     if not owner:
         problems.append("没有 owner")
     elif eid is None:
