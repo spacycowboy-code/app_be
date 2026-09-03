@@ -106,8 +106,13 @@ FALLBACK_GROUP_ID = "others"
 
 #: Label used when a group's category row has to be created (see
 #: ``ensure_group_categories``). Only consulted for a slug that has no row yet —
-#: an existing label is never overwritten, because ``POST /api/categories`` lets
-#: a human rename one and that choice should win over this table.
+#: an existing label is never overwritten, because this runs on every boot and a
+#: migration must not rewrite a value somebody set in the database.
+#:
+#: Note there is **no rename endpoint**: ``POST /api/categories`` answers 409 for
+#: an id that already exists, and nothing else writes ``RpAiCategory.label``. So
+#: changing a label that is already in a database is a direct ``UPDATE`` today,
+#: and editing this table alone only affects databases that lack the row.
 GROUP_CATEGORY_LABELS: dict[str, str] = {
     "ai-team": "AI Team",
     "product-system": "Product System",
@@ -116,7 +121,7 @@ GROUP_CATEGORY_LABELS: dict[str, str] = {
     "radio-design-2": "Radio Design 2",
     "radio-design-3": "Radio Design 3",
     "radio-sw": "Radio SW",
-    "qa": "QA",
+    "qa": "Q&A",
     "pmo": "PMO",
     "cd": "Chengdu",
     FALLBACK_GROUP_ID: "Others",
@@ -204,9 +209,12 @@ def ensure_group_categories(db: Session) -> list[str]:
     is not run on deploy; ``seed_market`` is deprecated. The container entrypoint
     runs ``app.migrate``, which is why this is called from there.
 
-    Only ever inserts. An existing label is left alone because
-    ``POST /api/categories`` lets a human rename a category, and a migration
-    that runs on every boot must not undo that on the next restart.
+    Only ever inserts. An existing label is left alone because this runs on every
+    boot and must not rewrite a value somebody set in the database. That also
+    means a rename is **not** picked up here: there is no rename endpoint
+    (``POST /api/categories`` answers 409 for an existing id), so renaming a
+    group that already has a row is a direct ``UPDATE`` on that row, and updating
+    the table above only helps databases that do not have the row yet.
     """
     created: list[str] = []
     for slug in sorted(set(DEPT_GROUP_MAP.values()) | {FALLBACK_GROUP_ID}):
