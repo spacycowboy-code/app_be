@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.category import RpAiCategory
 from app.models.skill import (
+    as_download_count,
     RpAiInputParam,
     RpAiSkill,
     RpAiSkillCase,
@@ -61,7 +62,7 @@ def _skill_scalars(data: dict) -> dict:
         category_id=data.get("categoryId"),
         image=data.get("image"),
         rating=data.get("rating", 0.0),
-        downloads=str(data.get("downloads", "0")),
+        downloads=as_download_count(data.get("downloads")),
         is_trending=data.get("isTrending", False),
         is_free=data.get("isFree", True),
         tags=data.get("tags", []),

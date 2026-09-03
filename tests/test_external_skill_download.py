@@ -36,7 +36,7 @@ def _seed(skill_id: str, **over) -> None:
         status="approved",
         version="0.0.10",
         tags=[],
-        downloads="0",
+        downloads=0,
     )
     fields.update(over)
     with SessionLocal() as db:
@@ -120,7 +120,7 @@ def test_going_upstream_hands_back_the_url_and_counts_once(client, hosted_elsewh
     assert r.json()["url"] == NEXUS_URL
     assert r.json()["source"] == "nexus-ivc"
     with SessionLocal() as db:
-        assert db.get(RpAiSkill, hosted_elsewhere).downloads == "1"
+        assert db.get(RpAiSkill, hosted_elsewhere).downloads == 1
 
 
 def test_a_skill_we_hold_ourselves_is_refused(client, held_here) -> None:
@@ -130,7 +130,7 @@ def test_a_skill_we_hold_ourselves_is_refused(client, held_here) -> None:
     )
     assert r.status_code == 409
     with SessionLocal() as db:
-        assert db.get(RpAiSkill, held_here).downloads == "0"
+        assert db.get(RpAiSkill, held_here).downloads == 0
 
 
 def test_the_redirect_route_still_works_for_clients_that_follow_it(
