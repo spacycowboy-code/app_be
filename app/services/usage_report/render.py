@@ -31,6 +31,7 @@ from app.services.usage_report.departments import (
     NON_PERSON,
     UNKNOWN,
     Dept,
+    branch_display,
     parse,
     resolve,
 )
@@ -256,7 +257,13 @@ def org_attribution(
         # The branch, not the parsed fourth code: for the six stale rows those
         # disagree, and the branch is the one the org chart shows.
         branch = str(info.get("branch") or UNKNOWN)
-        dept = Dept(dept.small_key, dept.small_label, branch, branch, dept.org_prefix)
+        # Key is the org-chart code (everything joins on it); label is what the
+        # reader sees, which is not the same string for PO / QA.
+        dept = Dept(
+            dept.small_key, dept.small_label,
+            branch, branch_display(branch),
+            dept.org_prefix,
+        )
         placement[signum] = dept
         big_head[branch] += 1
         small_head[dept.small_key] += 1
@@ -300,7 +307,11 @@ def aggregate(
         heads = big_head if level == "big" else small_head
         for key, n in heads.items():
             if level == "big":
-                label, sub = key, ""
+                # Same split as when a Dept is built above: the group keeps the
+                # org-chart code as its key, the reader gets the display name.
+                # Both paths must map, or the "keep the longer label" rule below
+                # would pick whichever spelling happened to be longer.
+                label, sub = branch_display(key), ""
             else:
                 label, sub = labels.get(key, (key, ""))
             groups.setdefault(key, Group(key, label, sub)).real += n
@@ -719,7 +730,6 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
         if _rec.get("employeeType") == "Workforce" and not _rec.get("enabled"):
             _b = str(_rec.get("branch") or "")
             disabled_by_branch[_b] = disabled_by_branch.get(_b, 0) + 1
-    nine = ["CD", "IVC", "RD2", "RD1", "RD3", "SWD", "PS", "PO", "QA"]
     # The population every percentage in this report is taken against.
     scope_real = sum(big_head.values())
     by_key = {m.key: m for m in metrics}
