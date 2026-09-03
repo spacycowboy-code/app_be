@@ -84,6 +84,37 @@ WORKFORCE = "Workforce"
 #: Shown in the report, so it is written in the language the report is written in.
 UNKNOWN = "（查不到部门）"
 
+#: Display names for the org-chart branch codes whose spelling is not what the
+#: rest of the portal calls that department.
+#:
+#: The **key stays the org-chart code**, because every join in this report is on
+#: it (``big_head``, ``placement``, ``Group.key``) and the code is also what the
+#: Graph walk hands us. Only what the reader sees changes. A code with no entry
+#: here is displayed as-is, so this table stays short instead of listing all nine.
+#:
+#: - ``PO`` is the org chart's segment for the group the portal calls ``pmo`` /
+#:   "PMO" (``dept_groups.DEPT_GROUP_MAP`` maps ``BNEW RTE RP PO`` -> ``pmo``).
+#:   Two names for one department in two places the same person reads.
+#: - ``QA`` follows the portal's group label, renamed to ``Q&A``.
+#:
+#: ``SWD`` is deliberately **not** here: the portal calls that group "Radio SW"
+#: with the short code ``RSW``, so a mapping would be a third spelling rather than
+#: a reconciliation. Left for whoever decides what that column should say.
+BRANCH_DISPLAY: dict[str, str] = {
+    "PO": "PMO",
+    "QA": "Q&A",
+}
+
+
+def branch_display(code: object) -> str:
+    """What the reader sees for an org-chart branch code.
+
+    Identity for anything not in ``BRANCH_DISPLAY`` — including ``UNKNOWN`` and
+    the empty string, so callers do not have to special-case them.
+    """
+    text = str(code or "")
+    return BRANCH_DISPLAY.get(text, text)
+
 
 @dataclass(frozen=True)
 class Dept:
