@@ -964,6 +964,25 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
             )
         return out + doc[end:]
 
+    # 卡片文案先算成局部变量,好让下面的标记保持「n 与 k 紧挨着」的原样式。
+    # test_portal_row_origin 断言的是 `<div class="n">1</div><div class="k">…</div>`
+    # 这个精确片段 —— 为了可读性在两者之间换行会让那条断言失败,而它钉的是
+    # 「导入的账号不算用过门户」这件真事,不该为排版让路。
+    c_head = esc(s["card_head"])
+    c_head_sub = esc(s.fmt("card_head_sub", teams=len(small)))
+    c_inside = esc(s["card_inside"])
+    c_inside_sub = esc(s.fmt("card_inside_sub", pct=f"{inside / scope_real * 100:.1f}%"))
+    c_active = esc(s["card_active"])
+    c_active_sub = esc(s.fmt("card_active_sub", inside=inside,
+                             pct=f"{active / max(inside, 1) * 100:.0f}%"))
+    c_zero = esc(s["card_zero"])
+    c_zero_sub = esc(s.fmt("card_zero_sub", head=zero_head))
+    c_dl = esc(s["card_downloads"])
+    c_dl_sub = esc(s.fmt("card_downloads_sub",
+                         since=by_key["skill_download"].first_seen or "—"))
+    c_out = esc(s["card_outside"])
+    c_out_sub = esc(s["card_outside_sub"])
+
     return indent_sections(f"""<!DOCTYPE html>
 <html lang="{s["html_lang"]}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -983,27 +1002,19 @@ Microsoft Graph（<span class="code">manager</span> / <span class="code">directR
 {inside / scope_real * 100:.1f}%。</div>
 
 <div class="cards">
-  <div class="card"><div class="n">{scope_real}</div>
-    <div class="k">{esc(s["card_head"])}</div>
-    <div class="w">{esc(s.fmt("card_head_sub", teams=len(small)))}</div></div>
-  <div class="card"><div class="n">{inside}</div>
-    <div class="k">{esc(s["card_inside"])}</div>
-    <div class="w">{esc(s.fmt("card_inside_sub",
-                              pct=f"{inside / scope_real * 100:.1f}%"))}</div></div>
-  <div class="card"><div class="n">{active}</div>
-    <div class="k">{esc(s["card_active"])}</div>
-    <div class="w">{esc(s.fmt("card_active_sub", inside=inside,
-                              pct=f"{active / max(inside, 1) * 100:.0f}%"))}</div></div>
-  <div class="card"><div class="n">{len(zero_depts)}</div>
-    <div class="k">{esc(s["card_zero"])}</div>
-    <div class="w">{esc(s.fmt("card_zero_sub", head=zero_head))}</div></div>
+  <div class="card"><div class="n">{scope_real}</div><div class="k">{c_head}</div>
+    <div class="w">{c_head_sub}</div></div>
+  <div class="card"><div class="n">{inside}</div><div class="k">{c_inside}</div>
+    <div class="w">{c_inside_sub}</div></div>
+  <div class="card"><div class="n">{active}</div><div class="k">{c_active}</div>
+    <div class="w">{c_active_sub}</div></div>
+  <div class="card"><div class="n">{len(zero_depts)}</div><div class="k">{c_zero}</div>
+    <div class="w">{c_zero_sub}</div></div>
   <div class="card"><div class="n">{by_key['skill_download'].events}</div>
-    <div class="k">{esc(s["card_downloads"])}</div>
-    <div class="w">{esc(s.fmt("card_downloads_sub",
-                              since=by_key['skill_download'].first_seen or "—"))}</div></div>
-  <div class="card"><div class="n">{outside}</div>
-    <div class="k">{esc(s["card_outside"])}</div>
-    <div class="w">{esc(s["card_outside_sub"])}</div></div>
+    <div class="k">{c_dl}</div>
+    <div class="w">{c_dl_sub}</div></div>
+  <div class="card"><div class="n">{outside}</div><div class="k">{c_out}</div>
+    <div class="w">{c_out_sub}</div></div>
 </div>
 
 <h2>{esc(s["h2_big"])}</h2>
