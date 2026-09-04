@@ -63,22 +63,6 @@ NON_PERSON: dict[str, str] = {
     "ANTHROPIC": "not an EID; a display string that reached the user table",
     "ERICSSON": "not an EID; a display string that reached the user table",
     "EAB": "generic company account, no department in LDAP",
-    # A functional ID whose display name is the instruction somebody typed into
-    # the field: "use this function id for API of tool in ericsson". It owns
-    # nothing and is not in the Graph reporting tree, but it *does* carry a
-    # department (``BNEW RTE RP PS AI AI & Innovation``) -- and that combination
-    # is what made it visible. A portal row the tree does not contain is placed
-    # by parsing its own department string, which keys the group as
-    # ``BNEW/RTE/RP/PS`` and labels it ``RP / PS``, while the real PS row is
-    # keyed by the tree's branch code ``PS``. The two cannot merge, so the big
-    # department table showed PS twice: once with 71 people, and once as
-    # ``RP / PS`` with an unknown head count and this single "user".
-    #
-    # Listed here rather than filtered by shape for the reason above the test
-    # rows: the docstring notes functional accounts are meant to be told apart by
-    # the directory's ``employeeType``, but this one has a portal row and is
-    # absent from the snapshot, so nothing in that path ever sees it.
-    "ECNRPAI": "functional ID for a tool's API; display name is field instructions",
     # Test rows from portal development. Kept explicit rather than matched by
     # shape, so a real EID can never be dropped by a clever regex.
     "DFADFA": "test row",
