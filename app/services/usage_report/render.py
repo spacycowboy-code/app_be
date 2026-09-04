@@ -98,6 +98,32 @@ class Person:
     signed_in: bool = True
 
 
+def bind_eid(bind_account: object) -> str:
+    """The bare EID of this service's own directory bind account.
+
+    ``build_people`` excludes that account by comparing it against the portal's
+    EIDs, and the EIDs it compares to are bare and upper case (``ECNRPAI``). The
+    setting, however, is whatever LDAP needs to bind, which in production is a
+    UPN: ``ecnrpai@ericsson.se``. Comparing the two directly never matches, so the
+    guard silently did nothing and the bind account was counted as an employee of
+    the department it happens to be filed under -- which is exactly what its own
+    docstring says the guard exists to prevent.
+
+    The symptom was not an error but an extra table row. The account is absent from
+    the Graph reporting tree, so it fell through to the weakest placement rule
+    ("has a name and a department, so treat it as a person"), which keys the group
+    from the parsed department string. That produced a SECOND row for Product
+    System, labelled ``RP / PS`` with an unknown head count, eleven rows below the
+    real ``PS | 71 | 42 | 59%``.
+
+    Only the local part is taken. A DN-shaped value would not be reduced to an EID
+    by this, and deliberately so: inventing a rule for a format nobody configures
+    would be guessing, and the failure it would hide is the one just fixed.
+    """
+    text_ = str(bind_account or "").strip()
+    return text_.split("@", 1)[0].strip().upper()
+
+
 def build_people(
     conn: Connection, tree: dict, identities: dict[str, dict], bind_account: str
 ) -> tuple[dict[str, "Person"], dict[str, str], dict[str, int]]:
@@ -130,7 +156,7 @@ def build_people(
         str(rec.get("signum") or signum).strip().upper()
         for signum, rec in tree.get("people", {}).items()
     }
-    bind = (bind_account or "").strip().upper()
+    bind = bind_eid(bind_account)
 
     people: dict[str, Person] = {}
     excluded: dict[str, str] = {}
