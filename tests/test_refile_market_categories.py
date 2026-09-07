@@ -17,10 +17,8 @@ from app.database import SessionLocal  # noqa: E402
 from app.models.market import RpAiMarketItem  # noqa: E402
 from app.models.user import RpAiPortal  # noqa: E402
 from app.services.dept_groups import ensure_group_categories  # noqa: E402
-from tools.refile_market_categories import (  # noqa: E402
-    _looks_like_signum,
-    resolve_for_item,
-)
+from app.services.eids import looks_like_signum  # noqa: E402
+from tools.refile_market_categories import resolve_for_item  # noqa: E402
 
 
 def _person(db, eid: str, dept: str | None, name: str = "X") -> None:
@@ -48,17 +46,25 @@ def test_creator_department_decides(db) -> None:
     assert "ERF0001" in why
 
 
-def test_chengdus_own_ivc_team_goes_to_cd_not_ivc(db) -> None:
-    """脚本存在的理由之一。
+def test_chengdus_own_ivc_team_goes_to_ivc(db) -> None:
+    """成都的 IVC 团队归 ``ivc`` —— 和北京 IVC 同一个功能标签。
 
-    ``Time Report agent`` 的登记人在 ``BNEW RTE RP CD IVC T1``,名字和部门都写着 IVC,
-    但那是成都的 IVC 团队。按名字猜会把成都的产出记到北京 IVC 名下,而且看不出错。
+    这条原来叫 ``..._goes_to_cd_not_ivc`` 并断言 ``cd``,理由是"按名字猜会把成都的产出
+    记到北京 IVC 名下"。现在这个方向反过来了:标签页回答的是功能而不是站点,两地的验证
+    工作本来就该在一个标签下。成都的产出仍然在月报和部门页里单独成行。
+
+    脚本存在的理由没变,只是变成了另一件事:归属要从**部门字符串**推出来,而不是从条目
+    名字里出现的 ``IVC`` 三个字母猜出来 —— 后者在 ``CD IVC`` 与 ``IVC`` 都存在时恰好
+    也能给出对的答案,但那是碰巧对。
     """
     _person(db, "ERF0002", "BNEW RTE RP CD IVC T1 Team 1", "CD Person")
     item = RpAiMarketItem(id="t-2", name="Time Report agent", creator="ERF0002")
     group, _ = resolve_for_item(db, item)
-    assert group == "cd"
-    assert group != "ivc"
+    assert group == "ivc"
+    # 同一站点的另一个子团队必须给出不同的答案,否则上面那条可能只是"成都全归一处"
+    _person(db, "ERF0002B", "BNEW RTE RP CD SW1 Software 1", "CD SW Person")
+    item_b = RpAiMarketItem(id="t-2b", name="OneDBTool", creator="ERF0002B")
+    assert resolve_for_item(db, item_b)[0] == "radio-sw"
 
 
 def test_author_is_used_only_when_creator_is_missing(db) -> None:
@@ -70,7 +76,7 @@ def test_author_is_used_only_when_creator_is_missing(db) -> None:
     # 没有 creator 才回落到 author
     item2 = RpAiMarketItem(id="t-4", name="n", creator=None, author="ERF0003")
     group, why = resolve_for_item(db, item2)
-    assert group == "ai-team"
+    assert group == "product-system"
     assert "author" in why
 
 
@@ -78,7 +84,7 @@ def test_author_is_matched_case_insensitively(db) -> None:
     """索引与旧数据里工号大小写混用,``eylaixn`` 和 ``EYLAIXN`` 是同一个人。"""
     _person(db, "ERF0005", "BNEW RTE RP PS AI AI & Innovation", "Lower Case")
     item = RpAiMarketItem(id="t-5", name="n", creator=None, author="erf0005")
-    assert resolve_for_item(db, item)[0] == "ai-team"
+    assert resolve_for_item(db, item)[0] == "product-system"
 
 
 def test_a_display_name_author_is_not_resolved(db) -> None:
@@ -125,4 +131,4 @@ def test_no_creator_and_no_author_is_left_alone(db) -> None:
     ],
 )
 def test_looks_like_signum(value: str | None, expected: bool) -> None:
-    assert _looks_like_signum(value) is expected
+    assert looks_like_signum(value) is expected

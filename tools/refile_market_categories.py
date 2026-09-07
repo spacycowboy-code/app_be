@@ -50,7 +50,7 @@ from app.models.category import RpAiCategory  # noqa: E402
 from app.models.market import RpAiMarketItem  # noqa: E402
 from app.models.user import RpAiPortal  # noqa: E402
 from app.services.dept_groups import verified_group  # noqa: E402
-from app.services.eids import normalize_eid  # noqa: E402
+from app.services.eids import looks_like_signum, normalize_eid  # noqa: E402
 
 #: Only rows sitting here are candidates. Deliberately not "any row whose group
 #: disagrees with its creator's department": people are moved between
@@ -69,14 +69,6 @@ def _department_for(db, eid: str | None) -> tuple[str | None, str | None]:
     return row.department, row.display_name
 
 
-def _looks_like_signum(value: str | None) -> bool:
-    """A signum is one alphanumeric word. ``Shuo Yang`` is a name, not a signum."""
-    if not value:
-        return False
-    v = value.strip()
-    return v.isalnum() and " " not in v
-
-
 def resolve_for_item(db, item: RpAiMarketItem) -> tuple[str | None, str]:
     """The group this item should carry, plus how it was decided."""
     dept, name = _department_for(db, item.creator)
@@ -90,7 +82,7 @@ def resolve_for_item(db, item: RpAiMarketItem) -> tuple[str | None, str]:
         return None, f"creator {item.creator} 在用户表里没有行"
 
     # No creator: fall back to author, but only if it is a signum.
-    if _looks_like_signum(item.author):
+    if looks_like_signum(item.author):
         dept, name = _department_for(db, item.author)
         if dept:
             group = verified_group(db, dept)
