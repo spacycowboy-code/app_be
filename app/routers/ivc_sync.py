@@ -29,6 +29,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.schemas.common import CamelModel
 from app.services import ivc_index
+from app.services.asset_owner import DirectoryDepartments
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,31 @@ def sync_index(
     outcomes: list[IvcSyncOutcome] = []
     counts = {"created": 0, "updated": 0, "unchanged": 0, "skipped": 0}
 
+    # 一次同步共用一条 LDAP 连接。放在 try/finally 里而不是循环里各开各的:一条索引可能有
+    # 十几个作者,每人一次 bind 既慢又会在目录侧看起来像在扫号。
+    directory = DirectoryDepartments()
+    try:
+        _run_sync(db, parsed, directory, outcomes, counts)
+    finally:
+        directory.close()
+
+    db.commit()
+    logger.info(
+        "IVC index synced by %s: created=%d updated=%d unchanged=%d skipped=%d",
+        actor, counts["created"], counts["updated"], counts["unchanged"],
+        counts["skipped"],
+    )
+    return IvcSyncResult(**counts, notes=parsed.notes, outcomes=outcomes)
+
+
+def _run_sync(
+    db: Session,
+    parsed: ivc_index.ParsedIndex,
+    directory: DirectoryDepartments,
+    outcomes: list[IvcSyncOutcome],
+    counts: dict[str, int],
+) -> None:
+    """逐条登记。抽出来只是为了让上面那个 ``finally`` 覆盖整段循环。"""
     for entry in parsed.entries:
         if not entry.usable:
             counts["skipped"] += 1
@@ -253,7 +279,9 @@ def sync_index(
         # author 存工号(与门户其余技能一致,人名由 creator_label 在读取时解析);
         # uploader_eid 是外键,指向用户表 —— 8 位作者里有 5 个从未登录过门户,所以先补一行。
         skill.author = entry.eid
-        skill.uploader_eid = _ensured_user(db, entry.eid, entry.display_name)
+        skill.uploader_eid = _ensured_user(
+            db, entry.eid, entry.display_name, directory.department_of(entry.eid)
+        )
         skill.external_url = entry.download_url
         skill.external_source = IVC_SOURCE
         # 内容不在我们的仓库里,这两个字段必须留空 —— 填了会让下载路径去读不存在的字节。
@@ -267,21 +295,22 @@ def sync_index(
             )
         )
 
-    db.commit()
-    logger.info(
-        "IVC index synced by %s: created=%d updated=%d unchanged=%d skipped=%d",
-        actor, counts["created"], counts["updated"], counts["unchanged"],
-        counts["skipped"],
-    )
-    return IvcSyncResult(**counts, notes=parsed.notes, outcomes=outcomes)
-
-
-def _ensured_user(db: Session, eid: str, display_name: str | None) -> str:
+def _ensured_user(
+    db: Session,
+    eid: str,
+    display_name: str | None,
+    department: str | None = None,
+) -> str:
     """保证用户表里有这个人,并返回工号。
 
     ``uploader_eid`` 是指向 ``rp_ai_portal`` 的外键,而索引里 8 位作者有 5 个从未登录过门户。
     不补这一行,同步会因为外键失败;补一个不带人名的空行,卡片上就只能显示工号。上游给了
     ``display_name``,用它。
+
+    ``department`` 是后来补上的,因为漏写它造成了一个不报错的缺口:报告与部门页都按这一列
+    归属,列是空的就等于这个人不属于任何部门,他名下的资产进「无法归属」。实测是 5 个真人、
+    10 件 IVC 技能,而这 5 个人在目录里**都有** IVC 的部门 —— 数据一直拿得到,只是这里没写。
+    对照 ``services/gerrit_assets._ensure_user`` 是写的,两条同步路径此前不对称。
 
     ``origin="import"`` 是必须显式写的。这一列的默认值是 ``login``,因为在它加上来之前这张表
     的每一行都确实是首次登录时建的 —— 而这里正是打破那个等价的地方:这五个人从未登录过门户,
@@ -292,9 +321,23 @@ def _ensured_user(db: Session, eid: str, display_name: str | None) -> str:
     """
     row = db.query(RpAiPortal).filter(RpAiPortal.eid == eid).first()
     if row is None:
-        db.add(RpAiPortal(eid=eid, display_name=display_name or eid, origin="import"))
+        db.add(
+            RpAiPortal(
+                eid=eid,
+                display_name=display_name or eid,
+                department=(department or "")[:64] or None,
+                origin="import",
+            )
+        )
         db.flush()
-    elif display_name and (not row.display_name or row.display_name == eid):
-        # 已有的行不动 origin:它可能是真的登录建的,导入不该把它降级。
+        return eid
+
+    # 已有的行不动 origin:它可能是真的登录建的,导入不该把它降级。
+    if display_name and (not row.display_name or row.display_name == eid):
         row.display_name = display_name
+    # 只补空缺,不覆盖。覆盖会让一次同步把目录快照盖在一条更新的登录记录上,而登录那条是
+    # 这个人自己带来的、比快照新。反过来「只补空」让这一次同步就把历史欠的 5 行补齐,不需要
+    # 另写回填脚本 —— 与 gerrit_assets._ensure_user 同一形状。
+    if not row.department and department:
+        row.department = department[:64]
     return eid
