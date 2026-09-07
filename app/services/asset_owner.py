@@ -175,6 +175,36 @@ def _candidates(owner: str) -> list[tuple[str, str]]:
     return out
 
 
+class DirectoryDepartments:
+    """已知工号，只补部门。一次同步用一个实例，共用 LDAP 连接与缓存。
+
+    为什么不用 ``OwnerResolver``：它在「目录里有这个人但他没有部门」时会**换一个工号**
+    （``_fallback``），把资产记到配置里那个兜底的人名下。对 Gerrit 那条路径这是对的，因为
+    那里连工号本身都是从 ``owner`` 这种自由文本里猜出来的，猜不准就该有人兜着。
+
+    这里不一样：工号来自上游索引，是权威的。查不到部门时正确的答案是**留空**，而不是把
+    IVC 的技能记到别人头上 —— 那会让报告里多一个人凭空产出了别人的作品，而且不报错。
+
+    所以这个类刻意只回答一个问题，没有兜底：部门有就给，没有就 ``None``。
+    """
+
+    def __init__(self, directory: _Directory | None = None) -> None:
+        self._dir = directory or _Directory()
+
+    def department_of(self, eid: str | None) -> str | None:
+        """某个工号在目录里的 ``department``，查不到或为空时 ``None``。"""
+        value = (eid or "").strip()
+        if not value:
+            return None
+        rows = self._dir.search(f"(sAMAccountName={_esc(value)})")
+        if not rows:
+            return None
+        return rows[0][2].strip() or None
+
+    def close(self) -> None:
+        self._dir.close()
+
+
 class OwnerResolver:
     """一次同步用一个实例:共用 LDAP 连接与缓存。"""
 
