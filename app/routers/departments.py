@@ -12,7 +12,7 @@ expressed with the existing filters at all.
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -25,14 +25,15 @@ from app.schemas.department import (
     DepartmentSummary,
 )
 from app.services.asset_stats import attach_market_stats, attach_skill_stats
+from app.models.user import RpAiPortal
 from app.services.departments import (
-    DEPARTMENT_CATEGORY_IDS,
     DEPARTMENTS,
     UNASSIGNED,
     Department,
     department_by_slug,
+    department_for_directory_value,
 )
-from app.services.eids import acting_eid
+from app.services.eids import acting_eid, looks_like_signum, normalize_eid
 
 router = APIRouter(prefix="/api/departments", tags=["departments"])
 settings = get_settings()
@@ -57,45 +58,107 @@ def _only_visible(stmt: Select, model: type, owner_column, requester: str | None
     return stmt.where(or_(model.status == "approved", owner_column == requester))
 
 
-def _category_filter(stmt: Select, model: type, dept: Department) -> Select:
-    """Rows belonging to ``dept``, or the complement for the unassigned page."""
-    if dept.slug == UNASSIGNED.slug:
-        # NULL and '' both mean "no group was recorded", and neither is caught by
-        # a NOT IN comparison — SQL NOT IN against NULL yields NULL, which filters
-        # the row out rather than keeping it. Spelled out so the two items that
-        # currently have an empty category cannot go missing from the one page
-        # whose whole job is to account for them.
-        return stmt.where(
-            or_(
-                model.category_id.is_(None),
-                model.category_id == "",
-                model.category_id.not_in(sorted(DEPARTMENT_CATEGORY_IDS)),
-            )
-        )
-    return stmt.where(model.category_id == dept.slug)
+def _slug_by_eid(db: Session) -> dict[str, str]:
+    """Every portal user's department page, keyed by upper-case EID.
+
+    One read of the user table per request instead of a join per query. The table
+    is a few hundred rows and both the list endpoint and the per-department
+    endpoint need the whole mapping anyway — the counts endpoint has to bucket
+    every asset, and the assets endpoint needs "everyone in this department"
+    before it can filter.
+
+    Users whose directory value names no RP department are simply absent, so a
+    lookup miss and an unplaceable department are one case at every call site.
+    That is intentional: the page cannot act differently on "never signed in",
+    "signed in but the directory gave no department", and "department outside
+    RP", and pretending otherwise would put three labels on one bucket.
+    """
+    mapping: dict[str, str] = {}
+    for eid, department in db.execute(select(RpAiPortal.eid, RpAiPortal.department)).all():
+        dept = department_for_directory_value(department)
+        normalized = normalize_eid(eid)
+        if dept and normalized:
+            mapping[normalized] = dept.slug
+    return mapping
 
 
-def _skills_of(db: Session, dept: Department, requester: str | None) -> list[RpAiSkill]:
-    stmt = _category_filter(select(RpAiSkill), RpAiSkill, dept)
-    stmt = _only_visible(stmt, RpAiSkill, RpAiSkill.uploader_eid, requester)
-    skills = list(db.scalars(stmt.order_by(RpAiSkill.name)).all())
+def _skill_owner(skill: RpAiSkill) -> str | None:
+    """Whose organisation a skill counts towards."""
+    return normalize_eid(skill.uploader_eid)
+
+
+def _item_owner(item: RpAiMarketItem) -> str | None:
+    """Whose organisation a market item counts towards.
+
+    ``creator`` first, then ``author`` but only when it is shaped like a signum.
+    The fallback exists because rows imported from GitLab carry no ``creator``
+    while several do carry a real signum in ``author`` — three such rows in
+    production resolve to a real person this way, and without the fallback they
+    would sit on the Unassigned page while their author's name is printed on the
+    card.
+
+    A display name is refused rather than returned. Being precise about what that
+    buys, because it is less than it looks: attribution is a lookup keyed by EID,
+    and ``Jinhang Li`` cannot match an EID, so the page's output is the same
+    either way. What the check protects is this function's contract — it promises
+    an EID or ``None``, and a caller that took its result to mean "a person" would
+    otherwise be handed a display name. ``tools/refile_market_categories.py``
+    applies the same rule to decide whether it may refile a row, where it does
+    change an outcome: the row is left alone and reported instead of moved.
+
+    Pinned by a unit test on this function rather than only through the endpoint,
+    since an endpoint test cannot tell the two behaviours apart.
+    """
+    if item.creator:
+        return normalize_eid(item.creator)
+    if looks_like_signum(item.author):
+        return normalize_eid(item.author)
+    return None
+
+
+def _slug_of(owner_eid: str | None, slug_by_eid: dict[str, str]) -> str:
+    """Which page a row belongs to: its owner's department, or the unassigned one."""
+    if not owner_eid:
+        return UNASSIGNED.slug
+    return slug_by_eid.get(owner_eid, UNASSIGNED.slug)
+
+
+def _skills_of(
+    db: Session, dept: Department, requester: str | None, slug_by_eid: dict[str, str]
+) -> list[RpAiSkill]:
+    stmt = _only_visible(select(RpAiSkill), RpAiSkill, RpAiSkill.uploader_eid, requester)
+    skills = [
+        skill
+        for skill in db.scalars(stmt.order_by(RpAiSkill.name)).all()
+        if _slug_of(_skill_owner(skill), slug_by_eid) == dept.slug
+    ]
     attach_skill_stats(db, skills)
     return skills
 
 
 def _items_of(
-    db: Session, dept: Department, requester: str | None
+    db: Session, dept: Department, requester: str | None, slug_by_eid: dict[str, str]
 ) -> dict[str, list[RpAiMarketItem]]:
     """The department's market items, bucketed by ``item_type``.
 
     One query for both kinds rather than one per kind: the counts and the lists
     have to come from the same read, or a concurrent publish can make the header
     disagree with the cards under it.
+
+    The department filter is applied in Python rather than in SQL because
+    attribution now runs through the owner's directory string, and the same
+    function has to decide it here and in the counts endpoint — expressing it
+    twice, once as a ``WHERE`` and once as a dict lookup, is how a page's header
+    starts disagreeing with the list under it. The row counts here are in the
+    dozens, so there is nothing to win by pushing it down.
     """
-    stmt = _category_filter(select(RpAiMarketItem), RpAiMarketItem, dept)
-    stmt = _only_visible(stmt, RpAiMarketItem, RpAiMarketItem.creator, requester)
+    stmt = _only_visible(select(RpAiMarketItem), RpAiMarketItem, RpAiMarketItem.creator, requester)
     stmt = stmt.where(RpAiMarketItem.item_type.in_(_ITEM_KINDS))
-    items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
+    items = [
+        item
+        for item in db.scalars(stmt.order_by(RpAiMarketItem.name)).all()
+        if _slug_of(_item_owner(item), slug_by_eid) == dept.slug
+    ]
     attach_market_stats(db, items)
     buckets: dict[str, list[RpAiMarketItem]] = {kind: [] for kind in _ITEM_KINDS}
     for item in items:
@@ -104,8 +167,9 @@ def _items_of(
 
 
 def _assets(db: Session, dept: Department, requester: str | None) -> DepartmentAssets:
-    skills = _skills_of(db, dept, requester)
-    buckets = _items_of(db, dept, requester)
+    slug_by_eid = _slug_by_eid(db)
+    skills = _skills_of(db, dept, requester, slug_by_eid)
+    buckets = _items_of(db, dept, requester, slug_by_eid)
     agents = buckets["agent"]
     tools = buckets["tool"]
     return DepartmentAssets(
@@ -123,13 +187,6 @@ def _assets(db: Session, dept: Department, requester: str | None) -> DepartmentA
     )
 
 
-def _bucket_of(category_id: str | None) -> str:
-    """Which page a row belongs to: its own department, or the unassigned one."""
-    if category_id and category_id in DEPARTMENT_CATEGORY_IDS:
-        return category_id
-    return UNASSIGNED.slug
-
-
 @router.get("", response_model=list[DepartmentSummary])
 def list_departments(
     request: Request,
@@ -138,31 +195,36 @@ def list_departments(
 ) -> list[DepartmentSummary]:
     """The nine departments plus the unassigned bucket, each with its counts.
 
-    Two grouped COUNT queries rather than the per-department read that
-    ``/{slug}/assets`` does: the sidebar asks for this on every page load, and
-    ten departments × two kinds of row would be twenty round trips to render a
-    navigation menu.
+    Two reads plus one pass over the rows, rather than the per-department query
+    that ``/{slug}/assets`` does: the sidebar asks for this on every page load,
+    and ten departments × two kinds of row would be twenty round trips to render
+    a navigation menu.
+
+    Grouped ``COUNT``s used to do it, which no longer works: attribution runs
+    through each owner's directory string, so the grouping key is not a column.
+    The rows are counted in Python through the same ``_slug_of`` the assets
+    endpoint uses, which is the point — a second expression of the same rule is
+    how a sidebar number starts disagreeing with the page it opens.
 
     The unassigned entry is last and always present, even at zero: the number it
     carries is the answer to "why does this page's total not match the market's",
     and a bucket that disappears when empty cannot answer that.
     """
     requester = acting_eid(request, x_user_eid)
+    slug_by_eid = _slug_by_eid(db)
 
     skills = _only_visible(
-        select(RpAiSkill.category_id, func.count(RpAiSkill.id)).group_by(RpAiSkill.category_id),
+        select(RpAiSkill.uploader_eid),
         RpAiSkill,
         RpAiSkill.uploader_eid,
         requester,
     )
     items = _only_visible(
         select(
-            RpAiMarketItem.category_id,
+            RpAiMarketItem.creator,
+            RpAiMarketItem.author,
             RpAiMarketItem.item_type,
-            func.count(RpAiMarketItem.id),
-        )
-        .where(RpAiMarketItem.item_type.in_(_ITEM_KINDS))
-        .group_by(RpAiMarketItem.category_id, RpAiMarketItem.item_type),
+        ).where(RpAiMarketItem.item_type.in_(_ITEM_KINDS)),
         RpAiMarketItem,
         RpAiMarketItem.creator,
         requester,
@@ -171,10 +233,13 @@ def list_departments(
     tally: dict[str, dict[str, int]] = {
         d.slug: {"skill": 0, "agent": 0, "tool": 0} for d in (*DEPARTMENTS, UNASSIGNED)
     }
-    for category_id, count in db.execute(skills).all():
-        tally[_bucket_of(category_id)]["skill"] += int(count)
-    for category_id, kind, count in db.execute(items).all():
-        tally[_bucket_of(category_id)][kind] += int(count)
+    for (uploader_eid,) in db.execute(skills).all():
+        tally[_slug_of(normalize_eid(uploader_eid), slug_by_eid)]["skill"] += 1
+    for creator, author, kind in db.execute(items).all():
+        owner = normalize_eid(creator) if creator else (
+            normalize_eid(author) if looks_like_signum(author) else None
+        )
+        tally[_slug_of(owner, slug_by_eid)][kind] += 1
 
     return [
         DepartmentSummary(

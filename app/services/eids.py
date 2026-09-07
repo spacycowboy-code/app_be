@@ -29,6 +29,28 @@ def acting_eid(request: Any, claimed: str | None) -> str | None:
     return normalize_eid(verified) or normalize_eid(claimed)
 
 
+def looks_like_signum(value: str | None) -> bool:
+    """Is this one alphanumeric word, i.e. shaped like a signum?
+
+    ``EYLAIXN`` is; ``Jinhang Li`` is not. The distinction matters wherever a
+    free-text ``author`` label is used to find out who owns a row: a signum
+    identifies one person, while two colleagues can share a display name, so
+    resolving a name would attribute an asset to whoever happens to be found
+    first.
+
+    Lives here rather than beside either caller because there are two, in layers
+    that must not import each other: ``tools/refile_market_categories.py`` uses
+    it to decide whether it may refile a row, and the department pages use it to
+    decide which department a creator-less row counts towards. Two copies of this
+    rule drifting apart would make a tool and a page disagree about who owns the
+    same asset.
+    """
+    if not value:
+        return False
+    stripped = value.strip()
+    return stripped.isalnum() and " " not in stripped
+
+
 def require_dashboard_eid(request: Any, action: str) -> str:
     """Only the EIDs configured for the Dashboard may do ``action``.
 

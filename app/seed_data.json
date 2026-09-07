@@ -6,11 +6,6 @@
       "count": 48
     },
     {
-      "id": "ai-team",
-      "label": "AI Team",
-      "count": 0
-    },
-    {
       "id": "public",
       "label": "Public",
       "count": 1
@@ -54,11 +49,6 @@
       "id": "pmo",
       "label": "PMO",
       "count": 3
-    },
-    {
-      "id": "cd",
-      "label": "Chengdu",
-      "count": 0
     },
     {
       "id": "others",
