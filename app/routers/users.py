@@ -10,6 +10,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.schemas.favorite import FavoriteRead
 from app.schemas.skill import SkillSummary
+from app.services.asset_stats import attach_skill_stats
 from app.schemas.social import ActivityRead
 from app.schemas.user import UserCreate, UserRead, UserUpdate
 from app.services.eids import normalize_eid
@@ -65,9 +66,13 @@ def update_user(
 def list_uploaded_skills(eid: str, db: Session = Depends(get_db)) -> list[RpAiSkill]:
     """Skills uploaded by this user."""
     _get_user_or_404(db, eid)
-    return list(
+    skills = list(
         db.scalars(select(RpAiSkill).where(RpAiSkill.uploader_eid == eid)).all()
     )
+    # 这条端点发的是 SkillSummary(带 downloads / 点赞 / 组),此前直接返回 ORM 行,于是同一个
+    # 技能在"我上传的"列表里显示的下载量和市场卡片不一样。统计一律走 attach_skill_stats。
+    attach_skill_stats(db, skills)
+    return skills
 
 
 @router.get("/{eid}/favorites", response_model=list[FavoriteRead])

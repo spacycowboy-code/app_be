@@ -25,6 +25,7 @@ from app.models.category import RpAiCategory
 from app.models.download import RpAiSkillDownload
 from app.models.market import RpAiMarketItem
 from app.models.market_download import RpAiMarketDownload
+from app.services.download_counts import MARKET, SKILL, unique_downloads
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 
@@ -85,9 +86,9 @@ def _people(db: Session, eids: set[str]) -> dict[str, RpAiPortal]:
     return {r.eid.upper(): r for r in rows}
 
 
-def _download_counts(db: Session, table, id_col) -> dict[str, int]:
-    rows = db.execute(select(id_col, func.count()).group_by(id_col)).all()
-    return {str(r[0]): int(r[1]) for r in rows}
+# 去重规则在 services/download_counts 里只有一处。这里原本是 ``func.count()`` 数行数,
+# 于是 admin 的资产导出 CSV 和 Agent 市场卡片对同一个条目给出不同的下载量 —— 而 CSV 是
+# 会被存下来发出去的,过两周没人记得它和页面为什么不一样。
 
 
 def collect_inventory(db: Session, group: str | None = None) -> Inventory:
@@ -113,8 +114,8 @@ def collect_inventory(db: Session, group: str | None = None) -> Inventory:
     eids |= {i.creator for i in items if i.creator}
     people = _people(db, eids)
 
-    skill_dl = _download_counts(db, RpAiSkillDownload, RpAiSkillDownload.skill_id)
-    item_dl = _download_counts(db, RpAiMarketDownload, RpAiMarketDownload.item_id)
+    skill_dl = unique_downloads(db, SKILL)
+    item_dl = unique_downloads(db, MARKET)
 
     labels = {
         c.id: c.label for c in db.scalars(select(RpAiCategory)).all()

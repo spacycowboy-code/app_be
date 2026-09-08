@@ -34,6 +34,7 @@ from app.models.skill import (
 )
 from app.models.version import RpAiSkillVersion
 from app.models.download import RpAiSkillDownload
+from app.services.download_counts import SKILL, unique_downloads
 from app.repositories import skill_content
 from app.schemas.skill import (
     ExternalDownloadRead,
@@ -196,6 +197,10 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
     skill.content_updated_at = content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
+    # 这条端点自己算统计、不走 ``attach_skill_stats``（那是列表的路），所以去重也得在这里
+    # 显式做一次。漏了它的后果是详情页和列表卡片对同一个技能显示两个不同的下载量,而两个
+    # 数都"看起来正常",没人会想到去对。
+    skill.downloads = int(unique_downloads(db, SKILL, [skill_id]).get(skill_id, 0))
     attach_skill_groups(db, [skill])
     # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
     #
@@ -292,10 +297,18 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
     except Exception:
         db.rollback()
     try:
+        # **写去重后的值,不是自增。** 下载量的定义已经是"有多少个不同的人下载过",而 +1
+        # 数的是次数 —— 同一个人下十次会把这一列推到 10,而页面显示的是 1。
+        #
+        # 而且这里刻意是"算出来覆盖"而不是"判断这个人是不是新的再 +1":后者有竞态(两个并发
+        # 的首次下载都看不到对方的行,双双 +1),而覆盖式没有 —— 事件行在上面那个 try 里已经
+        # 提交了,所以这一句算出来的就是含本次在内的真值。它还是**自愈**的:任何历史漂移会在
+        # 这个技能下一次被下载时自动归位。
+        fresh = unique_downloads(db, SKILL, [skill.id]).get(skill.id, 0)
         db.execute(
             update(RpAiSkill)
             .where(RpAiSkill.id == skill.id)
-            .values(downloads=RpAiSkill.downloads + 1, updated_at=RpAiSkill.updated_at)
+            .values(downloads=fresh, updated_at=RpAiSkill.updated_at)
         )
         # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
         # a later read in this session sees the stored values.

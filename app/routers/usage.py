@@ -30,6 +30,12 @@ from app.models.download import RpAiSkillDownload
 from app.models.login_event import RpAiLoginEvent
 from app.models.market import RpAiMarketItem
 from app.models.market_download import RpAiMarketDownload
+from app.services.download_counts import (
+    MARKET,
+    SKILL,
+    unique_downloads,
+    unique_downloads_by_department,
+)
 from app.models.skill import RpAiSkill
 from app.models.usage_event import (
     OBJECT_MARKET_ITEM,
@@ -402,21 +408,26 @@ def usage_report(
     # The third table needs one extra condition the other two do not: usage events
     # survive the deletion of the market item they describe, so counting them raw
     # would credit a group for opening something that is no longer on the market.
-    for table, ts, extra in (
-        (RpAiSkillDownload, RpAiSkillDownload.created_at, None),
-        (RpAiMarketDownload, RpAiMarketDownload.created_at, None),
-        (RpAiUsageEvent, RpAiUsageEvent.created_at, _object_still_listed()),
-    ):
-        conditions = [ts >= since, ts < until]
-        if extra is not None:
-            conditions.append(extra)
-        for dept, count in db.execute(
-            select(table.department, func.count())
-            .where(*conditions)
-            .group_by(table.department)
-        ).all():
+    # 两张下载表按 (条目, 人) 去重后再归部门（services/download_counts 一处规则）。
+    # ``RpAiUsageEvent`` 不去重：它记的是"打开/安装了一个工具"这类使用动作,同一个人每天
+    # 用一次就是活跃一次,把它折成 1 会把"一直在用"变成"用过一次"。两者口径不同是有意的。
+    for kind in (SKILL, MARKET):
+        for dept, count in unique_downloads_by_department(
+            db, kind, since=since, until=until
+        ).items():
             label = resolve_group(dept) or "unmapped"
             group_counts[label] = group_counts.get(label, 0) + int(count or 0)
+    for dept, count in db.execute(
+        select(RpAiUsageEvent.department, func.count())
+        .where(
+            RpAiUsageEvent.created_at >= since,
+            RpAiUsageEvent.created_at < until,
+            _object_still_listed(),
+        )
+        .group_by(RpAiUsageEvent.department)
+    ).all():
+        label = resolve_group(dept) or "unmapped"
+        group_counts[label] = group_counts.get(label, 0) + int(count or 0)
     by_group = sorted(
         (LabelCount(label=k, count=v) for k, v in group_counts.items()),
         key=lambda c: c.count,
@@ -451,34 +462,27 @@ def usage_report(
     )
 
     # --- Downloads ---
-    skill_dl = db.execute(
-        select(
-            RpAiSkillDownload.skill_id,
-            func.max(RpAiSkill.name).label("name"),
-            func.count().label("count"),
-        )
-        .join(RpAiSkill, RpAiSkill.id == RpAiSkillDownload.skill_id)
-        .where(RpAiSkillDownload.created_at >= since, RpAiSkillDownload.created_at < until)
-        .group_by(RpAiSkillDownload.skill_id)
-    ).all()
-    item_dl = db.execute(
-        select(
-            RpAiMarketDownload.item_id,
-            func.max(RpAiMarketItem.name).label("name"),
-            func.count().label("count"),
-        )
-        .join(RpAiMarketItem, RpAiMarketItem.id == RpAiMarketDownload.item_id)
-        .where(
-            RpAiMarketDownload.created_at >= since, RpAiMarketDownload.created_at < until
-        )
-        .group_by(RpAiMarketDownload.item_id)
-    ).all()
+    # 去重后的每条目下载人数（services/download_counts 一处规则）。原本是 func.count()
+    # 数行数,于是线上一个跑了 93 次的脚本把 outlook-assistant 顶到榜首 —— 而这张榜是拿来
+    # 做决策的。去重是**在窗口内**做的:一个人这个月拿过就算一次,下个月再拿再算一次。
+    skill_names = dict(db.execute(select(RpAiSkill.id, RpAiSkill.name)).all())
+    item_names = dict(db.execute(select(RpAiMarketItem.id, RpAiMarketItem.name)).all())
+    skill_dl = [
+        (oid, skill_names.get(oid, oid), n)
+        for oid, n in unique_downloads(db, SKILL, since=since, until=until).items()
+        if oid in skill_names
+    ]
+    item_dl = [
+        (oid, item_names.get(oid, oid), n)
+        for oid, n in unique_downloads(db, MARKET, since=since, until=until).items()
+        if oid in item_names
+    ]
 
-    downloads = sum(int(r.count) for r in skill_dl) + sum(int(r.count) for r in item_dl)
+    downloads = sum(r[2] for r in skill_dl) + sum(r[2] for r in item_dl)
     top_downloads = sorted(
         (
-            ObjectCount(object_id=r[0], name=r.name, count=int(r.count))
-            for r in list(skill_dl) + list(item_dl)
+            ObjectCount(object_id=oid, name=name, count=int(n))
+            for oid, name, n in skill_dl + item_dl
         ),
         key=lambda c: c.count,
         reverse=True,
