@@ -53,6 +53,7 @@ from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid
 from app.services.gitlab_sync import GitLabError, fetch_repo_archive
 from app.services.skill_storage import bump_minor
+from app.services.portal_users import ensure_portal_user
 
 log = logging.getLogger(__name__)
 settings = get_settings()
@@ -308,20 +309,14 @@ def _resolve_category(db: Session, eid: str, category_id: str | None) -> tuple[s
 
 
 def _ensure_user(db: Session, eid: str) -> None:
-    """确保 rp_ai_portal 里有这个人 —— 版本行的 uploader_eid 是指向它的外键。
+    """建行时一并写上 department（包上传）。
 
-    **必须按 eid 查,不能用 db.get()。** 这张表的主键是自增的 `id`,`eid` 只是一个带唯一索引
-    的普通列,所以 `db.get(RpAiPortal, "EZHGMIO")` 是拿一个 EID 当整数主键去查 —— 永远答
-    None,于是每次上传都插一行重复的 eid,被 MySQL 用
-    `1062 Duplicate entry 'EZHGMIO' for key 'ix_rp_ai_portal_eid'` 拒掉,上传者看到的是
-    400「Database constraint violation」。
-
-    这段代码在生产从未跑到过(推送在它之前就失败了),所以这个洞从上线一直活到现在;同一个
-    仓里另外三个 _ensure_user 都是按 eid 查的,只有这一份复制的时候丢了 where。
+    这里原本是 ``RpAiPortal(eid=eid)`` 只写工号。报告与 Department Details 都按
+    department 归属，列是空的就等于这个人不属于任何部门、名下资产落进「无法归属」——
+    而这不报错：行建出来了、动作成功了、只是那个人从部门统计里消失了。
+    2026-09-07 在 ``ivc_sync`` 修过同一个形状，代价是 5 个人 10 件技能。
     """
-    if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
-        db.add(RpAiPortal(eid=eid))
-        db.flush()
+    ensure_portal_user(db, eid)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

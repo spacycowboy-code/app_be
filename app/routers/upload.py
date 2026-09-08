@@ -72,9 +72,14 @@ def _parse_tags(raw: str | None) -> list[str]:
 
 
 def _ensure_user(db: Session, eid: str) -> None:
-    if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
-        db.add(RpAiPortal(eid=eid))
-        db.flush()
+    """建行时一并写上 department（技能上传）。
+
+    这里原本是 ``RpAiPortal(eid=eid)`` 只写工号。报告与 Department Details 都按
+    department 归属，列是空的就等于这个人不属于任何部门、名下资产落进「无法归属」——
+    而这不报错：行建出来了、动作成功了、只是那个人从部门统计里消失了。
+    2026-09-07 在 ``ivc_sync`` 修过同一个形状，代价是 5 个人 10 件技能。
+    """
+    ensure_portal_user(db, eid)
 
 
 async def _read_upload(
@@ -513,5 +518,6 @@ def list_versions(skill_id: str, db: Session = Depends(get_db)) -> list[RpAiSkil
 # Streaming twin of /evaluate. Registered here so it can reuse the helpers above rather
 # than duplicating the upload parsing and the report shaping.
 from app.routers.upload_stream import register as _register_stream  # noqa: E402
+from app.services.portal_users import ensure_portal_user
 
 _register_stream(router, _read_upload, _checks_out, _findings_out, acting_eid)

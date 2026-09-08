@@ -13,15 +13,20 @@ from app.models.user import RpAiPortal
 from app.schemas.market import MarketItemRead
 from app.schemas.market_favorite import MarketFavoriteCreate
 from app.services.eids import normalize_eid
+from app.services.portal_users import ensure_portal_user
 
 router = APIRouter(prefix="/api/users/{eid}/market-favorites", tags=["market-favorites"])
 
 
 def _ensure_user(db: Session, eid: str) -> None:
-    """Create the user row on demand (favoriting shouldn't 404 on first use)."""
-    if db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid)) is None:
-        db.add(RpAiPortal(eid=eid))
-        db.flush()
+    """建行时一并写上 department（收藏）。
+
+    这里原本是 ``RpAiPortal(eid=eid)`` 只写工号。报告与 Department Details 都按
+    department 归属，列是空的就等于这个人不属于任何部门、名下资产落进「无法归属」——
+    而这不报错：行建出来了、动作成功了、只是那个人从部门统计里消失了。
+    2026-09-07 在 ``ivc_sync`` 修过同一个形状，代价是 5 个人 10 件技能。
+    """
+    ensure_portal_user(db, eid)
 
 
 @router.get("", response_model=list[MarketItemRead])
