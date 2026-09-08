@@ -30,6 +30,7 @@ from app.models.user import RpAiPortal
 from app.schemas.common import CamelModel
 from app.services import ivc_index
 from app.services.asset_owner import DirectoryDepartments
+from app.services.portal_users import ensure_portal_user
 
 logger = logging.getLogger(__name__)
 
@@ -319,18 +320,21 @@ def _ensured_user(
     (见 models/user.py::PORTAL_ROW_ORIGINS)。他们哪天真的登录了,``auth._upsert_user`` 会把
     这一行提升成 ``login``,所以这里写 import 不会永久把人关在渗透率之外。
     """
-    row = db.query(RpAiPortal).filter(RpAiPortal.eid == eid).first()
-    if row is None:
-        db.add(
-            RpAiPortal(
-                eid=eid,
-                display_name=display_name or eid,
-                department=(department or "")[:64] or None,
-                origin="import",
-            )
-        )
-        db.flush()
-        return eid
+    # 建行与补空缺的实现只有一处 —— `services/portal_users.ensure_portal_user`。
+    # 这里 department 是调用方查好后传进来的（一次同步共用一条 LDAP 连接），所以让 helper
+    # 不要再查一次目录。
+    ensure_portal_user(
+        db,
+        eid,
+        # `or eid`：同步这条路上卡片必须显示点什么（这个 docstring 上面解释了为什么），
+        # 所以兜底在调用处、不在 helper 里 —— 别的路径不该被迫接受工号当人名。
+        display_name=display_name or eid,
+        department=department,
+        origin="import",
+        lookup_directory=False,
+        promote_display_name=True,
+    )
+    return eid
 
     # 已有的行不动 origin:它可能是真的登录建的,导入不该把它降级。
     if display_name and (not row.display_name or row.display_name == eid):
