@@ -58,52 +58,38 @@ def test_sql_orders_downloads_by_value_not_by_text():
     )
 
 
-def test_the_increment_happens_in_sql_not_in_python():
-    """自增必须是 ``downloads = downloads + 1``,由数据库做加法。
+def test_the_counter_is_written_from_the_event_table_not_from_its_own_value():
+    """这一列**不是自增出来的**，是从事件表算出来后覆盖上去的。
 
-    这条钉的是**原子性**,而原子性没法靠"起两个会话各加一次"来测 —— 那样两边是串行的,后一个会读到
-    前一个提交后的值,加出来的结果恰好是对的,于是旧的读-改-写实现也照样通过。我试过,它确实通过了,
-    所以那种测试是假的,已经删掉。
+    原本这里钉的是 SQL 里必须出现 ``downloads + 1``，防的是读改写的竞态（两个并发下载都
+    读到 N，都写回 N+1，少算一次）。下载量的定义改成"有多少个不同的人"之后自增本身就错了：
+    同一个人下十次会把这一列推到 10，而页面显示 1。
 
-    能真正区分两种实现的是**发给数据库的语句**:在库里做加法,SET 右边引用列本身;在 Python 里算好
-    再写,SET 右边是一个绑定参数。所以这里抓真实 SQL 来判断。
-
-    为什么在意:旧代码读出 N、算 N+1、写回去。两个并发下载都读到 N,都写 N+1,少记一次。这个错不会
-    报警,只会让下载数长期偏低 —— 正是那种"看不见的错误"。
+    覆盖式把那个竞态**一并消掉**了，而且这条断言更强：起始值故意设成一个荒谬的数，写完之后
+    它必须等于事件表算出来的值 —— 也就是结果**与起始值无关**。读改写的实现过不了。
     """
-    from sqlalchemy import event
-
-    from app.database import engine
     from app.routers.skills import _bump_downloads
 
-    seen: list[str] = []
-
-    def capture(conn, cursor, statement, parameters, context, executemany):
-        if "UPDATE rp_ai_skill" in statement and "downloads" in statement:
-            seen.append(" ".join(statement.split()))
-
     with SessionLocal() as db:
-        skill = _skill(db, "s-sql", 10)
+        skill = _skill(db, "s-absolute", 4242)  # 起始值是脏的
         db.commit()
-
-        event.listen(engine, "before_cursor_execute", capture)
-        try:
-            _bump_downloads(db, skill, eid=None)
-        finally:
-            event.remove(engine, "before_cursor_execute", capture)
-
-    assert seen, "没有抓到自增用的 UPDATE 语句"
-    stmt = seen[0]
-    assert "downloads + " in stmt, (
-        f"SET 右边必须引用列本身,否则加法就回到了 Python 里。实际语句:{stmt}"
-    )
+        _bump_downloads(db, skill, eid="EONE")
 
     with SessionLocal() as db:
-        assert db.get(RpAiSkill, "s-sql").downloads == 11
+        assert db.get(RpAiSkill, "s-absolute").downloads == 1, (
+            "写进去的值必须来自事件表；4242 泄漏进结果说明它还在拿旧值做加法"
+        )
 
 
-def test_two_downloads_count_twice():
-    """两次下载加二 —— 比上一条弱,只保证没数错,不保证并发安全。两条各管一件事。"""
+def test_two_people_count_twice_but_one_person_twice_counts_once():
+    """数的是人，不是次数。
+
+    原本这条断言两次下载加二,而那两次用的都是 ``eid=None`` —— 匿名。新规则下同一个条目的
+    匿名行整体算**一个身份未知的下载者**(见 services/download_counts 里为什么不算 0、也不
+    各算一个),所以两次匿名是 1。
+
+    一并钉住两个人是 2,否则"永远返回 1"也能过上半条。
+    """
     from app.routers.skills import _bump_downloads
 
     with SessionLocal() as db:
@@ -113,7 +99,16 @@ def test_two_downloads_count_twice():
         _bump_downloads(db, skill, eid=None)
 
     with SessionLocal() as db:
-        assert db.get(RpAiSkill, "s-twice").downloads == 2
+        assert db.get(RpAiSkill, "s-twice").downloads == 1, "两次匿名是一个未知下载者"
+
+    with SessionLocal() as db:
+        skill = _skill(db, "s-two-people", 0)
+        db.commit()
+        _bump_downloads(db, skill, eid="EONE")
+        _bump_downloads(db, skill, eid="ETWO")
+
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, "s-two-people").downloads == 2
 
 
 @pytest.mark.parametrize(

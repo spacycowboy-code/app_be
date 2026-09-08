@@ -281,10 +281,18 @@ def collect(conn: Connection) -> list[Metric]:
         Metric(
             "skill_download",
             "下载 skill",
-            "次下载",
-            "同一人多次下载同一 skill 会各记一次，因为重复下载本身说明在反复用。",
+            "个 skill",
+            "**同一人多次下载同一个 skill 只记一次。** 这一条原来是各记一次，"
+            "理由写的是「重复下载本身说明在反复用」—— 而实测把这个理由否掉了："
+            "库里最高的一条是同一个工号对同一个 skill 下载 93 次，"
+            "相邻间隔中位数 1.0 秒、92 个间隔里 88 个不到 5 秒，那是一个循环，不是反复用。"
+            "按次数算，一个脚本就能把任何 skill 顶到第一，而这张表是拿来做决策的。"
+            "同一人下载**不同**的 skill 仍然各记一次 —— 那是两次不同的取用。"
+            "口径与门户页面一致，见 app/services/download_counts.py。",
             per_eid=_tally(
-                conn, "select eid, count(*) from rp_ai_skill_download group by eid"
+                conn,
+                "select eid, count(distinct skill_id) from rp_ai_skill_download "
+                "group by eid",
             ),
             unattributed=int(
                 conn.execute(
@@ -394,14 +402,14 @@ def collect(conn: Connection) -> list[Metric]:
         Metric(
             "agent_use",
             "使用 agent（下载 / 取用）",
-            "次取用",
+            "个 agent",
             "市场里目前被取用的项全部是 agent 类型，所以这条就是 agent 使用量。"
             "门户能观测到的「使用」是取走或复制安装命令，agent 之后在本地跑多少次，"
-            "门户看不到。",
+            "门户看不到。**同一人多次取用同一个 agent 只记一次**，与 skill 一条口径。",
             per_eid=_tally(
                 conn,
                 """
-                select d.eid, count(*)
+                select d.eid, count(distinct d.item_id)
                   from rp_ai_market_download d
                   join rp_ai_market_item i on i.id = d.item_id
                  where i.item_type = 'agent'

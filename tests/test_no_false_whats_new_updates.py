@@ -129,7 +129,11 @@ def test_download_increments_counter_without_touching_updated_at(client, content
     assert resp.content[:2] == b"PK"  # a real zip came back
 
     row = _row()
-    assert row["downloads"] == 8, "counter must still increment"
+    # ``_seed(7)`` 把这一列灌成 7 却**没有对应的事件行**,正是线上那 43 次的形状:事件表
+    # 建起来(最早 2026-08-06)之前的下载从来没记过是谁下的,按 eid 去重对它们无定义。
+    # 下载量现在从事件表算,所以这里是 1(只有 EZHGMIO 那一行),灌进去的 7 不参与。
+    # 这条测试真正承重的是下面 updated_at 那一条 —— 下载不能把技能顶上首页。
+    assert row["downloads"] == 1, "counter must be recomputed from the event log"
     assert row["version"] == "1.0.0", "a download never changes the version"
     assert row["updated_at"] == seeded, (
         "download moved updated_at -> the skill will show up as an "

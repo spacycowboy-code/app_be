@@ -337,10 +337,13 @@ def test_the_report_counts_people_and_assets_for_the_last_full_week(client, db):
     assert body["activePeople"] == 2          # signing in twice counts once
     assert body["newPeople"] == 2
     assert body["skillsAdded"] == 1
-    assert body["downloads"] == 2
+    # 夹具是"一个人下了两次"。``downloads`` 现在数的是**不同的 (条目, 人) 组合**,所以是 1。
+    # 它和 ``distinctDownloaders`` 仍然是两个不同的数:一个人下了 3 个不同的技能,前者 3、
+    # 后者 1。这里两个都是 1 只是因为夹具里只有一个技能。
+    assert body["downloads"] == 1
     assert body["distinctDownloaders"] == 1
     assert body["topDownloads"][0]["objectId"] == "s1"
-    assert body["topDownloads"][0]["count"] == 2
+    assert body["topDownloads"][0]["count"] == 1
 
 
 def test_this_week_is_marked_incomplete(client):

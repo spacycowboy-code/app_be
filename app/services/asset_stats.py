@@ -20,6 +20,7 @@ from app.models.market_favorite import RpAiMarketFavorite
 from app.models.skill import RpAiSkill
 from app.models.version import RpAiSkillVersion
 from app.services.card_group import groups_for_eids
+from app.services.download_counts import MARKET, SKILL, unique_downloads
 
 
 def attach_market_stats(db: Session, items: list[RpAiMarketItem]) -> None:
@@ -36,16 +37,10 @@ def attach_market_stats(db: Session, items: list[RpAiMarketItem]) -> None:
             .group_by(RpAiMarketFavorite.item_id)
         ).all()
     )
-    dls = dict(
-        db.execute(
-            select(
-                RpAiMarketDownload.item_id,
-                func.count(func.distinct(RpAiMarketDownload.eid)),
-            )
-            .where(RpAiMarketDownload.item_id.in_(ids))
-            .group_by(RpAiMarketDownload.item_id)
-        ).all()
-    )
+    # 去重规则只有一处 —— services/download_counts。这里原本是本文件自己的
+    # count(distinct eid)，而技能那边是另一套算法，同一个人下载同一个东西在两个市场
+    # 得出不同的数。顺带修掉 distinct 整体忽略 NULL 造成的匿名下载算 0 次。
+    dls = unique_downloads(db, MARKET, ids)
     groups = groups_for_eids(db, {it.creator for it in items if it.creator})
     for it in items:
         it.favorite_count = int(fav.get(it.id, 0))
@@ -134,7 +129,11 @@ def attach_skill_stats(db: Session, skills: list[RpAiSkill]) -> None:
             .group_by(RpAiSkillVersion.skill_id)
         ).all()
     }
+    # 下载量从事件表现算，**盖掉 ``rp_ai_skill.downloads`` 那个累计列**。那一列是每次
+    # 下载 +1 的次数，不是人数；而且它和事件表已经漂了（线上 399 vs 356）。真相在事件表。
+    dls = unique_downloads(db, SKILL, ids)
     for s in skills:
         s.favorite_count = int(counts.get(s.id, 0))
         s.content_updated_at = content_updated_at(s, *version_stats.get(s.id, (0, None)))
+        s.downloads = int(dls.get(s.id, 0))
     attach_skill_groups(db, skills)
