@@ -112,6 +112,39 @@ def list_items(
     return items
 
 
+@router.get("/{item_id}", response_model=MarketItemRead)
+def get_item(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiMarketItem:
+    """取单个市场条目 —— 详情页与分享链接用的就是这个。
+
+    **可见性规则必须和 ``list_items`` 一字不差**,这不是整齐好看的问题。下架的实现方式就是
+    这条规则:管理员在审核页拒绝,条目的 status 变成非 approved,于是它从所有人的列表里消失。
+    而条目 id 是可推出来的(``gl-<GitLab 项目 id>``)。所以这个按 id 取的接口若少了这道闸,
+    等于给任何拿到过链接的人留了一条把已下架条目重新捞出来的路 —— 而且没有任何报错,列表页
+    看起来一切正常。``list_items`` 的 docstring 已经把这件事写过一次:"列表里看不见"和
+    "接口取不到"是两件事,少一件等于没有。
+
+    找不到与看不到都答 404,不答 403:403 会告诉一个没权限的人"这个 id 确实存在",而 id 是
+    可推的,那就等于把下架条目的清单也一起交出去了。
+    """
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这个条目。")
+
+    requester = acting_eid(request, x_user_eid)
+    if requester != settings.audit_admin_eid and item.status != "approved":
+        if item.creator != requester:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这个条目。")
+
+    # 详情页要显示下载次数,和列表页同一个来源。
+    attach_market_stats(db, [item])
+    return item
+
+
 def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
     """待审核的包只有上传者与 admin 能取。
 
