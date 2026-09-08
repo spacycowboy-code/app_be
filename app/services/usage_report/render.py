@@ -31,10 +31,12 @@ from app.services.usage_report.departments import (
     NON_PERSON,
     UNKNOWN,
     Dept,
+    branch_display,
     parse,
     resolve,
 )
 from app.services.usage_report.figures import Metric, collect, contributions
+from app.services.usage_report.i18n import DEFAULT_LANG, Strings, strings
 
 #: The organisation this report is about.
 SCOPE = "BNEW RTE RP"
@@ -88,6 +90,38 @@ class Person:
     eid: str
     dept: Dept
     source: str
+    #: Whether this person's account row was created by them signing in.
+    #: False for a row an import created to register work on someone's behalf
+    #: (``rp_ai_portal.origin``). Such a person still belongs to a department and
+    #: their assets still count — what must not happen is a head count or a
+    #: penetration rate claiming they used the portal.
+    signed_in: bool = True
+
+
+def bind_eid(bind_account: object) -> str:
+    """The bare EID of this service's own directory bind account.
+
+    ``build_people`` excludes that account by comparing it against the portal's
+    EIDs, and the EIDs it compares to are bare and upper case (``ECNRPAI``). The
+    setting, however, is whatever LDAP needs to bind, which in production is a
+    UPN: ``ecnrpai@ericsson.se``. Comparing the two directly never matches, so the
+    guard silently did nothing and the bind account was counted as an employee of
+    the department it happens to be filed under -- which is exactly what its own
+    docstring says the guard exists to prevent.
+
+    The symptom was not an error but an extra table row. The account is absent from
+    the Graph reporting tree, so it fell through to the weakest placement rule
+    ("has a name and a department, so treat it as a person"), which keys the group
+    from the parsed department string. That produced a SECOND row for Product
+    System, labelled ``RP / PS`` with an unknown head count, eleven rows below the
+    real ``PS | 71 | 42 | 59%``.
+
+    Only the local part is taken. A DN-shaped value would not be reduced to an EID
+    by this, and deliberately so: inventing a rule for a format nobody configures
+    would be guessing, and the failure it would hide is the one just fixed.
+    """
+    text_ = str(bind_account or "").strip()
+    return text_.split("@", 1)[0].strip().upper()
 
 
 def build_people(
@@ -105,24 +139,36 @@ def build_people(
     tell a colleague who has never signed in from a test row, and it cannot tell
     this service's own directory bind account from a person, which is why that one
     is excluded by matching configuration rather than by name.
+
+    Deliberately not *dropping* rows by ``origin``: a row created by an import
+    belongs to a real person whose contributions have to land in a department, and
+    that is a different question from whether they ever signed in. Filtering them
+    out here would silently push their work into "无法归属". What the origin does
+    is set ``Person.signed_in``, so the head counts and the penetration rate can
+    leave them out while the asset counts keep them.
     """
-    rows = list(conn.execute(text("select eid, display_name, department from rp_ai_portal")))
+    rows = list(
+        conn.execute(
+            text("select eid, display_name, department, origin from rp_ai_portal")
+        )
+    )
     on_tree = {
         str(rec.get("signum") or signum).strip().upper()
         for signum, rec in tree.get("people", {}).items()
     }
-    bind = (bind_account or "").strip().upper()
+    bind = bind_eid(bind_account)
 
     people: dict[str, Person] = {}
     excluded: dict[str, str] = {}
     provenance: dict[str, int] = defaultdict(int)
-    for raw_eid, name, db_dept in rows:
+    for raw_eid, name, db_dept, row_origin in rows:
         eid = (raw_eid or "").strip().upper()
         if not eid:
             continue
+        signed_in = (row_origin or "login").strip().lower() != "import"
         known = identities.get(eid, {})
         if eid in on_tree:
-            people[eid] = Person(eid, parse(db_dept), "org tree")
+            people[eid] = Person(eid, parse(db_dept), "org tree", signed_in)
             provenance["组织树"] += 1
             continue
         if eid == bind:
@@ -139,11 +185,11 @@ def build_people(
             if not is_person:
                 excluded[eid] = why
                 continue
-            people[eid] = Person(eid, dept, why)
+            people[eid] = Person(eid, dept, why, signed_in)
             provenance["身份快照"] += 1
             continue
         if (name or "").strip() and (db_dept or "").strip():
-            people[eid] = Person(eid, parse(db_dept), "portal row")
+            people[eid] = Person(eid, parse(db_dept), "portal row", signed_in)
             provenance["门户账号行（推断）"] += 1
         else:
             excluded[eid] = "门户账号行里既没有姓名也没有部门，无法确认是个人"
@@ -238,7 +284,13 @@ def org_attribution(
         # The branch, not the parsed fourth code: for the six stale rows those
         # disagree, and the branch is the one the org chart shows.
         branch = str(info.get("branch") or UNKNOWN)
-        dept = Dept(dept.small_key, dept.small_label, branch, branch, dept.org_prefix)
+        # Key is the org-chart code (everything joins on it); label is what the
+        # reader sees, which is not the same string for PO / QA.
+        dept = Dept(
+            dept.small_key, dept.small_label,
+            branch, branch_display(branch),
+            dept.org_prefix,
+        )
         placement[signum] = dept
         big_head[branch] += 1
         small_head[dept.small_key] += 1
@@ -282,7 +334,11 @@ def aggregate(
         heads = big_head if level == "big" else small_head
         for key, n in heads.items():
             if level == "big":
-                label, sub = key, ""
+                # Same split as when a Dept is built above: the group keeps the
+                # org-chart code as its key, the reader gets the display name.
+                # Both paths must map, or the "keep the longer label" rule below
+                # would pick whichever spelling happened to be longer.
+                label, sub = branch_display(key), ""
             else:
                 label, sub = labels.get(key, (key, ""))
             groups.setdefault(key, Group(key, label, sub)).real += n
@@ -308,6 +364,11 @@ def aggregate(
         # Two spellings of one unit share a key; keep the more descriptive label.
         if len(label) > len(g.label):
             g.label = label
+        # The department still gets its row and its label from an import-registered
+        # person — that is how their assets find a home below — but they are not
+        # counted as a user of the portal, because they have not used it.
+        if not p.signed_in:
+            continue
         g.users += 1
         if p.eid in active_eids:
             g.active += 1
@@ -316,6 +377,14 @@ def aggregate(
             p = people.get(eid)
             if p is None:
                 continue
+            # Deliberately not filtered on ``signed_in``, and this leaves a seam a
+            # careful reader can find: an import-registered person contributes to
+            # this cell but not to the row's 访问 count, so a department can read
+            # "访问 14 人" beside "上传 agent 9 人 / 12 件" with those 9 not among
+            # the 14. Reviewed and accepted — the alternative is worse. Dropping
+            # them here would hide 12 real assets, and counting them in 访问 would
+            # claim 9 sign-ins that never happened. Both numbers are true as they
+            # stand; only their sum across two columns is not meaningful.
             d = dept_of(p)
             inside = eid in placement or d.small_key.startswith(SCOPE_KEY)
             if inside != in_scope:
@@ -366,12 +435,17 @@ def cell_text(people: int, events: int, countable: bool) -> str:
 #: showing this column".
 HIDDEN_METRICS = {"agent_use"}
 
+#: Which metrics get a column, in order. Keys only: the visible name comes from
+#: ``i18n`` under ``"col_" + key``, in whichever language was asked for. This used
+#: to carry a Chinese label alongside each key, and every reader of ``COLS``
+#: already ignored it — a second, unread copy of a name is how somebody ends up
+#: editing the wrong one and seeing the page not change.
 COLS = [
-    ("login_events", "近期登录"),
-    ("skill_download", "下载 skill"),
-    ("skill_upload", "上传 skill"),
-    ("skill_update", "更新 skill"),
-    ("agent_upload", "上传 agent"),
+    "login_events",
+    "skill_download",
+    "skill_upload",
+    "skill_update",
+    "agent_upload",
 ]
 
 CSS = """
@@ -516,7 +590,7 @@ SORT_JS = r"""
           if (h !== th) h.dataset.state = '-1';
         });
         th.classList.add(desc ? 'desc' : 'asc');
-        th.title = useSecond ? '按次数排序' : '按人数排序';
+        th.title = useSecond ? '__SORT_BY_TIMES__' : '__SORT_BY_PEOPLE__';
         sortTable(table, i, desc, useSecond);
       });
     });
@@ -524,6 +598,18 @@ SORT_JS = r"""
 })();
 </script>
 """
+
+
+def sort_js(s: Strings) -> str:
+    """``SORT_JS`` with its two tooltips in ``s``'s language.
+
+    Substituted rather than ``str.format``-ed: the script is full of ``{`` from
+    JavaScript blocks and object literals, so a format call would have to escape
+    every one of them and would break the next time somebody edits the script.
+    """
+    return (SORT_JS
+            .replace("__SORT_BY_TIMES__", s["js_sort_by_times"])
+            .replace("__SORT_BY_PEOPLE__", s["js_sort_by_people"]))
 
 
 def pct_cls(p: float, real: int) -> str:
@@ -534,7 +620,8 @@ def pct_cls(p: float, real: int) -> str:
     return "hi" if p >= 20 else "lo"
 
 
-def person_table(rows: list[tuple], headers: list[tuple[str, str]]) -> str:
+def person_table(rows: list[tuple], headers: list[tuple[str, str]],
+                 s: Strings) -> str:
     """A sortable table of named people.
 
     ``rows`` are ``(label, sublabel, [(display, sort_value), ...])``. The sort value
@@ -566,15 +653,16 @@ def person_table(rows: list[tuple], headers: list[tuple[str, str]]) -> str:
         head_cells.append(f"<th>{esc(title)}{hint}</th>")
     head = "".join(head_cells)
     return (
-        '<table class="sortable"><thead><tr><th class="l">姓名</th>'
+        '<table class="sortable"><thead><tr><th class="l">' + esc(s["th_name"])
+        + "</th>"
         f"{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
     )
 
 
 def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
-          show_real: bool) -> str:
+          show_real: bool, s: Strings) -> str:
     peaks = {k: max((g.cell(k).people for g in groups.values()), default=0)
-             for k, _ in COLS}
+             for k in COLS}
     peak_real = max((g.real for g in groups.values()), default=0)
     peak_users = max((g.users for g in groups.values()), default=0)
     order = sorted(groups.values(), key=lambda g: (-(g.real or g.users), -g.users, g.label))
@@ -603,7 +691,7 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
                        f'<span class="pct {pct_cls(p, g.real)}">{p:.0f}%</span></td>')
         tds.append(f'<td class="num{"" if g.active else " zero"}" '
                    f'data-v="{g.active}">{g.active}</td>')
-        for k, _ in COLS:
+        for k in COLS:
             c = g.cell(k)
             m = by_key[k]
             inner = cell_text(c.people, c.events, m.countable)
@@ -615,7 +703,7 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
     tot_real = sum(g.real for g in groups.values())
     tot_users = sum(g.users for g in groups.values())
     tot_active = sum(g.active for g in groups.values())
-    foot = [f'<td class="l">合计</td>']
+    foot = [f'<td class="l">{esc(s["th_total"])}</td>']
     if show_real:
         foot.append(f'<td class="num">{tot_real}</td>')
     foot.append(f'<td class="num">{tot_users}</td>')
@@ -623,27 +711,31 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
         foot.append('<td class="num">'
                     f'{tot_users / tot_real * 100:.0f}%</td>' if tot_real else "<td></td>")
     foot.append(f'<td class="num">{tot_active}</td>')
-    for k, _ in COLS:
+    for k in COLS:
         m = by_key[k]
         p = sum(g.cell(k).people for g in groups.values())
         e = sum(g.cell(k).events for g in groups.values())
         foot.append(f'<td class="num">{cell_text(p, e, m.countable)}</td>')
 
-    head = [f'<th class="l">{"大部门（二级部门）" if is_big else "小部门"}</th>']
+    head = [f'<th class="l">{esc(s["th_big_dept" if is_big else "th_small_dept"])}</th>']
     if show_real:
-        head.append("<th>部门<br>实际人数<span class='win'>Graph 汇报树</span></th>")
-    head.append("<th>用过<br>门户</th>")
+        head.append(f'<th>{s["th_real"]}'
+                    f'<span class="win">{esc(s["th_real_win"])}</span></th>')
+    head.append(f'<th>{s["th_used"]}</th>')
     if show_real:
-        head.append("<th>渗透率</th>")
-    head.append("<th>有实际<br>动作</th>")
-    for k, label in COLS:
+        head.append(f'<th>{esc(s["th_adoption"])}</th>')
+    head.append(f'<th>{s["th_active"]}</th>')
+    for k in COLS:
         m = by_key[k]
         # 每列自己说清读法。同一张表里两种形态并存(人数、人数/件数),不写出来的话
         # "1" 到底是一个人交了一件还是一个人交了三件,读者从格子上分不出来 —— 而这
         # 正是这张表被读错的那一次。
-        how = f"人数 / {esc(m.unit)}" if m.countable else "人数"
-        head.append(f'<th>{esc(label)}<span class="win">{how}'
-                    f'<br>{by_key[k].first_seen or "—"} 起</span></th>')
+        how = (s.fmt("th_people_per", unit=esc(s.metric_unit(k, m.unit)))
+               if m.countable else esc(s["th_people_only"]))
+        since = (s.fmt("th_since", date=by_key[k].first_seen)
+                 if by_key[k].first_seen else "—")
+        head.append(f'<th>{esc(s["col_" + k])}<span class="win">{how}'
+                    f'<br>{esc(since)}</span></th>')
     return ('<table class="sortable"><thead><tr>' + "".join(head)
             + "</tr></thead><tbody>" + "".join(rows) + "</tbody><tfoot><tr>"
             + "".join(foot) + "</tr></tfoot></table>")
@@ -652,7 +744,8 @@ def table(groups: dict[str, Group], by_key: dict[str, Metric], is_big: bool,
 def render(people, excluded, excluded_active, metrics, big, small, out_big,
            provenance, big_head, tree,
            contrib, gaps, ids, placement,
-           off_roster) -> str:
+           off_roster, lang: str = DEFAULT_LANG) -> str:
+    s = strings(lang)
     now = datetime.now(reporting_tz()).strftime("%Y-%m-%d %H:%M")
 
     def _units(d: dict, verb: str) -> str:
@@ -688,7 +781,6 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
         if _rec.get("employeeType") == "Workforce" and not _rec.get("enabled"):
             _b = str(_rec.get("branch") or "")
             disabled_by_branch[_b] = disabled_by_branch.get(_b, 0) + 1
-    nine = ["CD", "IVC", "RD2", "RD1", "RD3", "SWD", "PS", "PO", "QA"]
     # The population every percentage in this report is taken against.
     scope_real = sum(big_head.values())
     by_key = {m.key: m for m in metrics}
@@ -697,7 +789,7 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     def _name(eid: str) -> tuple[str, str]:
         info = ids.get(eid, {})
         if not info.get("found"):
-            return eid, "目录里查不到这个账号"
+            return eid, s["not_in_directory"]
         person = people.get(eid)
         unit = placement.get(eid) or (person.dept if person else None)
         return str(info.get("name") or eid), short_unit(unit.small_label if unit else "")
@@ -732,10 +824,16 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     # Counted over RP's own users only, to match the card beside it. Mixing the two
     # populations put 76 next to 146 and a percentage worked out against 154, so the
     # obvious division came out at 52% and the printed figure said 49%.
+    #
+    # ``signed_in`` is the second filter and it is load-bearing: every sentence this
+    # set feeds says "登录过". An import-registered account row is a real person in
+    # a real department, but counting them here would raise the penetration rate on
+    # the strength of people who have never opened the portal.
     inside_eids = {
         e
         for e, p_ in people.items()
-        if e in placement or p_.dept.small_key.startswith(SCOPE_KEY)
+        if p_.signed_in
+        and (e in placement or p_.dept.small_key.startswith(SCOPE_KEY))
     }
     active = len(active_eids & inside_eids)
     # "用过门户" is cumulative — a row is written the first time somebody signs in and
@@ -750,7 +848,7 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     # phrased without a total count of metrics: the definitions list below leaves out
     # the metric with no column, so any number quoted here would fail the same
     # cross-check it is meant to fix.
-    _shown_act = {k for k, _ in COLS} - SIGNIN_KEYS
+    _shown_act = {k for k in COLS} - SIGNIN_KEYS
     _visible_actors = {
         e for m in metrics if m.key in _shown_act for e in m.per_eid
     }
@@ -761,50 +859,48 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     non_dir = [e for e in contrib if not ids.get(e, {}).get("found")]
     non_dir_note = ""
     if non_dir:
-        non_dir_note = (
-            f'<div class="note"><b>{"、".join(non_dir)} 不是目录里的人。</b>'
-            f'它上传了 {sum(contrib[e]["skills"] for e in non_dir)} 个 skill、'
-            f'被取用 {sum(contrib[e]["skill_taken"] for e in non_dir)} 次。'
-            "没有把它从表里删掉，因为它是真实的内容来源 —— 删掉会让人以为 skill 库比"
-            "实际小。但它不该算进「多少人贡献过」。</div>"
-        )
+        non_dir_note = '<div class="note">' + s.fmt(
+            "note_non_dir",
+            names=s["list_sep"].join(non_dir),
+            skills=sum(contrib[e]["skills"] for e in non_dir),
+            taken=sum(contrib[e]["skill_taken"] for e in non_dir),
+        ) + "</div>"
 
     contrib_head = [
-        ("上传 skill", ""),
-        ("更新版本", "不含首版"),
-        ("上传市场项", ""),
-        ("skill 被取用", "人数 / 次数"),
+        (s["col_contrib_upload"], ""),
+        (s["col_contrib_version"], s["col_contrib_version_note"]),
+        (s["col_contrib_market"], ""),
+        (s["col_contrib_taken"], s["col_contrib_taken_unit"]),
     ]
 
     people_section = f"""
-<h2>四、贡献者：谁做了东西，谁的东西被用</h2>
+<h2>{esc(s["h2_people"])}</h2>
 
-<p class="lead">谁做了东西给别人用。默认按「skill 被多少人取用」排，点表头可改排序。</p>
+<p class="lead">{s["lead_people_1"]}</p>
 
 
 
-<p class="lead">「被取用」列左边是<b>取用的人数</b>，右边是<b>次数</b>。两个都给，
-因为一个 skill 被一个人下载二十次、和被二十个人各下载一次，是完全不同的贡献，
-只看次数分不出来。</p>
+<p class="lead">{s["lead_people_2"]}</p>
 
-<div class="note"><b>「更新版本」不含首次上传。</b>上传一个 skill 会同时写一条 1.0.0
-的版本记录，所以直接数版本记录会把「只上传过、从没改过」也算成一次更新 ——
-全库 {gaps.get("version_rows_total", 0)} 条版本记录里有 {gaps.get("first_versions", 0)}
-条是这样的首版，真正的更新只有 {gaps.get("real_updates", 0)} 次。
-这一列只数首版之后的版本，所以一个人「上传 3、更新 0」是正常的，
-意思是他上传的东西还没有再改过。</div>
-{person_table(contrib_rows, contrib_head)}
+<div class="note">{s.fmt(
+    "note_first_version",
+    version_rows=gaps.get("version_rows_total", 0),
+    first_versions=gaps.get("first_versions", 0),
+    real_updates=gaps.get("real_updates", 0),
+)}</div>
+{person_table(contrib_rows, contrib_head, s)}
 
 
 
 {non_dir_note}
 
-<div class="note"><b>这是贡献名单，不是排名。</b>「被取用」多少取决于做的是什么东西 ——
-一个通用工具天然比一个专用脚本被更多人拿走，这不说明谁做得更好。</div>
+<div class="note">{s["note_not_ranking"]}</div>
 """
 
     inside = sum(g.users for g in small.values())
-    outside = len(people) - inside
+    # Same population as ``inside``, or the difference counts import-registered
+    # rows as users who sit outside the organisation.
+    outside = len([p for p in people.values() if p.signed_in]) - inside
 
     tree_as_of = local_time(tree.get("as_of"))
 
@@ -853,18 +949,30 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
             continue
         extra = ""
         if m.unattributed:
-            extra += (f'<div class="small" style="color:var(--warn)">另有 '
-                      f"{m.unattributed} 条无法归属到人：{esc(m.unattributed_note)}</div>")
+            extra += ('<div class="small" style="color:var(--warn)">'
+                      + s.fmt("defs_unattributed",
+                              count=s.count("cnt_rows", m.unattributed),
+                              note=esc(s.metric_unattr(m.key, m.unattributed_note)))
+                      + "</div>")
         if m.excluded_people:
             # 单位跟着指标走,不写死「次」:上传类指标的单位是「个 skill」「个 agent」,
             # 而"另有 1 个非个人账号、共 7 次"读起来像是它下载了 7 次,不是交了 7 个。
-            ev = f"、共 {m.excluded_events} {esc(m.unit)}" if m.countable else ""
-            extra += (f'<div class="small">另有 {m.excluded_people} 个非个人账号{ev}'
-                      f"，未计入。</div>")
-        ev = f"，共 {m.events} {esc(m.unit)}" if m.countable else ""
-        defs.append(f"<dt>{esc(m.label)}<span class='tag'>{esc(m.first_seen)} → "
+            ev = (s.fmt("ev_and", count=m.excluded_events,
+                        unit=esc(s.metric_unit(m.key, m.unit)))
+                  if m.countable else "")
+            extra += ('<div class="small">'
+                      + s.fmt("defs_excluded",
+                              count=s.count("cnt_accounts", m.excluded_people), ev=ev)
+                      + "</div>")
+        ev = (s.fmt("ev_total", count=m.events,
+                    unit=esc(s.metric_unit(m.key, m.unit)))
+              if m.countable else "")
+        defs.append(f"<dt>{esc(s.metric_label(m.key, m.label))}"
+                    f"<span class='tag'>{esc(m.first_seen)} → "
                     f"{esc(m.last_seen)}</span></dt>"
-                    f"<dd>{esc(m.note)}<br>当前：{m.people} 人{ev}。{extra}</dd>")
+                    f"<dd>{esc(s.metric_note(m.key, m.note))}<br>"
+                    f'{s.fmt("defs_now", people=s.count("cnt_people", m.people), ev=ev)}'
+                    f"{extra}</dd>")
 
     zero_rows = "".join(
         f'<tr><td class="l"><span class="dept">'
@@ -903,104 +1011,124 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
             )
         return out + doc[end:]
 
+    # 卡片文案先算成局部变量,好让下面的标记保持「n 与 k 紧挨着」的原样式。
+    # test_portal_row_origin 断言的是 `<div class="n">1</div><div class="k">…</div>`
+    # 这个精确片段 —— 为了可读性在两者之间换行会让那条断言失败,而它钉的是
+    # 「导入的账号不算用过门户」这件真事,不该为排版让路。
+    c_head = esc(s["card_head"])
+    c_head_sub = esc(s.fmt("card_head_sub",
+                           teams=s.count("cnt_teams_small", len(small))))
+    c_inside = esc(s["card_inside"])
+    c_inside_sub = esc(s.fmt("card_inside_sub", pct=f"{inside / scope_real * 100:.1f}%"))
+    c_active = esc(s["card_active"])
+    c_active_sub = esc(s.fmt("card_active_sub",
+                             inside=s.count("cnt_users", inside),
+                             pct=f"{active / max(inside, 1) * 100:.0f}%"))
+    c_zero = esc(s["card_zero"])
+    c_zero_sub = esc(s.fmt("card_zero_sub", head=s.count("cnt_people", zero_head)))
+    c_dl = esc(s["card_downloads"])
+    c_dl_sub = esc(s.fmt("card_downloads_sub",
+                         since=by_key["skill_download"].first_seen or "—"))
+    c_out = esc(s["card_outside"])
+    c_out_sub = esc(s["card_outside_sub"])
+
     return indent_sections(f"""<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8">
+<html lang="{s["html_lang"]}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>RP AI Portal 使用情况报告（按部门）</title>
+<title>{esc(s["title"])}</title>
 <style>{CSS}</style></head><body><div class="wrap">
 
-<h1>RP AI Portal 使用情况报告</h1>
-<p class="sub">范围 BNEW RTE RP · 按小部门与大部门（二级部门）分组 · 生成于 {now}（北京时间）<br>
-数据来自门户数据库 <span class="code">vem-staging</span>；部门归属与部门人数来自
-Microsoft Graph（<span class="code">manager</span> / <span class="code">directReports</span>），
-也就是 Teams 组织架构图的同一个数据源</p>
+<h1>{esc(s["h1"])}</h1>
+<p class="sub">{s.fmt("sub", now=now)}</p>
 
-<div class="note">渗透率的分母含 <b>{tree.get("disabled", 0)} 个已停用账号</b>（Teams 也算它们），
-这批人登不进门户，所以<b>报告里的渗透率是偏保守的下限</b> ——
-按能登录的 {scope_real - tree.get("disabled", 0)} 人算，全组织是
-{inside / max(scope_real - tree.get("disabled", 0), 1) * 100:.1f}%，而不是
-{inside / scope_real * 100:.1f}%。</div>
+<div class="note">{s.fmt(
+    "warn_disabled",
+    disabled=tree.get("disabled", 0),
+    enabled=scope_real - tree.get("disabled", 0),
+    pct_enabled=f"{inside / max(scope_real - tree.get('disabled', 0), 1) * 100:.1f}%",
+    pct_all=f"{inside / scope_real * 100:.1f}%",
+)}</div>
 
 <div class="cards">
-  <div class="card"><div class="n">{scope_real}</div><div class="k">RP 组织在职人数</div>
-    <div class="w">Graph 汇报树，{len(small)} 个小部门</div></div>
-  <div class="card"><div class="n">{inside}</div><div class="k">其中用过门户</div>
-    <div class="w">渗透率 {inside / scope_real * 100:.1f}%</div></div>
-  <div class="card"><div class="n">{active}</div><div class="k">有过实际动作的人</div>
-    <div class="w">不只是登录，占 RP 内 {inside} 名用户的 {active / max(inside, 1) * 100:.0f}%</div></div>
-  <div class="card"><div class="n">{len(zero_depts)}</div><div class="k">零使用的小组</div>
-    <div class="w">合计 {zero_head} 人，无人登录过</div></div>
+  <div class="card"><div class="n">{scope_real}</div><div class="k">{c_head}</div>
+    <div class="w">{c_head_sub}</div></div>
+  <div class="card"><div class="n">{inside}</div><div class="k">{c_inside}</div>
+    <div class="w">{c_inside_sub}</div></div>
+  <div class="card"><div class="n">{active}</div><div class="k">{c_active}</div>
+    <div class="w">{c_active_sub}</div></div>
+  <div class="card"><div class="n">{len(zero_depts)}</div><div class="k">{c_zero}</div>
+    <div class="w">{c_zero_sub}</div></div>
   <div class="card"><div class="n">{by_key['skill_download'].events}</div>
-    <div class="k">skill 下载次数</div>
-    <div class="w">{by_key['skill_download'].first_seen} 起</div></div>
-  <div class="card"><div class="n">{outside}</div><div class="k">RP 之外的用户</div>
-    <div class="w">单独列在第五节</div></div>
+    <div class="k">{c_dl}</div>
+    <div class="w">{c_dl_sub}</div></div>
+  <div class="card"><div class="n">{outside}</div><div class="k">{c_out}</div>
+    <div class="w">{c_out_sub}</div></div>
 </div>
 
-<h2>一、大部门（二级部门）对比</h2>
-<p class="lead">每个活动格子里，左边是<b>人数</b>（做过这件事的不同的人），
-斜杠后是<b>次数</b>。</p>
-{table(big, by_key, True, True)}
-<p class="lead"><b>「用过门户」和「近期登录」不是同一件事。</b>前者是<b>累计</b>至少登录过一次
-（{by_key['ever_signed_in'].first_seen} 起，登录时建号，永久保留）；后者只统计登录明细表上线的
-{by_key['login_events'].first_seen} 之后 —— 也就是<b>还回来过的人</b>。
-RP 内 {len(inside_eids)} 人登录过，其中 {returning} 人之后回来过，
-另外 <b>{once_only} 人来过就没再出现</b>。核对过两个方向：登录明细里的人全都在「用过门户」里，
-反过来那 {once_only} 位建号时间无一例外都在 {by_key['login_events'].first_seen} 之前。</p>
-<p class="lead"><b>「有实际动作」不等于右边各列相加。</b>它统计的是<b>所有</b>登录以外的动作，
-而这张表只给其中一部分开了列 —— 收藏、评论、工具运行、市场取用都算在内，但没有单独的列。
-RP 内有 <b>{off_column} 人</b>只做过这些没有列的动作，所以横着加会比这一列少。</p>
-<p class="hint"><b>点表头可排序。</b>数字列首次点击按从大到小，再点反向；
-部门名列按字母序。活动列有四档循环：人数↓、人数↑、次数↓、次数↑ ——
-人数看铺开了多少，次数看用得多深，这两个问题排出来的名次不一样，同一张表都能看。
-底色条是同一列内的相对高度。渗透率 ≥20% 绿色，&lt;20% 橙色，0 灰色。</p>
+<h2>{esc(s["h2_big"])}</h2>
+<p class="lead">{s["lead_cells"]}</p>
+{table(big, by_key, True, True, s)}
+<p class="lead">{s.pick(
+    "lead_used_vs_recent", len(inside_eids),
+    since_ever=by_key["ever_signed_in"].first_seen or "—",
+    since_login=by_key["login_events"].first_seen or "—",
+    inside=s.count("cnt_people", len(inside_eids)),
+    returning=returning,
+    once=once_only,
+)}</p>
+<p class="lead">{s.fmt(
+    "lead_did_something", off_column=s.count("cnt_people_bold", off_column)
+)}</p>
+<p class="hint">{s["hint_sort"]}</p>
 
-<h2>二、小部门明细</h2>
-<p class="lead">小部门即 EID 直属的那一级，共 {len(teams)} 个、{teams_head} 人（<b>包括一个人都没用过的</b>）。
-第二行灰字是它所属的大部门。</p>
-<p class="lead">这张表<b>只列小组</b>，所以合计是 {teams_head} 而不是 {scope_real} ——
-差的 {dept_level_head} 人是各部门负责人本人及直接向他汇报、不属于任何小组的幕僚。
-他们不是团队，已计入第一节所属部门。</p>
-{table(teams, by_key, False, True)}
+<h2>{esc(s["h2_teams"])}</h2>
+<p class="lead">{s.fmt(
+    "lead_teams_1",
+    teams=s.count("cnt_teams_bare", len(teams)),
+    head=s.count("cnt_people", teams_head),
+)}</p>
+<p class="lead">{s.fmt(
+    "lead_teams_2",
+    teams_head=teams_head,
+    scope_real=scope_real,
+    dept_level=s.count("cnt_people", dept_level_head),
+)}</p>
+{table(teams, by_key, False, True, s)}
 
-<h2>三、还没有人用过的小组</h2>
-<p class="lead">这 {len(zero_depts)} 个<b>小组</b>共 {zero_head} 人，占 RP 组织的
-{zero_head / scope_real * 100:.0f}%，其中没有任何一个人登录过门户。
-这是覆盖面上最大的一块空白，也是唯一一份能直接拿去做推广的名单。</p>
-<p class="lead">这里说的是<b>小组</b>，不是二级部门 ——
-没有一个二级部门是完全没人用的。</p>
-<table style="max-width:640px"><thead><tr><th class="l">小组</th>
-<th style="width:72px">人数</th></tr></thead>
+<h2>{esc(s["h2_zero"])}</h2>
+<p class="lead">{s.pick(
+    "lead_zero_1", len(zero_depts),
+    teams=s.count("cnt_teams_group", len(zero_depts)),
+    head=s.count("cnt_people", zero_head),
+    pct=f"{zero_head / scope_real * 100:.0f}%",
+)}</p>
+<p class="lead">{s["lead_zero_2"]}</p>
+<table style="max-width:640px"><thead><tr><th class="l">{esc(s["th_team"])}</th>
+<th style="width:72px">{esc(s["th_headcount"])}</th></tr></thead>
 <tbody>{zero_rows}</tbody></table>
 
-<div class="note">另有 <b>{zero_lead_head} 人</b>也没登录过，但<b>没有列在上表里</b>：他们是
-{zero_lead_units} 这几个部门的<b>负责人本人及其直属幕僚</b>（不属于任何小组），
-<span class="code">department</span> 字段只写到二级部门、没有下一级，所以按小部门分组时
-会各自成一行。他们已经计入所属二级部门（见第一节），这里不再单独当成「部门」列出 ——
-把负责人摆进小组名单会让这份名单没法用。
-要看这几位，请直接看第一节对应部门那一行。</div>
+<div class="note">{s.pick(
+    "note_zero_leads", zero_lead_head,
+    head=s.count("cnt_people", zero_lead_head),
+    units=zero_lead_units,
+)}</div>
 
 {people_section}
 
-<h2>五、RP 之外的用户</h2>
-<p class="lead">这 {outside} 人来自其他组织，是自己找过来的，不在 RP 的推广范围内。
-单独列出而不并进上面的表：他们所在组织有多少人、有没有被推广过，这份报告查的是
-{SCOPE} 的名册，答不上来。把他们塞进 RP 的分母，算出的百分比既不描述 RP，
-也不描述他们的组织。</p>
-{table(out_big, by_key, True, False)}
+<h2>{esc(s["h2_outside"])}</h2>
+<p class="lead">{s.pick(
+    "lead_outside", outside,
+    outside=s.count("cnt_people", outside), scope=SCOPE,
+)}</p>
+{table(out_big, by_key, True, False, s)}
 
-<h2>附录　指标定义与口径</h2>
-<p class="lead">每条写明它实际数的是什么、观察区间，以及有没有数不到的部分。
-口径写在这里而不是脚注，因为这些数字将来会被引用，引用的人需要知道它的边界。</p>
+<h2>{esc(s["h2_appendix"])}</h2>
+<p class="lead">{s["lead_appendix"]}</p>
 <dl>{''.join(defs)}</dl>
 
-<p class="small" style="margin-top:26px">使用数据每次打开都重新查库，所以上面的数字就是此刻的。
-组织结构（谁在哪个部门、每个部门多少人）来自 Microsoft Graph 汇报树的快照，
-抓取于 {tree_as_of}（北京时间），由 <span class="code">tools/fetch_graph_tree.py</span> 单独刷新 ——
-生成这个页面本身不连任何目录服务。口径定义见
-<span class="code">app/services/usage_report/</span>。</p>
+<p class="small" style="margin-top:26px">{s.fmt("footer", as_of=tree_as_of)}</p>
 
-</div>{SORT_JS}</body></html>
+</div>{sort_js(s)}</body></html>
 """)
 
 
@@ -1058,8 +1186,15 @@ def build_html(
     org_snapshot: Path | str | None = None,
     identities_snapshot: Path | str | None = None,
     bind_account: str = "",
+    lang: str = DEFAULT_LANG,
 ) -> str:
-    """Render the whole report. Reads the database; writes nothing."""
+    """Render the whole report. Reads the database; writes nothing.
+
+    ``lang`` selects the wording for the entire page (see ``i18n``): headings,
+    tables, and the ``口径`` prose. An earlier round translated the skeleton only;
+    that is no longer the case, so ``lang="en"`` yields a page with no Chinese in
+    it apart from data that is itself Chinese.
+    """
     tree = load_org_tree(conn, org_snapshot)
 
     identities: dict[str, dict] = {}
@@ -1161,4 +1296,5 @@ def build_html(
         ids,
         placement,
         off_roster,
+        lang=lang,
     )

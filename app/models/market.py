@@ -19,6 +19,7 @@ from app.models.mixins import TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.market_version import RpAiMarketItemVersion
+    from app.models.user import RpAiPortal
 
 ITEM_TYPES = ("tool", "agent", "ai-platform")
 SERVICE_TYPES = ("code", "cloud")
@@ -46,7 +47,19 @@ class RpAiMarketItem(TimestampMixin, Base):
     item_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     # code | cloud
     service_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    # manual | gitlab-tools | gitlab-agents
+    # How the row got here. Not an enum in the database, and read in only two
+    # places — market.py checks ``startswith("gitlab")`` to word a duplicate
+    # message, and the review page checks ``!= "upload"`` to explain why it cannot
+    # list files — so a new value behaves like ``manual`` in both, which is what a
+    # registered pointer should do.
+    #   manual                        someone filled in the form
+    #   upload                        a package pushed through /api/market/agent-upload
+    #   gitlab-tools | gitlab-agents  synced from the two GitLab subgroups
+    #   radioai                       the one-off catalogue import, 2026-08-31
+    #                                 (tools/import_radioai_agents.py)
+    # Kept specific rather than lumped into ``manual`` so a batch someone else
+    # produced stays identifiable: it is the only way to find these rows again, to
+    # correct them in bulk, or to take them back out.
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
 
     # Code service -> git repository URL; Cloud service -> running service URL.
@@ -68,6 +81,10 @@ class RpAiMarketItem(TimestampMixin, Base):
     response_time: Mapped[str | None] = mapped_column(String(32))
     # ISO timestamp of the last update (GitLab last_activity_at for synced items).
     last_activity: Mapped[str | None] = mapped_column(String(40))
+    # Git object sha of this asset's own directory, for items synced from a git
+    # tree (see services/gerrit_assets). Only a change detector — deliberately
+    # not ``last_activity``, which is a timestamp the card renders.
+    content_sha: Mapped[str | None] = mapped_column(String(64))
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # EID of the user who manually created this item (None for GitLab-synced).
@@ -91,3 +108,40 @@ class RpAiMarketItem(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="RpAiMarketItemVersion.id",
     )
+
+    # Read-only join on the EID string. ``creator`` carries no foreign key (a
+    # GitLab-synced item has no creator at all, and an EID that never signed in
+    # has no user row), so this is ``viewonly`` and must tolerate finding nothing.
+    creator_user: Mapped["RpAiPortal | None"] = relationship(
+        primaryjoin="RpAiMarketItem.creator == RpAiPortal.eid",
+        foreign_keys="RpAiMarketItem.creator",
+        viewonly=True,
+        lazy="selectin",
+    )
+
+    @property
+    def uploader_name(self) -> str | None:
+        """The creator's LDAP display name, from the linked user row."""
+        user = self.creator_user
+        return user.display_name if user else None
+
+    @property
+    def creator_label(self) -> str | None:
+        """The name to show as this item's creator.
+
+        Mirrors ``RpAiSkill.creator_label`` deliberately, because the two markets
+        show the same thing in the same place and two rules would drift. The
+        package-upload path writes the uploader's EID into ``author`` while the
+        manual-registration form lets someone type a real name, so a card showed
+        ``Shawn Xiao`` beside ``EWNGFEI`` — same field, two meanings. Resolving it
+        here rather than in the template keeps that decision in one place.
+
+        When ``author`` differs from the creator's EID it is a label a person
+        chose (``Anthropic``, ``AI Team``, ``RTE RU SW``) and is shown verbatim;
+        otherwise it is just the EID, so the display name is preferred and the EID
+        is the fallback — an unresolvable EID still answers "who uploaded this",
+        an empty label does not.
+        """
+        if self.author and self.author != self.creator:
+            return self.author
+        return self.uploader_name or self.creator

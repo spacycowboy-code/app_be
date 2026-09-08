@@ -4,7 +4,6 @@ import io
 import re
 import uuid
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -19,7 +18,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
@@ -37,6 +36,7 @@ from app.models.version import RpAiSkillVersion
 from app.models.download import RpAiSkillDownload
 from app.repositories import skill_content
 from app.schemas.skill import (
+    ExternalDownloadRead,
     SkillCreate,
     SkillImageState,
     SkillRead,
@@ -50,9 +50,14 @@ from app.services.skill_manifest import (
     with_frontmatter,
 )
 from app.services.archives import common_top_dir
-from app.services.card_group import groups_for_eids
+from app.services.asset_stats import (
+    attach_skill_groups,
+    attach_skill_stats,
+    content_updated_at,
+)
 from app.services.skill_storage import sanitize_segment, skill_storage
 from app.services import gitlab_mr
+from app.services import asset_content
 from app.services import reporting_windows
 from app.services import skill_image
 from app.services.audit_engine import AuditResult, audit_skill
@@ -73,6 +78,9 @@ def _read_skill_md(skill: RpAiSkill) -> str:
     **读不到就 503,不回落到 `skill.instructions`。** 那一列是同一份正文的第二份副本,
     回落等于把可能过期的内容当成当前版本拿去编辑或审计,而且从响应上看不出来。
     生产 22 个技能的 `storage_path` 与 `repo_commit` 都有值,所以这条回落对现存数据从不生效。
+
+    内容住在哪个上游由 `asset_content` 按 `storage_path` 的前缀分派 —— 从 Gerrit 同步来的
+    技能内容在别人的仓里,而这里的调用方不需要知道这件事。
     """
     if not skill.storage_path or not skill.repo_commit:
         raise HTTPException(
@@ -80,10 +88,8 @@ def _read_skill_md(skill: RpAiSkill) -> str:
             detail="这个技能没有记下内容在仓库里的位置或版本,无法读取正文",
         )
     try:
-        return skill_content.read_text(
-            skill.repo_commit, f"{skill.storage_path}/SKILL.md"
-        )
-    except skill_content.ContentUnavailable as exc:
+        return asset_content.read_text(skill.storage_path, skill.repo_commit, "SKILL.md")
+    except asset_content.ContentUnavailable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="暂时读不到技能内容,请稍后重试",
@@ -131,31 +137,6 @@ def _apply_children(skill: RpAiSkill, payload) -> None:
         ]
 
 
-def _content_updated_at(
-    skill: RpAiSkill, upload_count: int, latest_upload: datetime | None
-) -> datetime | None:
-    """When this skill's content last changed, for the Home feed's "Update" rule.
-
-    ``rp_ai_skill_version`` holds one row per upload, which is the only
-    authoritative record of a content change — ``updated_at`` on the skill row is
-    a bookkeeping column that moves on any write to it.
-
-    * two or more uploads -> the newest one is a real update;
-    * exactly one upload -> that upload *is* the creation, so report the creation
-      time. Its version row is stamped seconds later than the skill row (separate
-      INSERTs, separate ``CURRENT_TIMESTAMP``), and returning that would announce
-      every brand-new skill as updated;
-    * no version history at all -> the official imports, which never write one.
-      Fall back to ``updated_at``: it is trustworthy for them now that the import
-      writes a per-folder commit sha rather than the repo-wide HEAD.
-    """
-    if upload_count >= 2 and latest_upload is not None:
-        return latest_upload
-    if upload_count == 1:
-        return skill.created_at
-    return skill.updated_at
-
-
 @router.get("", response_model=list[SkillSummary])
 def list_skills(
     db: Session = Depends(get_db),
@@ -188,52 +169,14 @@ def list_skills(
             | (RpAiSkill.uploader_eid == requester)
         )
     skills = list(db.scalars(stmt).all())
-    # Attach the deduplicated like count (favorites are unique per (eid, skill)).
-    if skills:
-        ids = [s.id for s in skills]
-        counts = dict(
-            db.execute(
-                select(RpAiUserFavorite.skill_id, func.count(RpAiUserFavorite.id))
-                .where(RpAiUserFavorite.skill_id.in_(ids))
-                .group_by(RpAiUserFavorite.skill_id)
-            ).all()
-        )
-        # Upload history per skill: how many uploads, and when the newest landed.
-        # The count is what decides whether the content ever changed — a single
-        # upload is the creation itself, however many seconds after the skill row
-        # its version row happened to be INSERTed (``upload.py`` flushes the skill
-        # first, then commits the version row after the audit record and, for a
-        # suspect upload, a GitLab round-trip). Comparing the two timestamps
-        # directly would mark every brand-new skill as updated.
-        version_stats = {
-            sid: (int(n), latest)
-            for sid, n, latest in db.execute(
-                select(
-                    RpAiSkillVersion.skill_id,
-                    func.count(RpAiSkillVersion.id),
-                    func.max(RpAiSkillVersion.created_at),
-                )
-                .where(RpAiSkillVersion.skill_id.in_(ids))
-                .group_by(RpAiSkillVersion.skill_id)
-            ).all()
-        }
-        for s in skills:
-            s.favorite_count = int(counts.get(s.id, 0))
-            s.content_updated_at = _content_updated_at(s, *version_stats.get(s.id, (0, None)))
-        _attach_group(db, skills)
+    # 组由 attach_skill_stats 一并挂上（services/asset_stats.attach_skill_groups）。
+    # 这里曾经还有一句 _attach_group(db, skills)：同一个缺陷被两个人各修一次，一个补了调用、
+    # 一个把实现收成一处并删掉了旧函数，两个都通过了自己的 CI，合到一起就成了对已删符号的
+    # 调用 —— GET /api/skills 直接 500。tools/check_undefined_names.py 能抓到它，但 CI 跑的
+    # 是各自合并前的基线。
+    attach_skill_stats(db, skills)
     return skills
 
-
-def _attach_group(db: Session, skills: list[RpAiSkill]) -> None:
-    """Attach the uploader's org group (地址 · 大部门 · 小部门) onto each skill.
-
-    Keyed on ``uploader_eid`` rather than ``author``: for the official imports
-    ``author`` is a label like "Anthropic", which is not a person and has no
-    office. Those skills get no group, which is the truthful answer.
-    """
-    groups = groups_for_eids(db, {s.uploader_eid for s in skills if s.uploader_eid})
-    for s in skills:
-        s.group = groups.get((s.uploader_eid or "").strip().upper())
 
 
 @router.get("/{skill_id}", response_model=SkillRead)
@@ -250,10 +193,10 @@ def get_skill(skill_id: str, db: Session = Depends(get_db)) -> SkillRead:
             func.max(RpAiSkillVersion.created_at),
         ).where(RpAiSkillVersion.skill_id == skill_id)
     ).one()
-    skill.content_updated_at = _content_updated_at(
+    skill.content_updated_at = content_updated_at(
         skill, int(upload_count or 0), latest_upload
     )
-    _attach_group(db, [skill])
+    attach_skill_groups(db, [skill])
     # 正文按引用从仓库读,不发数据库里那一列 —— 同一份正文两个来源,而响应上看不出用了哪一份。
     #
     # 先把模型构出来再改字段,不给 ORM 对象赋值:`instructions` 是真列,赋值会把 session 弄脏,
@@ -308,13 +251,35 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
     Naming ``updated_at`` in the SET clause suppresses ``onupdate`` and carries
     the existing value forward, so only real edits move it.
     """
+def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> None:
+    """Record a download: log a timestamped event row (with the downloader's
+    EID when known, for per-user leaderboards) and increment the cumulative
+    counter. Best-effort — a logging failure must never break the download.
+
+    A download is NOT a modification of the skill, so this must not move
+    ``updated_at``. That column carries ``onupdate=func.now()`` (TimestampMixin),
+    which fires on any UPDATE that does not name it — and the Home page's
+    "What's New" feed reports a skill as updated whenever
+    ``updated_at > created_at``, so bumping the counter through the ORM made
+    every download surface as a bogus "Update" card with an unchanged version.
+    Naming ``updated_at`` in the SET clause suppresses ``onupdate`` and carries
+    the existing value forward, so only real edits move it.
+
+    The increment is done **in SQL** (``downloads + 1``), not read-modify-write
+    in Python. The old code read the counter, parsed it, added one and wrote the
+    result back; two downloads landing together both read ``N`` and both wrote
+    ``N + 1``, so one of them was lost. Letting the database do the addition
+    makes it atomic, and it is only expressible this way because the column is
+    now an integer.
+
+    The event row is written and committed **before** the counter, in its own
+    transaction. The two are not equally important: ``rp_ai_skill_download`` is
+    the record of what happened and is what the inventory and the department
+    reports count, while ``downloads`` is a cache of it. Putting both in one
+    transaction meant a failed counter update rolled the event row back too —
+    losing the truth because the cache failed.
+    """
     downloader = (eid or "").strip() or None
-    try:
-        next_count = str(int(str(skill.downloads or "0")) + 1)
-    except (ValueError, TypeError):
-        # Non-numeric counter (e.g. "5.6K"): keep the event row but leave the
-        # counter alone rather than guess at its numeric value.
-        next_count = None
     try:
         db.add(
             RpAiSkillDownload(
@@ -323,15 +288,18 @@ def _bump_downloads(db: Session, skill: RpAiSkill, eid: str | None = None) -> No
                 department=department_of(db, downloader),
             )
         )
-        if next_count is not None:
-            db.execute(
-                update(RpAiSkill)
-                .where(RpAiSkill.id == skill.id)
-                .values(downloads=next_count, updated_at=RpAiSkill.updated_at)
-            )
-            # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
-            # a later read in this session sees the stored values.
-            db.expire(skill, ["downloads", "updated_at"])
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(
+            update(RpAiSkill)
+            .where(RpAiSkill.id == skill.id)
+            .values(downloads=RpAiSkill.downloads + 1, updated_at=RpAiSkill.updated_at)
+        )
+        # The Core UPDATE bypassed the ORM; drop the now-stale attributes so
+        # a later read in this session sees the stored values.
+        db.expire(skill, ["downloads", "updated_at"])
         db.commit()
     except Exception:
         db.rollback()
@@ -345,16 +313,57 @@ def _content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
+@router.post("/{skill_id}/external-download", response_model=ExternalDownloadRead)
+def record_external_download(
+    skill_id: str,
+    request: Request,
+    eid: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> ExternalDownloadRead:
+    """记一次「用户去上游取这个包」,并把该去的地址交出来。**不传字节。**
+
+    存在的理由是 `download_skill` 的 307 那条分支**在浏览器里走不通**:前端的下载按钮走的是
+    XHR(`responseType: 'blob'`),而 XHR 跟着一个跨域跳转时浏览器会对新域名做 CORS 检查 ——
+    Nexus 不回 `Access-Control-Allow-Origin`,请求在协议层就被掐掉,连状态码都没有。用户看到的
+    是「Network error / Failed to fetch」,而服务端日志里明明白白写着 307。这不是配置问题:只要
+    下载走 XHR,转到一个不给 CORS 头的外部主机就永远失败。
+
+    所以界面改成一个真的链接(顶层导航不受 CORS 约束),而这一次「去取」的计数就落在这里。
+    307 那条分支保留不动:它对 curl / CLI 这类会跟跳转的调用方是对的,只是浏览器用不了。
+
+    **两条路不会重复计数**,因为前端对同一个技能只会走其中一条(按 `externally_hosted` 分岔)。
+    """
+    skill = _get_skill_or_404(db, skill_id)
+    if not skill.externally_hosted:
+        # 不是外部托管的技能没有「去上游取」这件事。拒掉而不是静默记一次:否则这个端点就是一个
+        # 谁都能调、不用真的下载任何东西就能把下载量刷上去的入口。
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能的内容在门户自己这边,请用 /download 下载",
+        )
+    _bump_downloads(db, skill, acting_eid(request, eid))
+    return ExternalDownloadRead(
+        id=skill.id, url=skill.external_url, source=skill.external_source
+    )
+
+
 @router.get("/{skill_id}/download")
 def download_skill(
     skill_id: str,
+    request: Request,
     eid: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     """Download a skill as a .zip archive named after the skill's real name.
 
-    ``eid`` (optional) records who downloaded, for per-user leaderboards; the
-    endpoint stays usable anonymously when it is absent.
+    Who downloaded is taken from the JWT the auth middleware verified, falling
+    back to the ``eid`` query param only when auth is off in dev — the same rule
+    the market's download endpoint already follows. It used to read the query
+    param alone, which had two consequences: a caller that omitted it produced a
+    row nobody could be attributed to (ten such rows exist, 2026-08-06 to
+    2026-08-12), and a caller that supplied someone else's EID had its download
+    recorded against them. Neither is acceptable for a figure the report presents
+    as "who uses what".
 
     The archive contains the whole skill folder (SKILL.md + any artifacts +
     manifest) under a top-level directory named after the skill. Skills with
@@ -362,6 +371,20 @@ def download_skill(
     from the stored instructions.
     """
     skill = _get_skill_or_404(db, skill_id)
+    downloader = acting_eid(request, eid)
+
+    if skill.externally_hosted:
+        # 内容在别人那儿(第一个来源是 IVC 的 Nexus),门户没有字节可发。
+        #
+        # **先记事件,再转出去。** 顺序是这里唯一有意义的决定:转出去之后门户什么都看不到了,
+        # 所以记在前面。代价是用户在对方那边失败了我们仍记了一次 —— 与市场那侧同一个取舍
+        # (见 market.py:"记在传输之前,失败会抛"),理由也一样:"没人下得下来"正是这个计数
+        # 应该让人看见的事,而不是应该抹掉的事。
+        _bump_downloads(db, skill, downloader)
+        # 307 而不是 302:保持方法与请求体不变,并且明确这不是一个永久搬迁 —— 防火墙放行之后
+        # 这批技能会改成门户自己存包,那时这个分支对它们就不再成立。
+        return RedirectResponse(skill.external_url, status_code=307)
+
     # Official (anthropic) skills: name the archive after the namespaced id
     # (e.g. "anthropics-xlsx"); user skills after the display name.
     is_official = skill.category_id == "official"
@@ -376,8 +399,8 @@ def download_skill(
             "这个技能没有记下内容在仓库里的位置或版本,无法下载",
         )
     try:
-        tree = skill_content.read_tree(skill.repo_commit, skill.storage_path)
-    except skill_content.ContentUnavailable as exc:
+        tree = asset_content.read_tree(skill.storage_path, skill.repo_commit)
+    except asset_content.ContentUnavailable as exc:
         # 原来这里会用 skill.instructions 合成一个只有 SKILL.md 的 zip。那是同一份正文的第二份
         # 副本,而且下载下来的包看不出它缺了脚本和附件 —— 用户会以为自己拿到了完整的技能。
         raise HTTPException(
@@ -437,7 +460,7 @@ def download_skill(
             )
 
     buf.seek(0)
-    _bump_downloads(db, skill, eid)
+    _bump_downloads(db, skill, downloader)
     return StreamingResponse(
         buf,
         media_type="application/zip",
@@ -461,6 +484,25 @@ def create_skill(payload: SkillCreate, db: Session = Depends(get_db)) -> RpAiSki
     return skill
 
 
+def _refuse_if_synced(skill: RpAiSkill) -> None:
+    """从上游同步来的技能在门户里是只读的。
+
+    门户是 Gerrit 上 ``radio/ai-assets`` 的**下游**。在这里改或下架有两层问题:一层是徒劳 ——
+    下一次同步会照上游的内容写回来;另一层是真会弄坏东西 —— 这两条路径都会拿
+    ``storage_path`` 当"门户自己那个技能仓里的路径"去写,而同步来的值是 ``gerrit:skill/xxx``,
+    于是 ``skill_storage`` 会在门户的仓里造一个名叫 ``gerrit:skill`` 的目录,或者试图去删一份
+    那里根本不存在的内容。
+
+    所以这里明确拒绝,并说清该去哪改。要真的下架一个同步来的技能,得先从上游那个仓里去掉。
+    """
+    if asset_content.is_gerrit(skill.storage_path):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "这个技能是从 Gerrit 的 radio/ai-assets 同步来的,门户只是它的只读下游 —— "
+            "在这里的修改会被下一次同步覆盖回去。请改上游那个仓。",
+        )
+
+
 @router.put("/{skill_id}", response_model=SkillRead)
 async def update_skill(
     skill_id: str, payload: SkillUpdate, request: Request, db: Session = Depends(get_db)
@@ -468,6 +510,7 @@ async def update_skill(
     # Who is editing is the signed-in caller, not a field in the body (see acting_eid).
     editor_eid = acting_eid(request, payload.editor_eid)
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     scalar_data = payload.model_dump(
         exclude_unset=True,
         exclude={"cases", "sub_skills", "input_params", "editor_eid", "skill_md"},
@@ -833,6 +876,7 @@ def delete_skill(
     可以下架。原来这个接口**没有任何鉴权**,任何人可以删任何技能。
     """
     skill = _get_skill_or_404(db, skill_id)
+    _refuse_if_synced(skill)
     requester = acting_eid(request, x_user_eid)
     is_admin = requester == settings.audit_admin_eid
     # `uploader_eid` 为空时**不放行** —— 官方导入的技能就是没有上传者的,而原来的写法

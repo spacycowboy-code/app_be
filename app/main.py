@@ -12,16 +12,22 @@ from app.version import __version__
 from app.services.auth_tokens import TokenError, check_token_scope, decode_token
 from app.services.audit_engine import BundleTooLarge
 from app.routers import (
+    admin_assets,
     agent_upload,
     audit,
     auth,
     categories,
     comments,
+    departments,
     favorites,
+    gerrit_sync,
+    ivc_sync,
     login_stats,
     market,
     market_favorites,
     reviews,
+    rsw_inventory,
+    rdg,
     skill_import,
     skills,
     upload,
@@ -101,6 +107,11 @@ AUTH_WHITELIST = {
     "/api/auth/login",
     "/api/audit/reconcile",       # GitLab webhook — audit_webhook_token
     "/api/skills/import-official",  # official-skill sync CI — skill_import_token
+    "/api/rsw/inventory/upload",    # external inventory tool — rsw_inventory_api_key
+    # Gerrit radio/ai-assets sync — gerrit_sync_token. Called by a scheduled job,
+    # not a signed-in person: making it carry a JWT would mean issuing a session
+    # that can do everything else too.
+    "/api/integrations/gerrit/ai-assets/sync",
 }
 
 
@@ -213,13 +224,19 @@ app.include_router(skills.router)
 app.include_router(upload.router)
 app.include_router(audit.router)
 app.include_router(skill_import.router)
+app.include_router(gerrit_sync.router)
+app.include_router(ivc_sync.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
+app.include_router(departments.router)
 app.include_router(market.router)
 app.include_router(agent_upload.router)
 app.include_router(usage.router)
 app.include_router(usage_report.router)
+app.include_router(rsw_inventory.router)
+app.include_router(rdg.router)
+app.include_router(admin_assets.router)
 
 
 @app.get("/health", tags=["health"])

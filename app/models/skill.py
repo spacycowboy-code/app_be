@@ -21,7 +21,6 @@ from sqlalchemy import (
     Text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 from app.database import Base
 from app.models.mixins import TimestampMixin
 
@@ -31,6 +30,29 @@ if TYPE_CHECKING:
     from app.models.review import RpAiSkillReview
     from app.models.user import RpAiPortal
     from app.models.version import RpAiSkillVersion
+
+def as_download_count(value: object) -> int:
+    """把**外部来源**的下载数转成这一列能存的整数,转不了就是 0。
+
+    只给读外部 JSON 的两个地方用:种子数据和上游官方目录的 manifest。它们的值不是我们写的,
+    历史上出现过 ``"5.6K"`` 这种给人看的写法 —— 以前列是字符串,这种值能原样存进去,然后让每一个
+    读取方各自防一手(``_bump_downloads`` 里就为它留过一个分支)。
+
+    现在列是整数,所以转换必须发生在写入之前,而且**在这里失败要静默归零而不是抛异常**:一个
+    展示用的计数格式不对,不足以让整批导入失败。真实的下载数由事件表 ``rp_ai_skill_download``
+    记录,这个计数器只是它的缓存。
+    """
+    if isinstance(value, bool):  # bool 是 int 的子类,但它显然不是一个计数
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value))
+    try:
+        return max(0, int(str(value).strip()))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
 
 # Skill review workflow states.
 SKILL_STATUSES = ("pending", "approved", "rejected")
@@ -72,8 +94,17 @@ class RpAiSkill(TimestampMixin, Base):
     # 图换过的时间,只用来算 ETag / 缓存校验。
     image_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     rating: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    # Frontend displays a formatted string like "5.6K".
-    downloads: Mapped[str] = mapped_column(String(32), default="0", nullable=False)
+    # 累计下载次数。曾经是 ``String(32)``,注释写的理由是"前端显示成 5.6K 这样的格式化字符串" ——
+    # 前端从来没有那么做过:模板直接渲染这一列的原始值,排序还要先 ``parseInt``。所以那个理由早就
+    # 不成立了,而字符串留下了三个真实代价:
+    #
+    # 1. SQL 层面任何 ``ORDER BY downloads`` 都按字典序排,"43" 排在 "5" 后面。前端那一处排序
+    #    因为先 parseInt 而侥幸是对的,但这是调用方在替存储兜底,下一个人写 SQL 就会踩到。
+    # 2. 自增必须读出来、转成 int、加一、再转回字符串写回去 —— 一次读-改-写,两个并发下载会
+    #    双双读到 N 然后都写 N+1,丢一次计数。整数列可以直接 ``downloads = downloads + 1``,
+    #    由数据库保证原子性。
+    # 3. 非数字值(比如真写进一个 "5.6K")能存进去,然后让每一个读取方都得防一手。
+    downloads: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_free: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
@@ -99,9 +130,21 @@ class RpAiSkill(TimestampMixin, Base):
 
     # --- storage (git repo) -------------------------------------------------
     # Relative path within the skill repo, e.g. "public/tavily_ezhgmio_Tavily".
+    # A ``gerrit:`` prefix means the content lives in the Gerrit asset repository
+    # instead; ``services/asset_content`` dispatches on it.
     storage_path: Mapped[str | None] = mapped_column(String(512))
-    # Latest git commit sha that stored this skill.
+    # Latest git commit sha that stored this skill. Reads resolve paths against
+    # it, so it MUST be a commit — not a tree.
     repo_commit: Mapped[str | None] = mapped_column(String(64))
+    # Git object sha of this skill's own directory, for synced skills only.
+    #
+    # Separate from ``repo_commit`` because they answer different questions: that
+    # one is "which version do I read paths against" (a commit, repo-wide), this
+    # one is "did *this* asset's bytes change" (a tree, per directory). Using the
+    # commit for both would mark all synced assets changed on every upstream
+    # commit and bump every card's timestamp; using the tree for both makes path
+    # reads 404, because a tree sha is not something a path resolves against.
+    content_sha: Mapped[str | None] = mapped_column(String(64))
     # Security-audit derived state: pass | suspect (danger is never stored).
     audit_state: Mapped[str | None] = mapped_column(String(16), index=True)
     # 描述**当前发布内容**的那条审计记录(``rp_ai_skill_audit_record.id``)。
@@ -111,6 +154,24 @@ class RpAiSkill(TimestampMixin, Base):
     # 而 id 是随机 uuid,拿它做次级排序等于抛硬币。所以这里把答案记下来,而不是每次去猜。
     # 老数据是 NULL,收敛器对它们仍按时间倒序取最新一条。
     audit_ref: Mapped[str | None] = mapped_column(String(32))
+
+    # --- 外部托管 ------------------------------------------------------------
+    # 内容不在门户的仓库里,而在别人那儿。第一个来源是 IVC 的 Nexus,它对生产机房整段 TCP
+    # 不可达(ICMP 通而 22/80/443/8081/8443 全部静默超时,且无代理),所以门户拿不到包体,只能
+    # 登记目录并把下载转过去 —— 用户的浏览器在工位网段上是能访问它的。
+    #
+    # 为什么不复用 ``storage_path`` + ``repo_commit``:那两个字段的含义是"内容在我们的仓库里
+    # 的哪个位置、哪一版",下载路径据此真的去读字节。往里塞一个外部 URL 会让"门户存了这份
+    # 内容"这句话在一部分行上悄悄变成假的,而调用方无法分辨。
+    #
+    # 为空即普通技能。老数据全部为空,所以既有读法不受影响。
+    external_url: Mapped[str | None] = mapped_column(String(1024))
+    external_source: Mapped[str | None] = mapped_column(String(32))
+
+    @property
+    def externally_hosted(self) -> bool:
+        """内容在别处,下载要转出去。"""
+        return bool(self.external_url)
 
     @property
     def has_custom_image(self) -> bool:

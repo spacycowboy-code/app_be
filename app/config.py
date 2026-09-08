@@ -22,6 +22,45 @@ class Settings(BaseSettings):
     # ingest, called by the rp-ai-skill sync CI). Empty = endpoint disabled.
     skill_import_token: str = ""
 
+    # --- Gerrit: the RSW / RA shared asset repository -----------------------
+    # radio/ai-assets on gerrit-sigma holds skill/, agent/ and tool/ assets,
+    # each a directory with a manifest.yaml. The portal is a read-only consumer.
+    #
+    # Credentials are a Gerrit HTTP password (Settings -> HTTP Credentials),
+    # NOT a domain password, and must belong to a service account: a personal
+    # one breaks when that person rotates it, and files every read in the
+    # directory under their name. The SSH port (29418) accepts publickey only,
+    # so HTTPS Basic is the only option here.
+    gerrit_base_url: str = "https://gerrit-sigma.gic.ericsson.se"
+    gerrit_http_user: str = ""
+    gerrit_http_password: str = ""
+    gerrit_assets_project: str = "radio/ai-assets"
+    gerrit_assets_branch: str = "master"
+    # Same trade-off as ldap_verify_tls: the internal chain is incomplete and
+    # verifying would take the whole feature down.
+    gerrit_verify_tls: bool = False
+    # Bearer token guarding POST /api/integrations/gerrit/ai-assets/sync.
+    # Empty = endpoint disabled, same shape as skill_import_token.
+    gerrit_sync_token: str = ""
+    # Where an asset lands when its manifest ``owner`` resolves to nobody in the
+    # directory. A team name ("radio-ai-platform") or a person the directory has
+    # no entry for still has to be attributed to somebody, or the asset falls out
+    # of every department count. Their manager is the honest answer; the card
+    # still shows the manifest's own owner text as the author.
+    gerrit_owner_fallback_eid: str = "ECUIDEN"
+
+    # --- IVC / RVC 用量推送 ---------------------------------------------------
+    # 守 POST /api/integrations/ivc/usage/events 的 bearer token。对方的系统用它把下载 /
+    # 点赞事件推过来。为空 = 端点关闭(答 503 并点名缺哪个变量),形状与 gerrit_sync_token 一致。
+    #
+    # **为什么是一个静态 token 而不是一个门户账号。** 调用方是对方机房里的一个无人值守服务:
+    # 走门户的 JWT 就得给它一个 LDAP 账号并让它交互登录,而那个账号一旦存在就能做门户里的
+    # 每一件事 —— 而它只需要往一张流水表里追加行。这个 token 的作用域正好是那一个端点。
+    #
+    # 轮换:改这个变量并重启,然后把新值给对方。没有第二个受影响的地方 —— 它不签任何东西,
+    # 也不在浏览器里出现过。
+    ivc_push_token: str = ""
+
     # Comma-separated list of allowed CORS origins.
     cors_origins: str = "http://localhost:4200"
 
@@ -58,7 +97,33 @@ class Settings(BaseSettings):
     # 这么找它的。密钥不能有 passphrase:容器里没有 ssh-agent 可以解锁它。
     git_signing_key: str = ""
     # Max upload artifact size in bytes (default 50 MB).
+    #
+    # **这一项现在只管 skill 上传。** tool/agent 的包走下面那两项 —— 它们是两类东西:skill 是
+    # 一份技能定义(文本为主),包是一个完整的项目(可能带模型、样例数据、依赖)。原来两边共用
+    # 这一个数字,于是给包放宽也会连带把 skill 放宽,而没人要求那件事。
     max_upload_bytes: int = 50 * 1024 * 1024
+
+    # --- tool/agent 包上传的两个上限 ------------------------------------------
+    #
+    # 分成两个数字,因为它们卡的是不同的东西:
+    #
+    # `max_package_upload_bytes` 卡**上传上来的字节**(压缩包本身)。
+    # `max_package_extract_bytes` 卡**解压之后的总字节**,这是 zip bomb 的预算。
+    #
+    # 后者必须 >= 前者,否则一个刚好合规的压缩包会在解压时被自己的上限拒掉 —— 而报错说的是
+    # "解压后的总大小超过 N MB",与用户看到的"我这个包只有 190MB"对不上。原来两处读同一个
+    # 常量,正好踩在这个坑的边上:50MB 的包解压后超过 50MB 就被拒。
+    #
+    # 取 2 倍是给"文本/代码为主、压缩比高"的包留出余量,同时仍然给磁盘一个明确的上界。
+    #
+    # 运维上要知道的两件事(生产机 100.77.162.66):
+    #   * 上传路径是 `await file.read()`,整个 body 进内存,而这个后端容器**没有内存上限**
+    #     (docker inspect Memory=0)。并发几个 200MB 的上传就是几百 MB 的常驻内存。
+    #   * 解压落在容器的 /tmp,也就是宿主机的 `/`,那个盘现在 79% 满(125G 用了 93G)。
+    #     单次上传峰值约 上传字节 + 解压字节;真要长期跑在 200MB 这个量级,得先给这台机器
+    #     补上磁盘清理(它至今没有),否则一次并发上传就可能把盘写满。
+    max_package_upload_bytes: int = 200 * 1024 * 1024
+    max_package_extract_bytes: int = 400 * 1024 * 1024
 
     # --- GitLab (Agent市场 sync) --------------------------------------------
     # Base URL of the GitLab instance.
@@ -145,8 +210,21 @@ class Settings(BaseSettings):
     # Dashboard from everyone else, but hiding a link is not access control.
     # Comma-separated; compared uppercase.
     # EZHGMIO Miao Zhang M, ADMINMM the break-glass admin, EHUIWUU Vivie Wu A,
-    # EBAOXUE Baosheng Xue. Also gates the department usage report, which names
-    # individuals.
+    # EBAOXUE Baosheng Xue. Gates the department usage report, which names
+    # individuals — adding someone here shows them per-person output, not just
+    # a sync button. That is the reason this list is short.
+    #
+    # ECUIDEN (Tracy Deng) 曾在这张名单上,2026-09-02 按操作者要求移除。加她进来的理由是
+    # 她需要 RSW 的同步页(她拥有那个页面读取的 Gerrit `radio/ai-assets` 仓),而这张名单
+    # **同时**守着上面那份逐人报告 —— 一张名单管两件权限面差得很远的事,所以给她一个同步
+    # 按钮的同时也给了她每个人的姓名和用量。
+    #
+    # 移除她因此也一并收走了 RSW 同步页。这是那次决定的已知代价,不是疏漏。真正的解法是把
+    # 这张名单拆成两个(一个窄的「能跑同步」名单 + 现在这个「能看逐人报告」名单),那是一次
+    # 独立改动;在拆之前,任何"只想给某人同步权限"的请求都会连带给出逐人报告。
+    #
+    # **生产没有设 DASHBOARD_EIDS 环境变量**(查过容器 env),所以这里的默认值就是线上实际
+    # 生效的名单 —— 改它才真的生效,前端 dashboard-access.ts 那份只决定显不显示入口。
     dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE"
     # --- Department usage report ---------------------------------------------
     # Snapshot of the Microsoft Graph reporting tree — the same graph the Teams org
@@ -175,6 +253,16 @@ class Settings(BaseSettings):
     # while the team is in UTC+8, so counting from the DB's midnight would file
     # every sign-in between 00:00 and 06:00 Beijing under the previous day.
     stats_timezone: str = "Asia/Shanghai"
+
+    # --- RSW AI Inventory --------------------------------------------------
+    # Directory where the external tool deposits the two pre-generated HTML
+    # reports (full_report_browser.html / delta_report_browser.html).
+    # Empty = feature disabled; the three /api/rsw/inventory/* endpoints
+    # return empty/404 gracefully rather than erroring.
+    rsw_inventory_dir: str = ""
+    # API key for POST /api/rsw/inventory/upload (called by the external tool,
+    # no JWT). Empty = upload endpoint disabled (returns 403).
+    rsw_inventory_api_key: str = ""
 
     # --- Local admin bypass (break-glass; SKIPS LDAP) -----------------------
     # A built-in admin account authenticated WITHOUT LDAP, for bootstrap /

@@ -103,31 +103,33 @@ class Metric:
         self.per_eid = {e: n for e, n in self.per_eid.items() if e in keep}
 
 
-#: The statuses that mean "this thing was, at some point, really visible to other
-#: people" — the population every contribution figure is counted over.
+#: The statuses that mean "this thing is on the market now" — the population every
+#: contribution figure is counted over.
 #:
-#: The line drawn here is *was it ever on the market*, not *is it there now*.
+#: The line drawn here is *is it there now*, not *was it ever there*. This is a
+#: reversal, made on instruction: a deleted skill, agent or tool must not appear in
+#: any reported number.
 #:
-#: ``archived`` counts. A taken-down skill was live and downloadable first, and
-#: ``skills.delete_skill`` keeps its row precisely because the portal facts hanging
-#: off it — downloads, favourites, comments, audit records — cannot be recomputed
-#: from the repository. Dropping it here would also contradict the download
-#: columns, which go on counting the downloads a taken-down skill received: a
-#: department could end up showing twelve downloads and nobody who ever uploaded
-#: anything.
+#: ``archived`` no longer counts. ``skills.delete_skill`` is a soft delete — it sets
+#: ``archived`` and keeps the row, because the portal facts hanging off it
+#: (downloads, favourites, comments, audit records) cannot be recomputed from the
+#: repository. Keeping the row is still right; counting it as a live asset is not.
+#: What a reader sees on the portal is the ``approved`` list, and an asset count
+#: that exceeds it cannot be checked against anything.
 #:
-#: ``pending`` and ``rejected`` do not count. The public list filters on
+#: The known cost, kept here because it will surface: the download columns go on
+#: counting the downloads a taken-down skill received, so a department can show
+#: downloads and no assets. That asymmetry is deliberate — a download really did
+#: happen, and retracting it because the author later took the skill down would
+#: report the author's decision as the downloader's activity, and would also make a
+#: number in an already-issued monthly report change after the fact.
+#:
+#: ``pending`` and ``rejected`` do not count either. The public list filters on
 #: ``approved``, so neither was ever visible to anyone and neither can have been
 #: downloaded — counting them would report an attempt as a contribution. For
 #: ``rejected`` that is not merely untidy: ten packages that all failed review
 #: would read as ten uploads, and that is a number someone can drive on purpose.
-#:
-#: The rule applies to the columns that count *things* — uploads, updates, market
-#: items. It is deliberately not applied to the columns that count what a *person*
-#: did: a download happened whatever later became of the thing downloaded, and
-#: retracting it because the author took the skill down would report the author's
-#: decision as the downloader's activity.
-SKILL_COUNTED_STATUSES = ("approved", "archived")
+SKILL_COUNTED_STATUSES = ("approved",)
 
 #: Market items have no ``archived``: ``market.delete_item`` removes the row, and
 #: the foreign keys cascade its downloads, favourites and versions away with it.
@@ -159,11 +161,27 @@ _VERSION_SKILL_COUNTED = (
     f"and {_counted('s2', SKILL_COUNTED_STATUSES)})"
 )
 
+#: Usage events outlive the thing they describe. ``market.delete_item`` hard-deletes
+#: the row and the foreign keys cascade its downloads, favourites and versions away,
+#: but ``rp_ai_usage_event`` has no foreign key to it — deliberately, so a report can
+#: still name a since-deleted item. The consequence is that opens and runs of a
+#: deleted agent keep counting, which is exactly what must not happen.
+#:
+#: Only ``market_item`` events are checked. ``object_type = 'tool'`` names a built-in
+#: portal tool page (``product-structure``, say) which has no row in either table and
+#: never did; requiring one would silently drop every event for the portal's own
+#: pages.
+_USAGE_EVENT_COUNTED = (
+    "(rp_ai_usage_event.object_type <> 'market_item' or exists ("
+    "select 1 from rp_ai_market_item mi where mi.id = rp_ai_usage_event.object_id "
+    f"and {_counted('mi', MARKET_COUNTED_STATUSES)}))"
+)
+
 #: Sentence appended to every metric whose population this rule narrows, so the
 #: report states its own scope instead of leaving the reader to assume it.
 _SCOPE_NOTE = (
-    "口径：含已下架的（它曾经真的上线、被人取用过），"
-    "不含还在复核里和被拒的（它们从未对任何人可见）。"
+    "口径：只含当前在架的，"
+    "已下架、还在复核里和被拒的都不计（前者已从市场移除，后者从未对任何人可见）。"
 )
 
 #: Market items get their own wording: they have no taken-down state to include,
@@ -222,17 +240,28 @@ def collect(conn: Connection) -> list[Metric]:
     # rp_ai_portal gains a row the first time someone signs in (auth.py), so it
     # is the full history of who has ever used the portal. rp_ai_login_event was
     # added later and is the only source for *how often*.
+    #
+    # The origin filter is what keeps the first sentence true. A row can now also
+    # be created by an import, to register work by someone who has never signed
+    # in — see models/user.py. Those rows are deliberately still counted
+    # everywhere else (build_people places their contributions in a department,
+    # and the card group badge reads their department), because none of that is a
+    # claim about signing in. This metric is, so this metric filters.
     add(
         Metric(
             "ever_signed_in",
             "曾登录过的人数",
             "首次登录",
             "用户表的行在首次登录时创建，所以这是「累计有多少人用过门户」，"
-            "口径最长、最适合看覆盖面。它没有次数，只有每人一次的首登记录。",
-            per_eid=_tally(conn, "select eid, 1 from rp_ai_portal"),
+            "口径最长、最适合看覆盖面。它没有次数，只有每人一次的首登记录。"
+            "导入登记的账号行不算在内——那些人没有登录过。",
+            per_eid=_tally(
+                conn, "select eid, 1 from rp_ai_portal where origin = 'login'"
+            ),
             countable=False,
         ),
         "rp_ai_portal",
+        where="origin = 'login'",
     )
     add(
         Metric(
@@ -267,8 +296,10 @@ def collect(conn: Connection) -> list[Metric]:
                 or 0
             ),
             unattributed_note=(
-                "门户早期没有把下载者写进下载记录，这些行是真实下载但无人可归。"
-                "最早的一条在 2026-08-06，之后的记录都带人。"
+                "下载接口曾把下载者当成可选的查询参数，调用方不带它时这一行就没有人。"
+                "这些行是真实下载但无人可归，集中在 2026-08-06 至 08-12，"
+                "与同期已带工号的记录交叉出现。接口已改为取已认证的调用者，不再产生新的无主行；"
+                "这几行无法补回，因为当时的身份从未被记录，也没有别的表覆盖那段时间。"
             ),
         ),
         "rp_ai_skill_download",
@@ -451,12 +482,16 @@ def collect(conn: Connection) -> list[Metric]:
             "工具打开 / 运行（新埋点）",
             "次事件",
             "这套埋点 2026-08-21 才上线，目前只有个位数，不足以下任何结论。"
-            "列出来是为了让下一份报告里的增长能被认出是「开始记录了」而不是「用量涨了」。",
+            "列出来是为了让下一份报告里的增长能被认出是「开始记录了」而不是「用量涨了」。"
+            "已删除的市场项的事件不计入（门户自带的工具页不受此限）。",
             per_eid=_tally(
-                conn, "select eid, count(*) from rp_ai_usage_event group by eid"
+                conn,
+                "select eid, count(*) from rp_ai_usage_event "
+                f"where {_USAGE_EVENT_COUNTED} group by eid",
             ),
         ),
         "rp_ai_usage_event",
+        where=_USAGE_EVENT_COUNTED,
     )
     return metrics
 

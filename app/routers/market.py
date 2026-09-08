@@ -1,16 +1,17 @@
 """Agent市场 endpoints: list, manual create, GitLab sync, download, review, delete."""
 import io
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
 from app.models.market import RpAiMarketItem
-from app.models.market_favorite import RpAiMarketFavorite
+from app.models.category import RpAiCategory
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
@@ -24,8 +25,13 @@ from app.schemas.market import (
 )
 from app.services import gitlab_projects as glw
 from app.services.archives import rewrap_single_top_dir
+from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
-from app.services.card_group import groups_for_eids
+from app.services.dept_groups import (
+    FALLBACK_GROUP_ID,
+    PSEUDO_CATEGORY_IDS,
+    group_for_eid,
+)
 from app.services.eids import acting_eid, normalize_eid
 from app.services.usage import department_of
 from app.services.gitlab_sync import (
@@ -36,6 +42,8 @@ from app.services.gitlab_sync import (
     fetch_repo_archive,
     list_group_projects,
 )
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 settings = get_settings()
@@ -100,8 +108,41 @@ def list_items(
             RpAiMarketItem.name.like(like) | RpAiMarketItem.description.like(like)
         )
     items = list(db.scalars(stmt.order_by(RpAiMarketItem.name)).all())
-    _attach_stats(db, items)
+    attach_market_stats(db, items)
     return items
+
+
+@router.get("/{item_id}", response_model=MarketItemRead)
+def get_item(
+    item_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_user_eid: str | None = Header(None),
+) -> RpAiMarketItem:
+    """取单个市场条目 —— 详情页与分享链接用的就是这个。
+
+    **可见性规则必须和 ``list_items`` 一字不差**,这不是整齐好看的问题。下架的实现方式就是
+    这条规则:管理员在审核页拒绝,条目的 status 变成非 approved,于是它从所有人的列表里消失。
+    而条目 id 是可推出来的(``gl-<GitLab 项目 id>``)。所以这个按 id 取的接口若少了这道闸,
+    等于给任何拿到过链接的人留了一条把已下架条目重新捞出来的路 —— 而且没有任何报错,列表页
+    看起来一切正常。``list_items`` 的 docstring 已经把这件事写过一次:"列表里看不见"和
+    "接口取不到"是两件事,少一件等于没有。
+
+    找不到与看不到都答 404,不答 403:403 会告诉一个没权限的人"这个 id 确实存在",而 id 是
+    可推的,那就等于把下架条目的清单也一起交出去了。
+    """
+    item = db.get(RpAiMarketItem, item_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这个条目。")
+
+    requester = acting_eid(request, x_user_eid)
+    if requester != settings.audit_admin_eid and item.status != "approved":
+        if item.creator != requester:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "找不到这个条目。")
+
+    # 详情页要显示下载次数,和列表页同一个来源。
+    attach_market_stats(db, [item])
+    return item
 
 
 def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
@@ -118,49 +159,6 @@ def _require_installable(item: RpAiMarketItem, requester: str | None) -> None:
         status.HTTP_403_FORBIDDEN,
         "这个条目还在等待审核,通过之后才能安装。",
     )
-
-
-def _attach_stats(db: Session, items: list[RpAiMarketItem]) -> None:
-    """Attach deduplicated-by-EID favorite/download counts onto each item,
-    plus the creator's org group.
-
-    Favorites are already unique per (eid, item) by table constraint, so the
-    row count is the like count. Downloads are raw events, so we count distinct
-    EIDs (anonymous/NULL EIDs are excluded from the unique-user count).
-
-    The group rides along here rather than in ``list_items`` because every path
-    that returns a ``MarketItemRead`` goes through this function: the list, the
-    single item, and the review page. A card that shows the group on the market
-    and loses it on the detail view reads as a bug in the data.
-    """
-    if not items:
-        return
-    ids = [it.id for it in items]
-    fav = dict(
-        db.execute(
-            select(RpAiMarketFavorite.item_id, func.count(RpAiMarketFavorite.id))
-            .where(RpAiMarketFavorite.item_id.in_(ids))
-            .group_by(RpAiMarketFavorite.item_id)
-        ).all()
-    )
-    dls = dict(
-        db.execute(
-            select(
-                RpAiMarketDownload.item_id,
-                func.count(func.distinct(RpAiMarketDownload.eid)),
-            )
-            .where(RpAiMarketDownload.item_id.in_(ids))
-            .group_by(RpAiMarketDownload.item_id)
-        ).all()
-    )
-    # One query for the whole page. GitLab-synced items have no creator, so they
-    # contribute no EID and end up with no group — correctly: there is no person
-    # to place, and inventing one would credit an office that never uploaded it.
-    groups = groups_for_eids(db, {it.creator for it in items if it.creator})
-    for it in items:
-        it.favorite_count = int(fav.get(it.id, 0))
-        it.download_count = int(dls.get(it.id, 0))
-        it.group = groups.get((it.creator or "").strip().upper())
 
 
 @router.post("/{item_id}/download")
@@ -371,6 +369,36 @@ def create_item(
             )
 
     data = payload.model_dump()
+
+    # Category: same shape as the skill upload path (routers/upload.py) on
+    # purpose — one behaviour for "which group does this belong to", not two.
+    #
+    # This path used to write ``payload.category_id`` straight through with no
+    # check at all, and the registration dialog defaulted it to 'public'. Because
+    # 'public' is a real, selectable category, nothing looked wrong and nothing
+    # could complain: three IVC agents registered on 2026-09-01 landed in Public
+    # and were simply not there when their author filtered by IVC.
+    #
+    # Validating here and not only in the dialog: the endpoint is public and the
+    # item id is guessable, so "the UI now sends a group" is not the same as "a
+    # row cannot be filed wrong". UI reachability is not a boundary.
+    category_id = (data.get("category_id") or "").strip()
+    if not category_id:
+        category_id = group_for_eid(db, creator) or ""
+    if not category_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "请选择分组:你的部门没有对应的门户分组。",
+        )
+    if category_id in PSEUDO_CATEGORY_IDS:
+        # 'all' is a filter, not a home; 'official' claims we vetted it.
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"'{category_id}' 不是可以登记到的分组。"
+        )
+    if db.get(RpAiCategory, category_id) is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"未知分组 '{category_id}'。")
+    data["category_id"] = category_id
+
     base = _slugify(payload.name)
     item_id = base
     n = 2
@@ -489,7 +517,22 @@ def _upsert_project(
     item.source = source
     item.repo_url = proj.web_url
     item.tags = proj.topics or []
-    item.category = proj.namespace_name
+    # 分组:GitLab 项目没有工号可查(这条路一个 ``creator`` 都不写),所以推不出部门,归 ``others``。
+    #
+    # 以前这里只写 ``item.category = proj.namespace_name``。那是**显示用的标签**,不是分组 id ——
+    # 于是卡片上写着 "RP-AI-AGENT",而 ``category_id`` 是空的:计入 "All",不出现在任何部门标签
+    # 下。两个字段一个填一个不填,看起来像有分组,筛起来没有。
+    #
+    # 现在两个字段一起写,并且 label 取分类行自己的,而不是 GitLab 命名空间 —— 否则卡片显示
+    # "RP-AI-AGENT" 却按 "Others" 过滤,还是同一种口径不一致。
+    # 分类行缺失时不硬塞:``category_id`` 是外键,给一个没有对应行的值会让 INSERT 直接
+    # IntegrityError,整次同步连带其它项目一起挂。
+    cat = db.get(RpAiCategory, FALLBACK_GROUP_ID)
+    if cat is not None:
+        item.category_id = cat.id
+        item.category = cat.label
+    else:
+        log.warning("没有 %r 分类行,%s 先不归组", FALLBACK_GROUP_ID, item_id)
     item.last_activity = proj.last_activity_at
     item.verified = True
     if not item.version:
@@ -583,14 +626,12 @@ def get_review(
         if len(versions) > 1 and versions[1].tag and versions[0].tag and item.repo_url:
             compare = glw.compare_url(item.repo_url, versions[1].tag, versions[0].tag)
 
-    # 同样按 eid 查,不能用 db.get():主键是自增的 id,eid 只是唯一索引。db.get 在这里不会
-    # 报错,只会永远答 None —— 审核页上传者那一栏就永远只有 EID、没有姓名和部门。
     uploader = (
         db.scalar(select(RpAiPortal).where(RpAiPortal.eid == item.creator))
         if item.creator
         else None
     )
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return MarketReviewRead(
         item=MarketItemRead.model_validate(item, from_attributes=True),
         versions=[
@@ -634,7 +675,7 @@ def decide_review(
     item.reviewed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(item)
-    _attach_stats(db, [item])
+    attach_market_stats(db, [item])
     return item
 
 

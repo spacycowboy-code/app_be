@@ -52,6 +52,28 @@ class InvalidImage(ValueError):
     """这些字节不是我们愿意存的图。消息是给上传者看的,所以说清哪里不行。"""
 
 
+#: 在前端 ``public/skill-images/`` 里真的有 ``<slug>.jpg`` 的分组。
+#:
+#: 写成显式集合而不是"所有分组"是因为这两边住在不同的仓:图片在前端仓、分组在后端代码里,
+#: 加一个分组不会自动带来一张图。而缺图的后果是卡片指向 404、显示破图但不报错,所以只有
+#: 显式列出来才能让"漏了图"退化成兜底图而不是破图。
+#:
+#: 刻意不含 ``others``(兜底分组,不代表任何部门)、也不含已退役的 ``cd`` / ``ai-team``
+#: (见 ``dept_groups.RETIRED_GROUP_IDS``)。
+_HAS_OWN_IMAGE = frozenset(
+    {
+        "product-system",
+        "ivc",
+        "radio-design-1",
+        "radio-design-2",
+        "radio-design-3",
+        "radio-sw",
+        "qa",
+        "pmo",
+    }
+)
+
+
 def category_image(category_id: str) -> str:
     """某个部门(category)的默认封面图 —— 前端静态资源路径,不是图片字节。
 
@@ -66,8 +88,11 @@ def category_image(category_id: str) -> str:
     # 'public' 组没有专属图,借用 tavily 那张。
     if slug == "public":
         return "skill-images/tavily.jpg"
-    # AI team 组没有专属图,用共享的兜底图。
-    if slug == "ai-team":
+    # 没有专属图的组用共享兜底图。这里从前是逐个列特例(只列了 'ai-team'),改成按\
+    # ``_HAS_OWN_IMAGE`` 判断是因为特例清单漏了两个真实分组:``others`` 与 ``cd`` 都没有\
+    # 对应文件,于是它们的卡片一直指向一个 404 —— 而封面图坏掉不报错、只是显示破图,所以\
+    # 没人报过。按"有没有这张图"来判断,新增分组时漏加图片的后果是退回兜底图而不是破图。
+    if slug not in _HAS_OWN_IMAGE:
         return "skill-images/default.png"
     return f"skill-images/{slug}.jpg"
 

@@ -339,11 +339,12 @@ def _target(monkeypatch) -> "glw.UploadTarget":
     return glw.target_for("tool")
 
 
-def test_a_taken_name_is_retried_with_a_suffixed_name_too(monkeypatch) -> None:
-    """序号要同时加在路径和名字上。
+def test_a_taken_name_is_retried_with_a_legal_suffixed_name(monkeypatch) -> None:
+    """名字被占时要换一个**合法的**名字重试。
 
-    只改 path 的话,一个被占用的名字会让 5 次重试全部撞在同一处 —— 这正是第三次上传失败的
-    原因,而报错和真正的起因(前两次留下的归档项目)看不出任何关系。
+    原来换的是 `名字 (2)`,而 ASCII 圆括号不在 GitLab 项目名的白名单里 —— 于是第二轮换来一个
+    字符集 400,上传者看到"名字有非法字符",而他填的名字本来是合法的。现在退到 slug + 序号,
+    字符集 [a-z0-9-] 是那个白名单的严格子集,合法性来自构造。
     """
     target = _target(monkeypatch)
     seen: list[tuple[str, str]] = []
@@ -352,7 +353,9 @@ def test_a_taken_name_is_retried_with_a_suffixed_name_too(monkeypatch) -> None:
         seen.append((payload["name"], payload["path"]))
         if payload["name"] == "Generate EEF":      # 名字被归档项目占着
             raise glw.GitLabWriteError(
-                'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}'
+                'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}',
+                status=400,
+                errors={"name": ["has already been taken"]},
             )
         return {
             "id": 7, "path_with_namespace": f"g/tools/{payload['path']}",
@@ -363,7 +366,9 @@ def test_a_taken_name_is_retried_with_a_suffixed_name_too(monkeypatch) -> None:
     ref = glw.create_project(slug="generate-eef", name="Generate EEF", target=target)
     assert ref.id == 7
     # 第一轮用原名原路径,第二轮两个都带序号。
-    assert seen == [("Generate EEF", "generate-eef"), ("Generate EEF (2)", "generate-eef-2")]
+    # 第一轮用原名原路径;第二轮名字退到 slug+序号,而**路径没被占所以不动**。
+    assert seen == [("Generate EEF", "generate-eef"), ("generate-eef-2", "generate-eef")]
+    assert not any("(" in n for n, _ in seen), "名字里绝不能出现 GitLab 不接受的括号"
 
 
 def test_running_out_of_names_says_what_is_holding_them(monkeypatch) -> None:
@@ -376,7 +381,9 @@ def test_running_out_of_names_says_what_is_holding_them(monkeypatch) -> None:
 
     def always_taken(method, path, payload=None, *, target):
         raise glw.GitLabWriteError(
-            'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}'
+            'GitLab 返回 HTTP 400:{"message":{"name":["has already been taken"]}}',
+            status=400,
+            errors={"name": ["has already been taken"]},
         )
 
     monkeypatch.setattr(glw, "_api", always_taken)
@@ -402,20 +409,249 @@ def test_a_real_error_is_not_swallowed_by_the_retry(monkeypatch) -> None:
     assert calls["n"] == 1
 
 
-def test_rename_frees_the_name(monkeypatch) -> None:
-    """改名走 PUT /projects/:id,path 和 name 一起改 —— 只改一个,另一个仍然占着。"""
+def _http_error(field: str, message: str) -> glw.GitLabWriteError:
+    """造一个 GitLab 校验失败的异常,字段和消息与真实响应同形。"""
+    return glw.GitLabWriteError(
+        f"GitLab 返回 HTTP 400:{{'message': {{'{field}': ['{message}']}}}}",
+        status=400,
+        errors={field: [message]},
+    )
+
+
+_TAKEN = "has already been taken"
+_ILLEGAL = (
+    "can contain only letters, digits, emoji, '_', '.', '+', dashes, or spaces. "
+    "It must start with a letter, digit, emoji, or '_'."
+)
+
+
+def test_field_errors_are_parsed_before_the_body_is_truncated() -> None:
+    """给人看的 detail 只留 300 字符,而字段要从**完整**响应体里解析。
+
+    顺序反了 JSON 会被截断切坏,`errors` 变成空字典,于是下面所有按字段分流的逻辑都退化成
+    "什么都不重试" —— 而这种退化是静默的。
+    """
+    body = (
+        '{"message":{"name":["has already been taken"],'
+        '"path":["has already been taken"],'
+        '"filler":["' + "x" * 400 + '"]}}'
+    )
+    assert len(body) > 300
+    fields = glw._field_errors(body)
+    assert fields["name"] == ["has already been taken"]
+    assert fields["path"] == ["has already been taken"]
+
+
+def test_field_errors_tolerates_a_non_validation_body() -> None:
+    """网关的 HTML 错误页、或者 message 是一个字符串时,不能炸,只是没有字段可分流。"""
+    assert glw._field_errors("<html>502 Bad Gateway</html>") == {}
+    assert glw._field_errors('{"message":"403 Forbidden"}') == {}
+
+
+def test_only_the_path_is_bumped_when_only_the_path_is_taken(monkeypatch) -> None:
+    """**这条是这次 bug 的回归测试。**
+
+    路径被占跟名字没有任何关系,所以名字必须一个字不动。原来的代码一遇到冲突就把名字改成
+    `名字 (2)`,而 ASCII 圆括号不在 GitLab 项目名的白名单里 —— 于是第二轮换来一个字符集 400,
+    上传者看到"名字有非法字符",而他填的名字本来是合法的。
+    """
+    target = _target(monkeypatch)
+    seen: list[dict] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            seen.append(dict(payload))
+            if len(seen) == 1:
+                raise _http_error("path", _TAKEN)
+            return {
+                "id": 9, "path_with_namespace": "g/emc-agent-2",
+                "web_url": "https://x/g/emc-agent-2",
+                "http_url_to_repo": "https://x/g/emc-agent-2.git",
+                "default_branch": "main",
+            }
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    ref = glw.create_project(slug="emc-agent", name="emc-agent", target=target)
+
+    assert ref.id == 9
+    assert [p["path"] for p in seen] == ["emc-agent", "emc-agent-2"]
+    # 名字两轮都是原样,而且从头到尾没有出现过括号。
+    assert [p["name"] for p in seen] == ["emc-agent", "emc-agent"]
+    assert not any("(" in p["name"] for p in seen)
+
+
+def test_the_name_is_only_touched_when_the_name_itself_is_taken(monkeypatch) -> None:
+    """名字真被占时才动名字,而且退到必然合法的形式(slug + 序号),不是给原文加括号。"""
+    target = _target(monkeypatch)
+    seen: list[dict] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            seen.append(dict(payload))
+            if len(seen) == 1:
+                raise _http_error("name", _TAKEN)
+            return {
+                "id": 9, "path_with_namespace": "g/x", "web_url": "u",
+                "http_url_to_repo": "u.git", "default_branch": "main",
+            }
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    glw.create_project(slug="emc-agent", name="EMC Agent", target=target)
+
+    assert seen[0]["name"] == "EMC Agent"
+    assert seen[1]["name"] == "emc-agent-2"      # 合法:只有 [a-z0-9-]
+    assert seen[0]["path"] == seen[1]["path"] == "emc-agent"  # 路径没被占,不动
+
+
+def test_an_illegal_user_name_degrades_to_the_slug(monkeypatch) -> None:
+    """用户填 `EMC Agent (v2)` 这种带括号的名字,不该让上传失败。
+
+    这是**降级**而不是**预测**:我们不去复述 GitLab 的 project_name_regex(那条正则是 GitLab
+    的、会随版本变、还含 emoji 区间),而是在它拒绝时退到一个构造上必然合法的形式 —— slug 的
+    字符集 [a-z0-9-] 是那个白名单的严格子集。
+    """
+    target = _target(monkeypatch)
+    seen: list[dict] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            seen.append(dict(payload))
+            if len(seen) == 1:
+                raise _http_error("name", _ILLEGAL)
+            return {
+                "id": 9, "path_with_namespace": "g/x", "web_url": "u",
+                "http_url_to_repo": "u.git", "default_branch": "main",
+            }
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    glw.create_project(slug="emc-agent-v2", name="EMC Agent (v2)", target=target)
+
+    assert seen[0]["name"] == "EMC Agent (v2)"
+    assert seen[1]["name"] == "emc-agent-v2"
+
+
+def test_it_gives_up_instead_of_looping_when_even_the_slug_is_rejected(monkeypatch) -> None:
+    """退到必然合法的形式还被拒,说明我们的假设错了 —— 立刻抛,不要再试。"""
+    target = _target(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            calls["n"] += 1
+            raise _http_error("name", _ILLEGAL)
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    with pytest.raises(glw.GitLabWriteError):
+        glw.create_project(slug="x", name="X", target=target)
+    assert calls["n"] == 2, "第一轮用户原文、第二轮退到 slug,不该有第三轮"
+
+
+def test_a_non_validation_failure_is_not_retried(monkeypatch) -> None:
+    """5xx、凭据失效、连不上 —— 重试同一个请求不会有不同结果,只是让用户多等。"""
+    target = _target(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            calls["n"] += 1
+            raise glw.GitLabWriteError("GitLab 返回 HTTP 500:boom", status=500)
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    with pytest.raises(glw.GitLabWriteError):
+        glw.create_project(slug="x", name="X", target=target)
+    assert calls["n"] == 1
+
+
+def test_an_unparseable_taken_error_still_retries_the_path(monkeypatch) -> None:
+    """GitLab 换了错误体形状、解析不出字段时,重试不能静默失效。
+
+    旧代码靠对整条消息做子串匹配,新代码按字段分流 —— 如果只做后者,一个我们没见过的错误体
+    形状就会让"名字被占"重新变成上传失败,而且这个退化是无声的。兜底只推进**路径**:路径由
+    slug 派生、字符集必然合法,推进它不会引入新的失败模式;而在不知道是哪个字段时去动名字,
+    正是这次 bug 的成因。
+    """
+    target = _target(monkeypatch)
+    seen: list[dict] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        if path == "projects":
+            seen.append(dict(payload))
+            if len(seen) == 1:
+                # 没有 errors,只有一段人类可读的文本 —— 我们解析不出字段。
+                raise glw.GitLabWriteError(
+                    "GitLab 返回 HTTP 400:Name has already been taken", status=400
+                )
+            return {
+                "id": 9, "path_with_namespace": "g/x", "web_url": "u",
+                "http_url_to_repo": "u.git", "default_branch": "main",
+            }
+        return {"id": 1}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    monkeypatch.setattr(glw, "namespace_id", lambda target: 1)
+    glw.create_project(slug="emc-agent", name="emc-agent", target=target)
+    assert [p["path"] for p in seen] == ["emc-agent", "emc-agent-2"]
+    assert [p["name"] for p in seen] == ["emc-agent", "emc-agent"]
+
+
+def test_looks_empty_reads_the_project_not_the_commit_list(monkeypatch) -> None:
+    """判空必须读项目对象的 empty_repo,**不能去数 commits**。
+
+    空仓的 `repository/commits` 在 GitLab 上答 404(还没有默认分支),于是"查不到"和"真的空"
+    长得一样 —— 而下游那条保守规则会把 404 当成"有内容",最该被删的空项目恰好永远走不到删除
+    分支,整个修复白做。这条断言同时钉住"请求的是 projects/<id> 而不是它的 commits"。
+    """
+    target = _target(monkeypatch)
+    asked: list[str] = []
+
+    def fake_api(method, path, payload=None, *, target):
+        asked.append(path)
+        return {"id": 7, "empty_repo": True}
+
+    monkeypatch.setattr(glw, "_api", fake_api)
+    assert glw.looks_empty(7, target) is True
+    assert asked == ["projects/7"], "不要去数 commits,空仓那个端点会 404"
+
+    monkeypatch.setattr(glw, "_api", lambda *a, **k: {"id": 7, "empty_repo": False})
+    assert glw.looks_empty(7, target) is False
+
+
+def test_looks_empty_answers_false_when_it_cannot_tell(monkeypatch) -> None:
+    """查不到就当成"有内容"。它的下游是删除,不确定时必须偏向保留。"""
+    target = _target(monkeypatch)
+
+    def boom(method, path, payload=None, *, target):
+        raise glw.GitLabWriteError("连不上", retryable=True)
+
+    monkeypatch.setattr(glw, "_api", boom)
+    assert glw.looks_empty(7, target) is False
+    # empty_repo 缺失(老版本 GitLab / 字段被裁掉)也偏向保留。
+    monkeypatch.setattr(glw, "_api", lambda *a, **k: {"id": 7})
+    assert glw.looks_empty(7, target) is False
+
+
+def test_delete_project_uses_delete(monkeypatch) -> None:
+    """删除走 DELETE /projects/:id —— GitLab 会立刻改名把名字腾出来。"""
     target = _target(monkeypatch)
     sent: dict = {}
 
     def fake_api(method, path, payload=None, *, target):
-        sent.update({"method": method, "path": path, "payload": payload})
+        sent.update({"method": method, "path": path})
         return {}
 
     monkeypatch.setattr(glw, "_api", fake_api)
-    glw.rename_project(7, path="x-failed-20260830", name="X (failed)", target=target)
-    assert sent["method"] == "PUT"
-    assert sent["path"] == "projects/7"
-    assert sent["payload"] == {"path": "x-failed-20260830", "name": "X (failed)"}
+    glw.delete_project(7, target)
+    assert sent == {"method": "DELETE", "path": "projects/7"}
 
 
 # --- 上传者那一行 -------------------------------------------------------------
@@ -474,25 +710,57 @@ def test_eid_is_not_the_primary_key() -> None:
         assert db.get(RpAiPortal, "EZHGMIO") is None
 
 
-def test_failed_push_renames_before_it_archives() -> None:
-    """失败清理的顺序必须是先改名、再归档。
+def test_failed_push_deletes_an_empty_project_instead_of_archiving_it() -> None:
+    """推送失败留下的空项目必须被**删除**,不能只归档。
 
-    顺序反了就白改:归档后的项目是只读的,改名会被 GitLab 拒,于是这个包的名字仍然被永久
-    占掉 —— 而这两句挨在一起、看起来可以随便换位置,所以在这里钉住。
+    归档不释放 name 也不释放 path,于是这个包的名字被永久占死,下一个用同名的人连项目都建不
+    出来,而他看到的报错跟真实原因毫无关系。实测现场:`rp-ai/rp-ai-user-agents` 里一个 0 提交
+    的归档项目占着 `emc-agent`。
+
+    原来这里是"先改名再归档",靠改名腾名字 —— 而那个改名用的是 `名字 (failed …)`,括号是
+    GitLab 项目名的非法字符,所以它从来没有成功过,只留下一行 warning。这条断言同时钉住
+    "不许再出现 rename_project"。
 
     端到端跑一遍 publish_package 需要造 multipart 上传、打桩审计引擎和整套 GitLab API,
-    这个仓里还没有那套脚手架;按同文件 test_credentials_go_in_a_file 的先例,用源码顺序
-    断言换取覆盖。
+    这个仓里还没有那套脚手架;按同文件 test_credentials_go_in_a_file 的先例,用源码断言
+    换取覆盖。
     """
     import inspect
 
     from app.routers import agent_upload as au
 
     src = inspect.getsource(au.publish_package)
-    rename_at = src.find("glw.rename_project(")
+    assert "glw.looks_empty(" in src, "删之前必须先确认它是空的"
+    delete_at = src.find("glw.delete_project(")
     archive_at = src.find("glw.archive_project(")
-    assert rename_at != -1, "推送失败后没有给项目改名,名字会被永久占掉"
-    assert archive_at != -1, "推送失败后没有归档,组里会留下一个看不出是半成品的空项目"
-    assert rename_at < archive_at, "改名必须在归档之前:归档后的项目是只读的,改不了名"
-    # 改名失败不能吞掉真正的失败原因 —— 上传者要看到的是推送为什么被拒。
+    assert delete_at != -1, "空项目没有被删除,名字会被永久占掉"
+    assert archive_at != -1, "非空项目仍然应该归档,不能删掉别人的内容"
+    assert delete_at < archive_at, "顺序应是 looks_empty -> 删除;否则归档分支才是默认"
+    assert "rename_project" not in src, (
+        "不要再用改名来腾名字:那个改名的名字里带括号,GitLab 必拒"
+    )
+    # 清理失败不能吞掉真正的失败原因 —— 上传者要看到的是推送为什么被拒。
     assert src.count("except glw.GitLabWriteError:") >= 2
+
+
+def test_create_project_failures_are_mapped_not_bare_500() -> None:
+    """建项目那一步必须有异常映射。
+
+    相邻的 publish_tree 一直有映射,只有这一步没有 —— 于是 GitLab 的任何 400 都一路冒到
+    ASGI 层变成裸 500「Unknown Error」,真正的原因只留在 backend.log 里。用户报的就是这个
+    500,而它其实是一个"名字被占"。
+    """
+    import inspect
+
+    from app.routers import agent_upload as au
+
+    src = inspect.getsource(au.publish_package)
+    create_at = src.find("glw.create_project(")
+    assert create_at != -1
+    # 建项目那一句必须被 try 包住,并且映射成 4xx/503 而不是漏出去。
+    head = src[:create_at]
+    assert head.rfind("try:") > head.rfind("else:") - 1, "create_project 没有被 try 包住"
+    tail = src[create_at:]
+    assert "HTTP_400_BAD_REQUEST" in tail[:1200], (
+        "名字被占/不合规矩是上传者能自己解决的事,应答 400 而不是 502"
+    )

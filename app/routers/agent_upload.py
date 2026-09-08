@@ -34,7 +34,6 @@ import re
 import shutil
 import tempfile
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile, status
@@ -168,10 +167,10 @@ async def _read_package(file: UploadFile | None, item_type: str) -> bytes:
             status.HTTP_400_BAD_REQUEST, f"包的格式只能是 {wanted}"
         )
     data = await file.read()
-    if len(data) > settings.max_upload_bytes:
+    if len(data) > settings.max_package_upload_bytes:
         raise HTTPException(
             status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            f"包超过 {settings.max_upload_bytes // (1024 * 1024)} MB 上限",
+            f"包超过 {settings.max_package_upload_bytes // (1024 * 1024)} MB 上限",
         )
     return data
 
@@ -185,7 +184,8 @@ def _unpack(
         entries = pkg.extract_safely(
             data,
             tmp / "src",
-            max_bytes=settings.max_upload_bytes,
+            # 解压后的总字节预算,不是上传字节 —— 两者必须是两个数字,见 config.py。
+            max_bytes=settings.max_package_extract_bytes,
             allow=ALLOWED_KINDS[item_type],
         )
     except pkg.PackageRejected as exc:
@@ -480,10 +480,28 @@ async def publish_package(
                 http_url=_http_url_from_web(existing.repo_url or ""),
             )
         else:
-            project = glw.create_project(
-                slug=_slug(name), name=name, description=description or None,
-                target=target,
-            )
+            # 建项目也要映射异常。相邻的 `publish_tree` 一直有映射,只有这一步没有 ——
+            # 于是 GitLab 的任何 400 都一路冒到 ASGI 层变成裸 500「Unknown Error」,
+            # 真正的原因只留在 backend.log 里,上传者看到的那句话没有任何信息量。
+            try:
+                project = glw.create_project(
+                    slug=_slug(name), name=name, description=description or None,
+                    target=target,
+                )
+            except glw.CredentialExpired as exc:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, exc.detail
+                ) from exc
+            except glw.GitLabWriteError as exc:
+                # 名字/路径被占或不合规矩是**上传者能自己解决**的事(换个名字),所以是 400
+                # 而不是 502:502 会让人以为再点一次就好。真正的上游故障(连不上)带
+                # `retryable`,那一类才答 503。
+                code = (
+                    status.HTTP_503_SERVICE_UNAVAILABLE
+                    if exc.retryable
+                    else status.HTTP_400_BAD_REQUEST
+                )
+                raise HTTPException(code, exc.detail) from exc
 
         try:
             sha, tag = glw.publish_tree(
@@ -493,27 +511,27 @@ async def publish_package(
             )
         except glw.GitLabWriteError as exc:
             if existing is None:
-                # 项目建好了但内容没推上去 —— 留下一个空项目会让下次同名上传撞路径,而且
-                # 没人看得出它是半成品。
+                # 项目建好了但内容没推上去。这个分支**只可能**是本次请求新建的项目(外层
+                # `existing is None`),复用已有项目那条路径永远走不到这里。
                 #
-                # **先改名再归档。** 归档不释放名字和路径,所以只归档的话这个包的名字被永久
-                # 占掉,同一个包再传一次连项目都建不出来(GitLab 答 name has already been
-                # taken),而上传者看到的是一个和本次失败原因毫无关系的 400。实测踩过两次。
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-                doomed = project.path_with_namespace.rsplit("/", 1)[-1] or _slug(name)
-                try:
-                    glw.rename_project(
-                        project.id,
-                        path=f"{doomed}-failed-{stamp}"[:255],
-                        name=f"{name} (failed {stamp})",
-                        target=target,
-                    )
-                except glw.GitLabWriteError:
-                    log.warning("推送失败后给项目 %s 改名也失败了", project.id)
-                try:
-                    glw.archive_project(project.id, target)
-                except glw.GitLabWriteError:
-                    log.warning("推送失败后归档项目 %s 也失败了", project.id)
+                # 零提交就删掉,不要归档:归档不释放名字和路径,于是这个包的名字被永久占死,
+                # 下一个用同名的人连项目都建不出来,而他看到的报错跟真实原因毫无关系(实测
+                # 现场:一个 0 提交的归档项目占着 emc-agent)。删除是延迟删除、会立刻改名把
+                # 名字腾出来,而这个仓一个提交都没有,没有东西可失去。
+                #
+                # 原来这里是"先改名再归档",而那个改名用了 `名字 (failed …)` —— 括号是
+                # GitLab 项目名的非法字符,所以它从来没成功过,只留下一行 warning。
+                if glw.looks_empty(project.id, target):
+                    try:
+                        glw.delete_project(project.id, target)
+                    except glw.GitLabWriteError:
+                        log.warning("推送失败后删除空项目 %s 失败", project.id)
+                else:
+                    # 收到过提交:内容不一定是本次这一份,不删。
+                    try:
+                        glw.archive_project(project.id, target)
+                    except glw.GitLabWriteError:
+                        log.warning("推送失败后归档项目 %s 也失败了", project.id)
             # 502 只留给"上游真的坏了"。凭据失效和推送规则拒收都不是那种情况:内容没问题、
             # 请求没问题,是环境里少了一样东西或多了一条规则,而重试同一份内容一定还是失败 ——
             # 答 502 会让上传者以为再点一次就好。

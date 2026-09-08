@@ -45,7 +45,7 @@ def content_in_repo(monkeypatch):
     )
 
 
-def _seed(downloads: str = "0", *, skill_id: str = SKILL_ID) -> datetime:
+def _seed(downloads: int = 0, *, skill_id: str = SKILL_ID) -> datetime:
     """Create the skill with timestamps an hour old; return that timestamp.
 
     A reviewer user is seeded too: ``rp_ai_skill_review.reviewer_eid`` is a
@@ -122,14 +122,14 @@ def _download_events() -> list[str | None]:
 
 
 def test_download_increments_counter_without_touching_updated_at(client, content_in_repo):
-    seeded = _seed("7")
+    seeded = _seed(7)
 
     resp = client.get(f"/api/skills/{SKILL_ID}/download", params={"eid": "EZHGMIO"})
     assert resp.status_code == 200
     assert resp.content[:2] == b"PK"  # a real zip came back
 
     row = _row()
-    assert row["downloads"] == "8", "counter must still increment"
+    assert row["downloads"] == 8, "counter must still increment"
     assert row["version"] == "1.0.0", "a download never changes the version"
     assert row["updated_at"] == seeded, (
         "download moved updated_at -> the skill will show up as an "
@@ -140,29 +140,50 @@ def test_download_increments_counter_without_touching_updated_at(client, content
 
 
 def test_anonymous_download_is_logged_without_eid(client, content_in_repo):
-    seeded = _seed("0")
+    seeded = _seed(0)
 
     assert client.get(f"/api/skills/{SKILL_ID}/download").status_code == 200
 
     row = _row()
-    assert row["downloads"] == "1"
+    assert row["downloads"] == 1
     assert row["updated_at"] == seeded
     assert _download_events() == [None]
 
 
-@pytest.mark.parametrize("formatted", ["5.6K", "1.2M"])
-def test_non_numeric_counter_keeps_event_row_and_timestamp(client, formatted, content_in_repo):
-    """A display-formatted counter can't be incremented; the event row and the
-    timestamp must both survive that."""
-    seeded = _seed(formatted)
+def test_a_failing_counter_update_still_leaves_the_event_row(client, content_in_repo,
+                                                            monkeypatch):
+    """计数器写不进去的时候,事件行必须还在。
 
-    resp = client.get(f"/api/skills/{SKILL_ID}/download", params={"eid": "ADMINMM"})
-    assert resp.status_code == 200
+    原来这条测试喂一个 ``"5.6K"`` 这样的展示用计数,因为那时 ``downloads`` 是 ``VARCHAR(32)``,
+    这种值能存进去也就没法自增。列改成整数之后那个场景在生产上不可能再出现了 —— 但它当初真正保护的
+    性质跟"5.6K"没关系:**计数器出问题不能连带丢掉这次下载的记录**。
+
+    两者不是同等重要的。``rp_ai_skill_download`` 是事情发生过的凭据,资产清单和部门报告都按它来
+    数;``downloads`` 只是它的缓存。放在一个事务里意味着缓存写失败会把凭据一起回滚 —— 丢掉的是
+    真实数据。所以这里直接让那条 UPDATE 抛异常,然后要求事件行仍然落库。
+    """
+    seeded = _seed(7)
+
+    import app.routers.skills as skills_mod
+
+    real_update = skills_mod.update
+
+    def exploding_update(*a, **kw):
+        raise RuntimeError("counter update failed on purpose")
+
+    resp = None
+    try:
+        monkeypatch.setattr(skills_mod, "update", exploding_update)
+        resp = client.get(f"/api/skills/{SKILL_ID}/download", params={"eid": "ADMINMM"})
+    finally:
+        monkeypatch.setattr(skills_mod, "update", real_update)
+
+    assert resp.status_code == 200, "计数器失败绝不能让下载本身失败"
 
     row = _row()
-    assert row["downloads"] == formatted, "unparseable counter is left alone"
+    assert row["downloads"] == 7, "这次没能加上,计数器停在原值"
     assert row["updated_at"] == seeded
-    assert _download_events() == ["ADMINMM"]
+    assert _download_events() == ["ADMINMM"], "事件行是真实数据,不能因为缓存写失败而丢"
 
 
 # --- rating ---------------------------------------------------------------
