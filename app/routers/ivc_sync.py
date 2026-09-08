@@ -335,13 +335,3 @@ def _ensured_user(
         promote_display_name=True,
     )
     return eid
-
-    # 已有的行不动 origin:它可能是真的登录建的,导入不该把它降级。
-    if display_name and (not row.display_name or row.display_name == eid):
-        row.display_name = display_name
-    # 只补空缺,不覆盖。覆盖会让一次同步把目录快照盖在一条更新的登录记录上,而登录那条是
-    # 这个人自己带来的、比快照新。反过来「只补空」让这一次同步就把历史欠的 5 行补齐,不需要
-    # 另写回填脚本 —— 与 gerrit_assets._ensure_user 同一形状。
-    if not row.department and department:
-        row.department = department[:64]
-    return eid
