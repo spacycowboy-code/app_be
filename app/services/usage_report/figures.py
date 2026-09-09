@@ -585,23 +585,48 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
     ):
         row(str(eid).upper())["market_items"] = n
 
+    # 「被取用」数的是**不同的 (技能, 人) 组合**，不是下载动作的次数。等价于"他名下每个
+    # 技能的去重下载人数之和"，所以与门户卡片、榜单、月报别处一个口径
+    # （services/download_counts）。
+    #
+    # 原本外层是 `count(*)`，于是一个人反复下载同一个技能会直接抬高作者的贡献数：线上
+    # Kasan Li 是 `12 / 109`，而那 109 里有 **93 次是他自己下载他自己上传的
+    # outlook-assistant**，相邻间隔中位数 1.0 秒。全库这样自己下自己的有 116 次。
+    # 去重后他是 `12 / 12`，合计 358 -> 218。
+    #
+    # **两列并没有因此变成同一个数**：`takers` 是取用过此人东西的人数，`taken` 是不同的
+    # (技能, 人) 组合。一个人拿了同一作者的 3 个技能就是 `1 / 3`。只有单技能作者两列才
+    # 相等（Kasan Li 就是），那是数据使然、不是口径塌了。实测 takers 列一个数没变。
+    #
+    # 去重放在派生表里做，不在外层拼 `count(distinct a || b)`：字符串拼接在 sqlite（测试）
+    # 与 MySQL（生产）上写法不同，而两个方言给出不同结果的那种错不报错。
+    # 派生表里 `distinct d.skill_id, d.eid` 会把同一技能的匿名行归成一行，也就是"每个技能
+    # 一个身份未知的取用者"，与 unique_downloads 的规则一致。
     for eid, n, ppl in conn.execute(
         text(
-            "select s.uploader_eid, count(*), count(distinct d.eid) "
-            "from rp_ai_skill_download d join rp_ai_skill s on s.id = d.skill_id "
-            f"where s.uploader_eid is not null and {_counted('s', SKILL_COUNTED_STATUSES)} "
-            "group by s.uploader_eid"
+            "select uploader_eid, count(*), count(distinct eid) from ("
+            "  select distinct d.skill_id, d.eid, s.uploader_eid "
+            "    from rp_ai_skill_download d "
+            "    join rp_ai_skill s on s.id = d.skill_id "
+            "   where s.uploader_eid is not null "
+            f"     and {_counted('s', SKILL_COUNTED_STATUSES)}"
+            ") t group by uploader_eid"
         )
     ):
         r = row(str(eid).upper())
         r["skill_taken"], r["skill_takers"] = n, ppl
 
+    # agent 侧同一条规则 —— 两个市场在同一张表里用两套口径，读表的人无从察觉。
+    # 线上合计 24 -> 20。
     for eid, n, ppl in conn.execute(
         text(
-            "select m.creator, count(*), count(distinct d.eid) "
-            "from rp_ai_market_download d join rp_ai_market_item m on m.id = d.item_id "
-            f"where m.creator is not null and {_counted('m', MARKET_COUNTED_STATUSES)} "
-            "group by m.creator"
+            "select creator, count(*), count(distinct eid) from ("
+            "  select distinct d.item_id, d.eid, m.creator "
+            "    from rp_ai_market_download d "
+            "    join rp_ai_market_item m on m.id = d.item_id "
+            "   where m.creator is not null "
+            f"     and {_counted('m', MARKET_COUNTED_STATUSES)}"
+            ") t group by creator"
         )
     ):
         r = row(str(eid).upper())

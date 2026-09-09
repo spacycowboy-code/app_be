@@ -92,7 +92,7 @@ _ZH: dict[str, str] = {
     "col_contrib_version": "更新版本",
     "col_contrib_market": "上传市场项",
     "col_contrib_taken": "skill 被取用",
-    "col_contrib_taken_unit": "人数 / 次数",
+    "col_contrib_taken_unit": "人数 / 取用数",
     "col_contrib_version_note": "不含首版",
     # --- activity columns (render.COLS) ----------------------------------
     "col_login_events": "近期登录",
@@ -154,9 +154,13 @@ _ZH: dict[str, str] = {
               "<span class=\"code\">app/services/usage_report/</span>。",
     # --- section four (contributors) -------------------------------------
     "lead_people_1": "谁做了东西给别人用。默认按「skill 被多少人取用」排，点表头可改排序。",
-    "lead_people_2": "「被取用」列左边是<b>取用的人数</b>，右边是<b>次数</b>。两个都给，\n"
-                     "因为一个 skill 被一个人下载二十次、和被二十个人各下载一次，"
-                     "是完全不同的贡献，\n只看次数分不出来。",
+    "lead_people_2": "「被取用」列左边是<b>取用过的人数</b>，右边是<b>取用数</b> ——\n"
+                     "一个人取走一个 skill 算一次，他下载多少遍都还是一次。\n"
+                     "两个都给，因为一个人拿走同一作者的三个 skill 是 <b>1 / 3</b>，"
+                     "三个人各拿走一个也是 <b>3 / 3</b>，\n只看一列分不出来。\n"
+                     "<b>右边这一列不是下载次数。</b>按次数算，一个反复下载的脚本就能把"
+                     "任何人顶到名单最前面 ——\n库里最高的一条是同一个工号对同一个 skill "
+                     "下载 93 次、相邻间隔中位数 1.0 秒，而那个 skill 正是他自己上传的。",
     "note_first_version":
         "<b>「更新版本」不含首次上传。</b>上传一个 skill 会同时写一条 1.0.0\n"
         "的版本记录，所以直接数版本记录会把「只上传过、从没改过」也算成一次更新 ——\n"
@@ -167,7 +171,8 @@ _ZH: dict[str, str] = {
     "note_not_ranking": "<b>这是贡献名单，不是排名。</b>「被取用」多少取决于做的是什么东西 ——\n"
                         "一个通用工具天然比一个专用脚本被更多人拿走，这不说明谁做得更好。",
     "note_non_dir": "<b>{names} 不是目录里的人。</b>它上传了 {skills} 个 skill、"
-                    "被取用 {taken} 次。没有把它从表里删掉，因为它是真实的内容来源 ——"
+                    "被取用 {taken} 次（按人去重后的取用数）。"
+                    "没有把它从表里删掉，因为它是真实的内容来源 ——"
                     "删掉会让人以为 skill 库比实际小。但它不该算进「多少人贡献过」。",
     # --- appendix definition list ----------------------------------------
     "defs_now": "当前：{people}{ev}。",
@@ -252,7 +257,7 @@ _EN: dict[str, str] = {
     "col_contrib_version": "New versions",
     "col_contrib_market": "Market items",
     "col_contrib_taken": "Skills taken",
-    "col_contrib_taken_unit": "people / times",
+    "col_contrib_taken_unit": "people / take-ups",
     "col_contrib_version_note": "first version excluded",
     # --- activity columns (render.COLS) ----------------------------------
     "col_login_events": "Recent sign-ins",
@@ -385,11 +390,17 @@ _EN: dict[str, str] = {
                      "many people took each author's skills; the headers change "
                      "the sort.",
     "lead_people_2": "In the \u201ctaken\u201d column the left number is <b>how "
-                     "many people</b> took it and the right one is <b>how many "
-                     "times</b>. Both are given,\nbecause one skill downloaded "
-                     "twenty times by one person and downloaded once by twenty "
-                     "people are entirely different contributions,\nand the count "
-                     "of times alone cannot tell them apart.",
+                     "many people</b> took these skills and the right one is <b>how "
+                     "many take-ups</b>:\none person taking one skill counts once, "
+                     "however many times they download it.\nBoth are given, because "
+                     "one person taking three of an author\u2019s skills is "
+                     "<b>1 / 3</b> while three people taking one each is "
+                     "<b>3 / 3</b>,\nand neither column alone tells them apart.\n"
+                     "<b>The right column is not a count of downloads.</b> Counting "
+                     "downloads lets a script that re-downloads\nput anyone at the "
+                     "top of the list — the highest in the database is one signum "
+                     "downloading one skill\n93 times, a median 1.0 seconds apart, "
+                     "and that skill was the one they had uploaded themselves.",
     "note_first_version":
         "<b>\u201cNew versions\u201d excludes the first upload.</b> Uploading a "
         "skill also writes a 1.0.0 version row,\nso counting version rows directly "
@@ -405,7 +416,8 @@ _EN: dict[str, str] = {
                         "than a single-purpose script, which says nothing about who "
                         "did the better work.",
     "note_non_dir": "<b>{names} is not a person in the directory.</b> It uploaded "
-                    "{skills} skills, taken {taken} times. It has not been removed "
+                    "{skills} skills, with {taken} take-ups (deduplicated per "
+                    "person). It has not been removed "
                     "from the table, because it is a genuine source of content — "
                     "removing it would make the skill library look smaller than it "
                     "is. But it must not count towards \u201chow many people have "
