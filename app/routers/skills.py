@@ -175,6 +175,16 @@ def list_skills(
         stmt = stmt.where(RpAiSkill.category_id == category_id)
     if status_filter:
         stmt = stmt.where(RpAiSkill.status == status_filter)
+    else:
+        # 下架过的不在列表里 —— **包括管理员和上传者本人**。下架这个动作承诺的就是"从市场
+        # 消失"(见 `delete_skill` 的注释)，而下面那道可见性过滤只挡住别人:管理员走的是不加
+        # 过滤的分支，上传者本人命中 `uploader_eid == requester`，于是他们两个人的市场页里
+        # 会留着一个自己刚下架的技能。2026-09-09 生产上这两个人拿到的其实是 500,因为
+        # `SkillStatus` 当时还不认识 `archived`;字面量补上之后,那一行会变成"下架了却还在
+        # 市场上",比 500 更难发现。
+        #
+        # 显式问 `?status=archived` 仍然给得出来:那是一次刻意的查询,不是市场页的默认视图。
+        stmt = stmt.where(RpAiSkill.status != "archived")
     if trending is not None:
         stmt = stmt.where(RpAiSkill.is_trending.is_(trending))
     if q:
