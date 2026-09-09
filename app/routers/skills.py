@@ -1,6 +1,7 @@
 """Skill endpoints: browse, detail, create, update, delete."""
 import hashlib
 import io
+import logging
 import re
 import uuid
 import zipfile
@@ -71,6 +72,28 @@ from app.services.usage import department_of
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+def _content_present_on_branch(storage_path: str) -> bool:
+    """这个技能的内容现在还在发布分支上吗。
+
+    按**分支**读,不是按技能行上记着的 ``repo_commit`` —— 问题恰恰是那一格可能已经过期。
+
+    只有下架用得到:它需要把"上一次下架把文件删掉了"和"有人并发改了同一个技能"分开,而这两种
+    情况在 ``publish`` 那里都表现成同一个 ``Conflict``。
+
+    上游问不出来时返回 ``True``(当成"还在")。这是失败关闭的方向:下架会照旧抛 409 让人重试,
+    而反过来把 GitLab 一次抽风当成"内容已经没了",会在仓库里还有内容的情况下把行标成已下架。
+    """
+    try:
+        skill_content.read_tree(settings.skill_repo_branch, storage_path)
+        return True
+    except skill_content.NotFound:
+        return False
+    except skill_content.ContentUnavailable as exc:
+        logger.warning("问不出 %s 在分支上的状态,按'还在'处理:%s", storage_path, exc)
+        return True
 
 
 def _read_skill_md(skill: RpAiSkill) -> str:
@@ -913,5 +936,22 @@ def delete_skill(
             )
         except skill_content.NotFound:
             pass  # 仓库里已经没有了,这次下架只需要改状态
+        except skill_content.Conflict:
+            # 内容在我们记下的那一版之后又动过。`publish` 是按文件带 `last_commit_id` 做前置
+            # 条件的,所以**上一次下架自己就会造成这个冲突**:它把文件删掉、把分支推过了库里记
+            # 着的 `repo_commit`,而那一行的 `repo_commit` 从来不更新。于是第二次下架永远撞
+            # 409,界面上再也删不掉 —— 2026-09-09 线上就卡在这个状态(第一次 204、第二次 409)。
+            #
+            # 下架只关心一件事:这份内容现在还在不在分支上。
+            #   不在 -> 这一步要达成的目标已经达成,继续去改状态;
+            #   还在 -> 是真的有人并发改了同一个技能,照旧把 409 抛给调用方。
+            # 这样保住了 `expect` 那道保护,又让重试能收敛。不能改成不带 `expect`:那是静默覆盖。
+            if _content_present_on_branch(skill.storage_path):
+                raise
+            logger.info(
+                "下架 %s:内容已不在 %s 分支上,跳过仓库这一步",
+                skill.id,
+                settings.skill_repo_branch,
+            )
     skill.status = "archived"
     db.commit()

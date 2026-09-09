@@ -4,7 +4,7 @@ The facts are the audit events (``rp_ai_skill_audit_record`` + its findings) and
 the review decision, which lives in GitLab as the state of the review MR. Neither
 is edited here.
 
-What this module owns — and is the ONLY writer of — is the projection:
+What this module owns is the projection:
 
 * ``rp_ai_skill.status``  the single lifecycle gate the API already exposes:
       pass verdict            -> approved   (published)
@@ -13,6 +13,10 @@ What this module owns — and is the ONLY writer of — is the projection:
       review MR closed        -> rejected
 * ``rp_ai_skill.audit_state`` the latest verdict for the current version, kept
   for display ("why is this pending") and admin filtering. Never a gate.
+
+**这一列不是只有这里写。** ``routers/skills.py`` 的下架写第四个值 ``archived``,而这里算出来的
+三个值里没有它。所以 ``reconcile_skill`` 第一件事就是给 ``archived`` 让路 —— 少了那一步,一个
+被下架的技能会在下一个扫描周期里被按审计结论算回 ``approved``,而下架的人以为它已经没了。
 
 **一个例外,而它是这套投影里最重要的一条:** 可疑结论落在一次"要顶掉已发布内容"的更新上时
 (``record.replaces_published``),它完全不碰这两个字段。那种情况下线上那一版没有被任何人质疑过,
@@ -72,6 +76,20 @@ def latest_record(db: Session, skill_id: str) -> RpAiSkillAuditRecord | None:
 
 def reconcile_skill(db: Session, skill: RpAiSkill) -> str | None:
     """Recompute one skill's projection. Returns the new status when it changed."""
+    # 下架是人做的决定,不是这个投影的一部分 —— 所以先让路,别的判断一个都不跑。
+    #
+    # `rp_ai_skill.status` 这一列有两个写者:这里写 approved/pending/rejected(从审计事实
+    # 算出来的),而 `routers/skills.py` 的下架写第四个值 `archived`。这个函数不认识那个值,
+    # 于是它看见 `archived != approved` 就当成投影漂移纠正回去。少了这道 if,**任何带审计
+    # 记录的技能被下架后,最多一个扫描周期(RECONCILE_INTERVAL,默认 300 秒)就会自己回到
+    # 市场上**,而下架的人以为它已经没了 —— 2026-09-09 线上就是这样:下架成功(204)三分钟后
+    # 被这里写回 approved,生产 57 条技能里 `archived` 一条都没有。
+    #
+    # 这道 if 放在待复核那一段**之前**:那一段在复核 MR 合了的时候会把暂存的更新搬上来发布,
+    # 落到一个已下架的技能上同样是复活它。
+    if skill.status == "archived":
+        return None
+
     # 先处置待复核的更新:它压在线上那一版之外,答案在它自己那一行上(复核 MR 的状态),而不在
     # 审计记录的先后顺序里 —— 记录的时间戳只精确到秒,同一秒里两条谁在前是不确定的。
     row = pending.awaiting_review(db, skill.id)
