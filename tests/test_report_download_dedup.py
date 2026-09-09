@@ -22,6 +22,7 @@ from app.models.market_download import RpAiMarketDownload
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.services.usage_report import figures
+from app.services.usage_report.i18n import Strings
 
 PREFIX = "dlded"
 LOOP = "ELOOPXX"
@@ -43,6 +44,7 @@ def seeded():
                     name=f"Dedup Report Probe {n}",
                     status="approved",
                     tags=[],
+                    uploader_eid=LOOP,
                 )
             )
         db.add(
@@ -125,3 +127,85 @@ def test_the_printed_unit_no_longer_says_times(seeded) -> None:
         # 断言"只记一次"这句在，而不是"各记一次"不在 —— 新说明里也有"各记一次",讲的是
         # 同一人拿**不同**东西各记一次。用后者做断言会咬到正确的文字上。
         assert "只记一次" in m.note, f"{key} 的说明没写清去重口径"
+
+
+# --------------------------------------------------------------------------
+# 贡献者表的「被取用」列
+# --------------------------------------------------------------------------
+
+def _contrib(eid: str):
+    with SessionLocal() as db:
+        rows, _gaps = figures.contributions(db.connection())
+    return rows.get(eid.upper())
+
+
+def test_the_taken_column_counts_take_ups_not_downloads(seeded) -> None:
+    """一个人反复下载同一个 skill 不该抬高作者的贡献数。
+
+    线上 Kasan Li 是 ``12 / 109``，而那 109 里有 **93 次是他自己下载他自己上传的
+    outlook-assistant**，相邻间隔中位数 1.0 秒。按次数算，一个反复下载的脚本就能把任何人
+    顶到贡献名单最前面，而这张表是拿来认人、拿来做外联的。
+    """
+    r = _contrib(LOOP)
+    assert r is not None, "作者没进贡献者表"
+    # s1 被 LOOP 下了 40 次 + CALM 1 次，s2/s3 各被 LOOP 下 1 次
+    # 去重后的取用数 = (s1,LOOP) (s1,CALM) (s2,LOOP) (s3,LOOP) = 4
+    assert r["skill_taken"] == 4, "被取用数必须是不同的 (技能, 人) 组合"
+    assert r["skill_takers"] == 2, "取用过的人数不该被这次改动影响"
+
+
+def test_the_two_columns_are_still_different_numbers(seeded) -> None:
+    """去重**没有**让两列变成同一个数 —— 我上一版判断错了，这条钉住它。
+
+    ``takers`` 是取用过此人东西的人数，``taken`` 是不同的 (技能, 人) 组合。一个人拿走同一
+    作者的 3 个 skill 就是 ``1 / 3``。只有单技能作者两列才相等（线上 Kasan Li 恰好是），
+    那是数据使然、不是口径塌了。
+    """
+    r = _contrib(LOOP)
+    assert r["skill_takers"] == 2
+    assert r["skill_taken"] == 4
+    assert r["skill_takers"] != r["skill_taken"], (
+        "LOOP 一个人拿了 3 个 skill、CALM 拿了 1 个，两列必须不同"
+    )
+
+
+def test_the_agent_side_follows_the_same_rule(seeded) -> None:
+    """两个市场在同一张表里用两套口径，读表的人无从察觉。"""
+    with SessionLocal() as db:
+        db.execute(
+            RpAiMarketItem.__table__.update()
+            .where(RpAiMarketItem.id == f"{PREFIX}-item")
+            .values(creator=LOOP)
+        )
+        db.commit()
+    r = _contrib(LOOP)
+    assert r["market_taken"] == 1, "同一个 agent 取用 5 次记 1"
+    assert r["market_takers"] == 1
+
+
+def test_the_column_label_no_longer_says_times(seeded) -> None:
+    """表头单位与导语是**印在报告上的字**。
+
+    数改了而文案还写「次数」，报告会一边显示去重后的数、一边告诉读者这是下载次数 ——
+    自相矛盾的报告比数字偏了更糟，读的人不知道该信哪一边。中英两套都要改。
+    """
+    for lang, forbidden, required in (
+        ("zh", "人数 / 次数", "取用数"),
+        ("en", "people / times", "take-ups"),
+    ):
+        st = Strings(lang)
+        unit = st["col_contrib_taken_unit"]
+        assert unit != forbidden, f"{lang} 表头单位还是旧口径：{unit!r}"
+        assert required in unit, f"{lang} 表头单位没写清新口径：{unit!r}"
+        lead = st["lead_people_2"]
+        assert required in lead, f"{lang} 导语没解释新口径"
+        assert "93" in lead, f"{lang} 导语没给出为什么改的证据"
+
+
+def test_the_non_directory_note_does_not_call_them_downloads(seeded) -> None:
+    """那条脚注把同一个数说成「被取用 N 次」，也得跟着改。
+
+    单独一条是因为它在另一个键里，改文案时最容易漏掉 —— 而它印在同一页上。
+    """
+    for lang, marker in (("zh", "去重"), ("en", "deduplicated")):
+        assert marker in Strings(lang)["note_non_dir"], f"{lang} 脚注没说明口径"
