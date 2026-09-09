@@ -7,7 +7,16 @@ from pydantic import Field, field_validator
 from app.schemas.card_group import CardGroupRead
 from app.schemas.common import CamelModel
 
-SkillStatus = Literal["pending", "approved", "rejected"]
+#: 技能行的生命周期取值。**必须包含 `archived`** —— 它是下架写进那一列的值
+#: (`routers/skills.py` 的 `delete_skill`)，所以任何把这样一行放进响应模型的读路径
+#: 都会碰到它。少了它不是"过滤掉"，而是 pydantic 校验失败、整个响应 500：
+#: 2026-09-09 生产上第一次成功下架之后，技能市场页对管理员和上传者本人当场坏掉
+#: (`GET /api/skills` 与 `GET /api/skills/{id}` 都 500)，就是因为这个字面量少一格。
+#:
+#: 收进来不等于要展示：不出现在列表里是靠查询过滤做的，见 `list_skills` 与
+#: `routers/departments.py` 的 `_only_visible`。用 schema 去"藏"一个真实存在的取值，
+#: 藏法是让整个接口报错。
+SkillStatus = Literal["pending", "approved", "rejected", "archived"]
 
 
 # --- child schemas ---------------------------------------------------------

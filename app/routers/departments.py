@@ -52,7 +52,13 @@ def _only_visible(stmt: Select, model: type, owner_column, requester: str | None
     upstream because this is an independent read path — a page that listed
     somebody else's pending upload would be a way around the review gate, not a
     cosmetic bug.
+
+    下架过的行**任何身份都不出现**，管理员也不例外。管理员那道旁路是为了看见待复核的东西，
+    不是为了把已经撤下的资产算回一个部门的件数里 —— 那会让管理员和其他人在同一个页面上看到
+    两个不同的数字。2026-09-09 生产上这个页面对管理员直接 500(响应模型不认识 `archived`)，
+    补上字面量之后它会变成"数字比别人多一件"，所以这道过滤和那一格要一起加。
     """
+    stmt = stmt.where(model.status != "archived")
     if requester == settings.audit_admin_eid:
         return stmt
     return stmt.where(or_(model.status == "approved", owner_column == requester))
