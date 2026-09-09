@@ -99,6 +99,92 @@ def test_it_disappears_from_the_public_list(client, skill, content):
     assert SKILL_ID not in [s["id"] for s in body]
 
 
+# --- 下架要能收敛,而且不许被收敛器翻回来 ----------------------------------
+#
+# 这一节是 2026-09-09 线上那次的回归测试。实际发生的:下架返回 204、状态置成 archived,
+# 三分钟后收敛器把它写回 approved,技能重新出现在市场和部门统计里;人再点一次下架,这次
+# 拿到 409,从界面上再也删不掉。两个独立的缺陷凑成一个闭环,所以两边都要钉住。
+
+
+def test_taking_it_off_twice_converges_instead_of_jamming(client, skill, monkeypatch):
+    """第二次下架不许 409。
+
+    `publish` 是按文件带 `last_commit_id=expect` 做前置条件的,而技能行上的 `repo_commit`
+    从不更新 —— 所以**上一次成功的下架自己**就会让下一次撞冲突。这条测试模拟那个状态:
+    冲突照抛,而内容已经不在分支上。
+    """
+    monkeypatch.setattr(skill_content, "publish",
+                        lambda **kw: (_ for _ in ()).throw(skill_content.Conflict("已经删过了")))
+    # 分支上已经没有这份内容 —— 上一次下架把它删掉了。
+    monkeypatch.setattr(
+        skill_content, "read_tree",
+        lambda ref, prefix: (_ for _ in ()).throw(skill_content.NotFound(prefix)),
+    )
+
+    resp = client.delete(f"/api/skills/{skill}", headers={"X-User-Eid": OWNER})
+    assert resp.status_code == 204, resp.text
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, SKILL_ID).status == "archived"
+
+
+def test_a_real_concurrent_edit_still_refuses(client, skill, monkeypatch):
+    """反面:内容还在分支上的冲突是真冲突,照旧 409。
+
+    少了这一条,上面那条测试也能通过一个「把所有冲突都当成已经删过了」的实现,而那等于把
+    `expect` 那道保护整个拆掉、静默覆盖别人刚提交的内容。
+    """
+    monkeypatch.setattr(skill_content, "publish",
+                        lambda **kw: (_ for _ in ()).throw(skill_content.Conflict("有人刚改过")))
+    # 内容还在,而且和我们读到的那一版不一样。
+    monkeypatch.setattr(skill_content, "read_tree",
+                        lambda ref, prefix: {"SKILL.md": b"# somebody else\n"})
+
+    resp = client.delete(f"/api/skills/{skill}", headers={"X-User-Eid": OWNER})
+    assert resp.status_code == 409, resp.text
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, SKILL_ID).status == "approved", "冲突却已经改了状态"
+
+
+def test_it_asks_the_branch_not_the_stored_commit(client, skill, monkeypatch):
+    """这个判断必须按分支读。
+
+    按技能行上记着的 `repo_commit` 读,读到的永远是「内容还在」—— 那一格指向的就是内容还在
+    的那一版。于是这个分支永远走不到,重试永远 409,而缺陷看起来像修好了。
+    """
+    asked: list[str] = []
+    monkeypatch.setattr(skill_content, "publish",
+                        lambda **kw: (_ for _ in ()).throw(skill_content.Conflict("x")))
+
+    def spy(ref, prefix):
+        asked.append(ref)
+        raise skill_content.NotFound(prefix)
+
+    monkeypatch.setattr(skill_content, "read_tree", spy)
+    client.delete(f"/api/skills/{skill}", headers={"X-User-Eid": OWNER})
+    assert asked, "根本没去问分支上还有没有"
+    assert REF not in asked, f"按技能行上的 repo_commit 问的,应该按分支问:{asked}"
+
+
+def test_an_upstream_outage_refuses_rather_than_archiving(client, skill, monkeypatch):
+    """问不出来时按「还在」处理 —— 失败关闭的方向。
+
+    反过来把一次 GitLab 抽风当成「内容已经没了」,会在仓库里还有内容的情况下把行标成已下架,
+    而那种不一致要人去仓库里比对才看得出来。
+    """
+    monkeypatch.setattr(skill_content, "publish",
+                        lambda **kw: (_ for _ in ()).throw(skill_content.Conflict("x")))
+    monkeypatch.setattr(
+        skill_content, "read_tree",
+        lambda ref, prefix: (_ for _ in ()).throw(
+            skill_content.ContentUnavailable("GitLab 502")
+        ),
+    )
+    resp = client.delete(f"/api/skills/{skill}", headers={"X-User-Eid": OWNER})
+    assert resp.status_code == 409, resp.text
+    with SessionLocal() as db:
+        assert db.get(RpAiSkill, SKILL_ID).status == "approved"
+
+
 # --- 幂等 -----------------------------------------------------------------
 
 
