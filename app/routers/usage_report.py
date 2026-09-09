@@ -22,7 +22,7 @@ from pathlib import Path
 from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -30,6 +30,7 @@ from app.database import get_db
 from app.models.org_snapshot import RpAiOrgSnapshot
 from app.services.reporting_windows import reporting_tz
 from app.services.usage_report import graph_walk
+from app.services.usage_report import org_export
 from app.services.usage_report import OrgSnapshotMissing, build_html
 from app.services.usage_report.i18n import DEFAULT_LANG, LANGS
 
@@ -233,6 +234,63 @@ def get_org_snapshot(
         "people": row.people,
         "uploadedBy": row.uploaded_by,
     }
+
+
+@router.get(
+    "/department-report/org-structure.json",
+    summary="The report's org structure as JSON (Dashboard EIDs only)",
+)
+def download_org_structure(
+    db: Session = Depends(get_db),
+    _eid: str = Depends(require_dashboard_eid),
+) -> Response:
+    """The organisation behind the report, as a file rather than a page.
+
+    Same population, same corrections and the same head counts as the HTML report
+    — it is built from the same call (see ``services/usage_report/org_export``).
+    A second reading of the raw Graph payload would have been simpler and would
+    have produced a file that quietly disagreed with the page.
+
+    Restricted like the report itself: it names every individual and which team
+    they sit in, which is more than the report shows in one place.
+
+    Served as an attachment with the filename decided here. The name carries the
+    capture date, because two exports a month apart are different documents and
+    a reader with two files called ``org-structure.json`` cannot tell which is
+    which.
+    """
+    settings = get_settings()
+    try:
+        structure = org_export.build_structure(
+            db.connection(), settings.usage_report_org_snapshot
+        )
+    except OrgSnapshotMissing as exc:
+        # Same 503 and the same instructions as the report: the service is fine,
+        # an input it needs has not been pushed.
+        logger.warning("Org structure export unavailable, no snapshot (file: %s)", exc)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "组织结构快照还没上传，没有可以导出的组织结构。请先在报告页上点“同步”。",
+        ) from exc
+
+    day = str(structure.get("capturedAt") or "")[:10] or "unknown"
+    filename = f"rp-org-structure-{day}.json"
+    return Response(
+        # Not JSONResponse: ensure_ascii would turn every Chinese department label
+        # into \uXXXX escapes, and this file is opened by people as often as by
+        # programs. indent=2 for the same reason.
+        content=json.dumps(structure, ensure_ascii=False, indent=2),
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            # The frontend reads the filename off this header, and a cross-origin
+            # XHR cannot see it unless it is exposed. Same origin in production, so
+            # this only matters for local development against a proxy — but the
+            # failure is a file called "download" and no error anywhere.
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post(
