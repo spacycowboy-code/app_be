@@ -287,6 +287,21 @@ class Settings(BaseSettings):
     # Empty disables the endpoint; the periodic sweep still runs.
     audit_webhook_token: str = ""
 
+    # 接口报错诊断用的 LLM。默认指向生产上已有的判定器容器 —— 它讲 OpenAI 兼容协议，只在
+    # compose 网络内可达（没有发布端口），所以这条调用不出机房、也不需要额外凭据。
+    # 换成别的 provider 只要改这两个值，代码一行不用动。
+    error_diagnosis_llm_base: str = "http://audit-judge:8790/v1"
+    error_diagnosis_model: str = "claude-sonnet-5"
+    # 单次调用上限。判定器历史上出现过 200s 级慢响应，而这跑在 reconciler 的循环里，
+    # 不设上限会让一次 sweep 无限期挂住。
+    error_diagnosis_timeout: int = 90
+    # 每轮 sweep 最多诊断几条。见 services/api_errors.py::diagnose_pending。
+    # 默认 1 而不是 2：稳态下每天不到一条新指纹（实测 13 天 8 个），2 和 1 没区别；有区别的
+    # 只有异常涌入那一天，而那天恰恰最不该跟技能审计抢判定器。
+    error_diagnosis_batch: int = 1
+    # 待诊断超过这个数就认为在「涌入」，这一轮只做 1 条。见 diagnose_pending 里的理由。
+    error_diagnosis_flood_threshold: int = 10
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

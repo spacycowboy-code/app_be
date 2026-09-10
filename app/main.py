@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import IntegrityError
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.repositories import skill_content
@@ -14,6 +15,7 @@ from app.services.audit_engine import BundleTooLarge
 from app.routers import (
     admin_assets,
     agent_upload,
+    api_errors as api_errors_router,
     audit,
     auth,
     categories,
@@ -195,6 +197,62 @@ async def auth_gate(request: Request, call_next):
     return await call_next(request)
 
 
+def _record_api_error(method: str, path: str, code: int, eid: str | None,
+                      exc: BaseException | None) -> None:
+    """同步落库，供中间件在线程池里调用。自己开会话，不碰请求那条。
+
+    请求里那条 session 走到这里很可能已经因为异常处于需要 rollback 的状态，复用它会让
+    记录本身失败 —— 而这条记录恰恰只在出错时才需要写。
+    """
+    from app.database import SessionLocal
+    from app.services import api_errors
+
+    with SessionLocal() as db:
+        api_errors.record(
+            db, method=method, path=path, status=code, eid=eid, exc=exc
+        )
+
+
+@app.middleware("http")
+async def record_api_errors(request: Request, call_next):
+    """把每一次 5xx 记进 ``rp_ai_api_error``，给 Admin 的接口报错页用。
+
+    **两种 5xx 都要记**：抛出异常的（崩溃）和代码显式返回的（如 ``HTTPException(503)``）。
+    只记前者会漏掉「服务在，它依赖的东西不在」这一整类，而那类恰恰最常被用户问起。
+
+    **放在 ``auth_gate`` 之后注册**，因此在中间件栈里比它更外层（Starlette 把后注册的包在
+    外面），能看见内层抛出的异常。记完必须原样 re-raise —— 吞掉异常会把一次 500 变成一个
+    没有响应体的怪状态，而且外层 ``ServerErrorMiddleware`` 的日志也就没了。
+
+    落库走线程池：这是一个 async 中间件，而 DB 驱动是同步的，直接调会占住事件循环。
+    记录失败在 ``api_errors.record`` 里已被吞掉并落日志，所以这里不需要再包一层
+    ——但仍然包了 ``try``，因为连不上库时 ``SessionLocal()`` 本身就会抛，而那不该让
+    用户的响应也一起变成另一个错误。
+    """
+    eid = None
+    try:
+        response = await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - 记完就原样抛
+        eid = str(getattr(request.state, "eid", "") or "") or None
+        try:
+            await run_in_threadpool(
+                _record_api_error, request.method, request.url.path, 500, eid, exc
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("记录接口报错时自己也失败了")
+        raise
+    if response.status_code >= 500:
+        eid = str(getattr(request.state, "eid", "") or "") or None
+        try:
+            await run_in_threadpool(
+                _record_api_error, request.method, request.url.path,
+                response.status_code, eid, None,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("记录接口报错时自己也失败了")
+    return response
+
+
 @app.exception_handler(IntegrityError)
 async def integrity_error_handler(request: Request, exc: IntegrityError) -> JSONResponse:
     """Turn DB constraint violations into a clean 400 rather than a 500.
@@ -237,6 +295,7 @@ app.include_router(usage_report.router)
 app.include_router(rsw_inventory.router)
 app.include_router(rdg.router)
 app.include_router(admin_assets.router)
+app.include_router(api_errors_router.router)
 
 
 @app.get("/health", tags=["health"])
