@@ -23,6 +23,7 @@ from app.routers import (
     departments,
     favorites,
     gerrit_sync,
+    external_usage,
     ivc_sync,
     login_stats,
     market,
@@ -114,6 +115,9 @@ AUTH_WHITELIST = {
     # not a signed-in person: making it carry a JWT would mean issuing a session
     # that can do everything else too.
     "/api/integrations/gerrit/ai-assets/sync",
+    # RVC 用量推送 — ivc_push_token。同上：调用方是对方机房的无人值守服务，没有会话。
+    # 不进这个白名单的话，站点级鉴权会在路由之前答 401，症状是「端点好像不存在」。
+    "/api/integrations/ivc/usage/events",
 }
 
 
@@ -284,6 +288,7 @@ app.include_router(audit.router)
 app.include_router(skill_import.router)
 app.include_router(gerrit_sync.router)
 app.include_router(ivc_sync.router)
+app.include_router(external_usage.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
 app.include_router(categories.router)
