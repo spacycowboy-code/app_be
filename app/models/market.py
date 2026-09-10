@@ -87,6 +87,23 @@ class RpAiMarketItem(TimestampMixin, Base):
     content_sha: Mapped[str | None] = mapped_column(String(64))
     is_trending: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # --- externally hosted packages ----------------------------------------
+    # 包体不在门户这边，下载走 307 跳到上游。形状与 ``RpAiSkill.external_url`` /
+    # ``external_source`` 一字不差 —— 技能侧 2026-09 就是这么接 IVC/RVC 的 Nexus 的，这里刻意
+    # 不发明第二套机制。
+    #
+    # **为什么需要它。** 在这之前市场条目只有两种下载可能：id 是 ``gl-<项目id>`` 的去 GitLab 取
+    # 打包，其余一律 409「没有可下载的代码包」。于是上游托管的 agent 根本没法登记成一个能下载的
+    # 条目 —— 卡片上有按钮、点下去必然报错。
+    #
+    # 1024 而不是 512（``repo_url``/``service_url`` 的宽度）：Nexus 的直链带完整仓库路径、
+    # 版本号和 runtime 段，实测已经 130 字符出头，而被截断的 URL 在库里是"存住了"、点下去是
+    # 404，正是最难查的那种失败。与技能侧同宽。
+    external_url: Mapped[str | None] = mapped_column(String(1024))
+    # 哪个上游。与 ``RpAiSkill.external_source`` 同一套取值（今天只有 ``nexus-ivc``）。
+    external_source: Mapped[str | None] = mapped_column(String(32))
+
     # EID of the user who manually created this item (None for GitLab-synced).
     creator: Mapped[str | None] = mapped_column(String(64))
 
@@ -118,6 +135,15 @@ class RpAiMarketItem(TimestampMixin, Base):
         viewonly=True,
         lazy="selectin",
     )
+
+    @property
+    def externally_hosted(self) -> bool:
+        """包体在上游，下载要跳过去而不是在这边打包。照抄 ``RpAiSkill.externally_hosted``。
+
+        判据是 ``external_url`` 非空，**不是** ``external_source``：来源只是标签，而"能不能下载"
+        取决于有没有地址。反过来判会让一个填了来源、忘了地址的条目看起来可下载。
+        """
+        return bool(self.external_url)
 
     @property
     def uploader_name(self) -> str | None:
