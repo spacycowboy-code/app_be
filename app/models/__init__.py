@@ -28,6 +28,7 @@ from app.models.usage_event import RpAiUsageEvent
 from app.models.org_snapshot import RpAiOrgSnapshot  # noqa: F401
 from app.models.inventory_report import RpAiInventoryReport  # noqa: F401
 from app.models.rdg import RpAiRdgNode, RpAiRdgToolMapping, RpAiRdgAdmin  # noqa: F401
+from app.models.api_error import RpAiApiError  # noqa: F401
 
 __all__ = [
     "RpAiPortal",
@@ -52,4 +53,5 @@ __all__ = [
     "RpAiLoginEvent",
     "RpAiUsageEvent",
     "RpAiInventoryReport",
+    "RpAiApiError",
 ]
