@@ -61,6 +61,16 @@ class Settings(BaseSettings):
     # 也不在浏览器里出现过。
     ivc_push_token: str = ""
 
+    # 守 GET /api/integrations/ivc/usage/events 的 bearer token。**与上面那个分开**，不是复用。
+    #
+    # **为什么分开。** 上面那个的作用域是「往一张流水表追加行」；这一个能读出人的行为数据。
+    # 同一串值同时具备两种权力时，「只想收数据、不想再给数据」这个决定就没有对应的动作 ——
+    # 吊销它会连推送一起停掉。分成两个，那个决定就是吊销其中一个。
+    #
+    # 为空 = GET 关闭（答 503 并点名缺哪个变量）。与 push 那个各自独立：只配写不配读是一个
+    # 合理的部署状态，反之亦然。
+    ivc_read_token: str = ""
+
     # Comma-separated list of allowed CORS origins.
     cors_origins: str = "http://localhost:4200"
 
