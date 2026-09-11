@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_serializer, field_validator
 
 from app.models.external_usage_event import ALLOWED_KINDS, ALLOWED_VERBS
-from app.schemas.common import CamelModel
+from app.schemas.common import CamelModel, as_utc
 
 #: 单批上限。定这个数是为了让 413 有个明确的边界：没有上限时，一个跑飞的批处理能用一次
 #: 请求把库写满，而症状是网关超时而不是「批太大」。
@@ -119,3 +119,53 @@ class ExternalUsageResult(CamelModel):
     duplicate: int = 0
     skipped: int = 0
     outcomes: list[ExternalUsageOutcome] = Field(default_factory=list)
+
+
+# --- 读回（GET） ------------------------------------------------------------
+
+#: 一次最多回多少条。定这个数是为了让分页有个明确边界：没有上限时，一次请求可能把整张表
+#: 序列化进内存，而那个失败是 502 而不是「太多了」。
+MAX_FEED_LIMIT = 1000
+DEFAULT_FEED_LIMIT = 500
+
+
+class ExternalUsageEventOut(CamelModel):
+    """回给上游的一条使用记录。
+
+    字段与他们**推过来**的那一套对齐（``verb`` / ``kind`` / ``assetId`` / ``eid`` /
+    ``occurredAt``），这样两边能直接对账，不必再写一层映射。
+
+    没有 ``eventId``：这一条不一定来自他们的推送 —— 门户里的人自己点下载/收藏也会产生它，
+    而那些行没有上游事件 id。给一个编造的 id 比留空更坏。
+
+    ``department`` 是**组 slug**（``ivc``）而不是 LDAP 部门全称。全称里带子团队名，那本身
+    就是组织结构信息，而回答「谁在用」并不需要它。
+    """
+
+    verb: str
+    kind: str
+    asset_id: str
+    eid: str | None = None
+    department: str | None = None
+    occurred_at: datetime
+
+    @field_serializer("occurred_at")
+    def _utc(self, value: object) -> object:
+        return as_utc(value)
+
+
+class ExternalUsageFeed(CamelModel):
+    """一页使用记录。
+
+    ``total`` 是**这一页的条数**，不是符合条件的总数。故意不给总数：算它要再扫一遍，而调用方
+    真正需要的是「还有没有下一页」，那由 ``total == limit`` 判断。写清楚是因为一个叫 total 的
+    字段被当成全量总数去做百分比，是那种算得出数、数还错的失败。
+    """
+
+    generated_at: datetime
+    total: int
+    events: list[ExternalUsageEventOut] = Field(default_factory=list)
+
+    @field_serializer("generated_at")
+    def _utc(self, value: object) -> object:
+        return as_utc(value)

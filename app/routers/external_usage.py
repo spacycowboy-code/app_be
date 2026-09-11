@@ -37,9 +37,17 @@ from __future__ import annotations
 
 import hmac
 import logging
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -51,6 +59,7 @@ from app.models.external_usage_event import (
     ACTION_APPLIED,
     ACTION_DUPLICATE,
     ACTION_SKIPPED,
+    KIND_AGENT,
     KIND_SKILL,
     SOURCE_RVC,
     VERB_DOWNLOAD,
@@ -63,19 +72,29 @@ from app.models.market import RpAiMarketItem
 from app.models.market_download import RpAiMarketDownload
 from app.models.market_favorite import RpAiMarketFavorite
 from app.models.skill import RpAiSkill
-# 从 ivc_sync 借这个前缀而不是照抄一份。门户侧的 id 是 `ivc-<上游 id>`，同步那边建行用的就是
-# 这个常量；这里再写一遍字面量，等于埋一个「哪天前缀改了、同步改了这边没改」的静默失配。
-from app.routers.ivc_sync import ID_PREFIX
+from app.models.user import RpAiPortal
+# 从 ivc_sync 借这两个常量而不是照抄一份。门户侧的 id 是 `ivc-<上游 id>`、分组是 `ivc`，同步那边
+# 建行用的就是它们；这里再写一遍字面量，等于埋一个「哪天改了、同步改了这边没改」的静默失配。
+from app.routers.ivc_sync import ID_PREFIX, IVC_CATEGORY_ID as IVC_GROUP
 from app.schemas.external_usage import (
+    DEFAULT_FEED_LIMIT,
     MAX_EVENTS_PER_BATCH,
+    MAX_FEED_LIMIT,
     ExternalUsageBatchIn,
     ExternalUsageEventIn,
+    ExternalUsageEventOut,
+    ExternalUsageFeed,
     ExternalUsageOutcome,
     ExternalUsageResult,
 )
+from app.services.dept_groups import resolve_group
 from app.services.portal_users import ensure_portal_user
 
 logger = logging.getLogger(__name__)
+
+#: ``since`` 不给时默认回看多久。一个月：足够覆盖对方按周或按月拉一次，又不至于让默认调用
+#: 扫全表。
+DEFAULT_WINDOW_DAYS = 30
 
 router = APIRouter(prefix="/api/integrations/ivc", tags=["ivc-usage"])
 
@@ -245,6 +264,187 @@ def push_usage_events(
 
     db.commit()
     return result
+
+
+def require_read_token(authorization: str | None) -> None:
+    """读回端点的闸门。**用的是另一串值**（``IVC_READ_TOKEN``），不是推送那个。
+
+    分开的理由见 ``config.ivc_read_token``：一串同时能写又能读的值，让「只想收数据、不想再给
+    数据」这个决定没有对应的动作。
+
+    这条路径与 POST 同一个 URL，而 ``AUTH_WHITELIST`` 是**按路径**判的，所以 GET 也绕过了站点
+    级 JWT —— 这里这道检查是唯一的闸门，token 没配时必须 503 而不是放行。
+    """
+    token = get_settings().ivc_read_token
+    if not token:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "用量读回端点未启用（IVC_READ_TOKEN 没有配置）",
+        )
+    expected = f"Bearer {token}"
+    if not authorization or not hmac.compare_digest(authorization, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token 缺失或不正确")
+
+
+def _ivc_only(department: str | None) -> bool:
+    """这个部门算不算 IVC。
+
+    走 ``resolve_group`` 而不是自己写一个 ``startswith("BNEW RTE RP IVC")``：那张映射表有它自己
+    的规则（按段最长前缀），照抄一份就等于把规则复制到第二处，而两处不一致时没有任何一处会报错。
+
+    具体差别不是假设，是实测的：``BNEW RTE RP CD IVC`` 与 ``CD IVC2`` 在表里**各有一条明确映射
+    指向 ``ivc``**（``dept_groups.py``，2026-09 那次「按功能归属」的既定决定：成都 IVC 与北京 IVC
+    并排出现在同一个 IVC 标签下）。所以自己写前缀匹配会把成都 IVC 整批漏掉，而那不报错。
+
+    表里刻意**没有**站点级的 ``BNEW RTE RP CD`` 键（站点不是功能），所以部门恰好只到 ``RP CD``
+    没有子团队的人解析为 ``None``、不算 IVC。这与部门页和月报口径一致 —— 不一致才是缺陷。
+    """
+    return resolve_group(department) == IVC_GROUP
+
+
+def _feed_rows(db: Session, since, limit: int) -> list[ExternalUsageEventOut]:
+    """按「资产是 IVC 的 **且** 操作者部门是 IVC 的」取使用记录。
+
+    **两个条件都要，这是操作者定的最严口径。** 代价是回给上游的数字**低于真实使用量**，而且
+    他们分不出「没有部门外的人用」和「有但你不告诉我」。这一点写在这里，因为下一个人看到数字
+    对不上时，第一反应会是去掉这个过滤。
+
+    **部门过滤在 Python 里做，不在 SQL 里。** ``resolve_group`` 是按段最长前缀匹配，翻成 SQL 就
+    是把那张映射表复制进 where 子句。扫描量由 ``since`` 兜住，而这些表在生产上是几百行的量级。
+    ``limit`` 因此**作用在部门过滤之后**，否则一页里可能全被过滤空、看起来像没有数据。
+    """
+    out: list[ExternalUsageEventOut] = []
+
+    # --- 技能：下载 ---------------------------------------------------------
+    # 判据用 id 前缀，与 POST 侧 ``_resolve`` 同一条规则、同一个常量。市场表上的
+    # ``external_source`` 列要等另一个 MR，用前缀两类资产就能共用一条规则。
+    rows = db.execute(
+        select(
+            RpAiSkillDownload.skill_id,
+            RpAiSkillDownload.eid,
+            RpAiSkillDownload.department,
+            RpAiSkillDownload.created_at,
+        )
+        .where(
+            RpAiSkillDownload.skill_id.startswith(ID_PREFIX),
+            RpAiSkillDownload.created_at >= since,
+        )
+        .order_by(RpAiSkillDownload.created_at)
+    ).all()
+    for skill_id, eid, department, at in rows:
+        if not _ivc_only(department):
+            continue
+        out.append(
+            ExternalUsageEventOut(
+                verb=VERB_DOWNLOAD,
+                kind=KIND_SKILL,
+                asset_id=skill_id[len(ID_PREFIX):],
+                eid=eid,
+                department=IVC_GROUP,
+                occurred_at=at,
+            )
+        )
+
+    # --- 技能：收藏 ---------------------------------------------------------
+    # 这张表**没有 department 快照列**（与两张 download 表不同），所以部门只能从用户行现取 ——
+    # 也就是「这个人现在的部门」，不是收藏当时的。一次重组会让历史收藏的归属跟着变，而下载不会。
+    # 没有在这里补列：那要改一张 Grafana 也在读的表，属于另一个改动。
+    rows = db.execute(
+        select(
+            RpAiUserFavorite.skill_id,
+            RpAiUserFavorite.eid,
+            RpAiPortal.department,
+            RpAiUserFavorite.created_at,
+        )
+        .join(RpAiPortal, RpAiPortal.eid == RpAiUserFavorite.eid)
+        .where(
+            RpAiUserFavorite.skill_id.startswith(ID_PREFIX),
+            RpAiUserFavorite.created_at >= since,
+        )
+        .order_by(RpAiUserFavorite.created_at)
+    ).all()
+    for skill_id, eid, department, at in rows:
+        if not _ivc_only(department):
+            continue
+        out.append(
+            ExternalUsageEventOut(
+                verb=VERB_LIKE,
+                kind=KIND_SKILL,
+                asset_id=skill_id[len(ID_PREFIX):],
+                eid=eid,
+                department=IVC_GROUP,
+                occurred_at=at,
+            )
+        )
+
+    # --- 市场（agent）：下载 -------------------------------------------------
+    # 今天必然是空的：agent 还没被同步进市场，所以没有 ``ivc-`` 开头的市场条目。写在这里而不是
+    # 等以后再加，是因为「agent 接进来了但读回接口看不见」是一个不报错的缺口。
+    rows = db.execute(
+        select(
+            RpAiMarketDownload.item_id,
+            RpAiMarketDownload.eid,
+            RpAiMarketDownload.department,
+            RpAiMarketDownload.created_at,
+        )
+        .where(
+            RpAiMarketDownload.item_id.startswith(ID_PREFIX),
+            RpAiMarketDownload.created_at >= since,
+        )
+        .order_by(RpAiMarketDownload.created_at)
+    ).all()
+    for item_id, eid, department, at in rows:
+        if not _ivc_only(department):
+            continue
+        out.append(
+            ExternalUsageEventOut(
+                verb=VERB_DOWNLOAD,
+                kind=KIND_AGENT,
+                asset_id=item_id[len(ID_PREFIX):],
+                eid=eid,
+                department=IVC_GROUP,
+                occurred_at=at,
+            )
+        )
+
+    out.sort(key=lambda e: e.occurred_at)
+    return out[:limit]
+
+
+@router.get("/usage/events", response_model=ExternalUsageFeed)
+def read_usage_events(
+    since: datetime | None = Query(
+        default=None,
+        description="只回这个时刻之后的记录，带时区的 ISO 8601。默认最近 30 天。",
+    ),
+    limit: int = Query(default=DEFAULT_FEED_LIMIT, ge=1, le=MAX_FEED_LIMIT),
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> ExternalUsageFeed:
+    """把 IVC 资产在门户里的使用情况回给上游。
+
+    **口径：资产是 IVC 的，且操作者部门是 IVC 的。** 非 IVC 的人对 IVC 资产的操作整条不返回 ——
+    连脱敏行都不给。这是操作者定的最严口径，代价见 ``_feed_rows``。
+
+    **返回里包含他们自己推来的那部分。** 推送写进的就是这几张业务表，读回时没法（也没必要）
+    把它们摘出来 —— 他们知道自己推过哪些 ``eventId``，要扣掉是他们那边的减法。
+
+    ``since`` 不带时区一律拒：理由与 POST 那侧同一条，裸本地时间在两个站点之间无法还原成时刻。
+    """
+    require_read_token(authorization)
+
+    if since is None:
+        since = datetime.now(timezone.utc) - timedelta(days=DEFAULT_WINDOW_DAYS)
+    elif since.tzinfo is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "since 必须带时区偏移",
+        )
+
+    events = _feed_rows(db, _to_db_naive(since), limit)
+    return ExternalUsageFeed(
+        generated_at=datetime.now(timezone.utc), total=len(events), events=events
+    )
 
 
 def _departments_for(eids: set[str]) -> dict[str, str | None]:
