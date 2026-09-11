@@ -256,6 +256,11 @@ def get_skill_audit(skill_id: str, db: Session = Depends(get_db)) -> SkillAuditR
 
     逐条发现按类别归并成 checks(和上传向导同一套 ``build_checks`` 逻辑,展示才一致),但**去掉
     ``evidence`` 原文**:这是给任何看得到该技能的人看的,而证据片段可能牵出实现或扫描规则细节。
+
+    发现按严重级分两组:critical/high 进 ``checks``(把技能推向人工复核的"需关注项");medium 及以下
+    进 ``low_risk_checks``("已放行的低危项" —— 扫到了但不影响放行)。degraded(某层未跑完)的检查项
+    归入需关注组,因为"没核实"也是复核的理由。
+
     没有审计记录(老数据/从未审计)时 ``available=False``,前端显示"未审计"而不是"通过"。
     """
     skill = _get_skill_or_404(db, skill_id)
@@ -263,45 +268,58 @@ def get_skill_audit(skill_id: str, db: Session = Depends(get_db)) -> SkillAuditR
     if record is None:
         return SkillAuditReport(available=False)
 
-    # 从库里的行重建一个 AuditResult,好复用 build_checks 的归并与排序(同一套展示逻辑,不另造)。
-    result = AuditResult(
+    high = {"critical", "high"}
+    concern_findings = [f for f in record.findings if (f.severity or "").lower() in high]
+    low_findings = [f for f in record.findings if (f.severity or "").lower() not in high]
+
+    return SkillAuditReport(
+        available=True,
         state=record.state,
         reason=record.reason or "",
         coverage=record.coverage or "",
-        incomplete=[s for s in (record.incomplete or "").split(",") if s],
+        # 需关注组带上 incomplete,好让 build_checks 生成 degraded 项(某层未跑完也要复核)。
+        checks=_checks_from_findings(
+            concern_findings,
+            incomplete=[s for s in (record.incomplete or "").split(",") if s],
+        ),
+        low_risk_checks=_checks_from_findings(low_findings, incomplete=[]),
+    )
+
+
+def _checks_from_findings(
+    db_findings: "list", *, incomplete: "list[str]"
+) -> "list[AuditCheck]":
+    """把库里的 findings 按类别归并成 AuditCheck,复用 build_checks 的归并与排序。
+
+    从库行重建一个 AuditResult 走同一套逻辑(展示才和上传向导一致,不另造归并)。**evidence 原文
+    刻意不带出来** —— 见 SkillAuditReport 的说明。
+    """
+    result = AuditResult(
+        incomplete=incomplete,
         findings=[
             EngineFinding(
                 source=f.source, category=f.category, severity=f.severity,
                 evidence=f.evidence, detail=f.detail, file=f.file, line=f.line,
                 rule_id=f.rule_id or "", aitech=f.aitech, remediation=f.remediation,
             )
-            for f in record.findings
+            for f in db_findings
         ],
     )
-    checks = [
+    return [
         AuditCheck(
             id=c.id, label=c.label, status=c.status, description=c.description,
             severity=c.severity, note=c.note,
             findings=[
                 AuditFinding(
                     source=f.source, category=f.category, severity=f.severity,
-                    # evidence 刻意不带出来 —— 见 SkillAuditReport 的说明。
                     evidence=None, detail=f.detail, file=f.file, line=f.line,
-                    rule_id=f.rule_id or None, aitech=f.aitech,
-                    remediation=f.remediation,
+                    rule_id=f.rule_id or None, aitech=f.aitech, remediation=f.remediation,
                 )
                 for f in c.findings
             ],
         )
         for c in build_checks(result)
     ]
-    return SkillAuditReport(
-        available=True,
-        state=record.state,
-        reason=record.reason or "",
-        coverage=record.coverage or "",
-        checks=checks,
-    )
 
 
 def _artifact_member(tree: "dict[str, bytes]") -> "bytes | None":

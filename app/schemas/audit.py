@@ -88,4 +88,9 @@ class SkillAuditReport(CamelModel):
     # 为什么是这个结论,一句话。
     reason: str = ""
     coverage: str = ""
+    # 需关注的检查项:命中了 critical/high 的发现,或某层未跑完(degraded)。这些是把技能推向
+    # 人工复核的原因。
     checks: list[AuditCheck] = []
+    # 已放行的低危项:扫描扫出来但**不影响放行**的发现(severity 在 medium 及以下)。单独一组,
+    # 让用户看到"扫到了这些、都放行了",而不是把它们和需关注项混在一起或干脆不显示。
+    low_risk_checks: list[AuditCheck] = []

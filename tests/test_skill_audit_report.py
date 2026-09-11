@@ -91,12 +91,52 @@ def test_findings_are_grouped_into_checks(client):
     body = client.get("/api/skills/flagged/audit").json()
     assert body["available"] is True
     assert body["state"] == "suspect"
-    # 归并成 checks:命中的类别出现,严重级带出来,处置建议保留。
+    # high 归入"需关注"组(checks),不在低危组。
     hit = [c for c in body["checks"] if c["status"] == "hit"]
     assert len(hit) == 1
     assert hit[0]["id"] == "dangerous_instruction"
     assert hit[0]["severity"] == "high"
     assert hit[0]["findings"][0]["remediation"] == "删掉那段指令"
+    assert body["lowRiskChecks"] == []
+
+
+def test_severity_splits_into_concern_and_low_risk(client):
+    """critical/high 进需关注组,medium 及以下进已放行低危组。"""
+    _seed_skill(
+        "mixed", with_record=True, state="suspect", reason="r", coverage="complete",
+        findings=[
+            dict(source="judge", category="dangerous_instruction", severity="critical",
+                 detail="严重"),
+            dict(source="static", category="policy_violation", severity="medium",
+                 detail="打包规范"),
+            dict(source="static", category="resource_abuse", severity="low",
+                 detail="低危"),
+        ],
+    )
+    body = client.get("/api/skills/mixed/audit").json()
+    concern_cats = {c["id"] for c in body["checks"]}
+    low_cats = {c["id"] for c in body["lowRiskChecks"]}
+    # critical 在需关注组。
+    assert "dangerous_instruction" in concern_cats
+    # medium / low 在已放行低危组,不在需关注组。
+    assert "policy_violation" in low_cats
+    assert "resource_abuse" in low_cats
+    assert "policy_violation" not in concern_cats
+    assert "resource_abuse" not in concern_cats
+
+
+def test_low_risk_only_leaves_concern_empty(client):
+    """只有低危发现时,需关注组为空,低危组有内容。"""
+    _seed_skill(
+        "lowonly", with_record=True, state="pass", reason="clean-ish", coverage="complete",
+        findings=[
+            dict(source="static", category="policy_violation", severity="low", detail="x"),
+        ],
+    )
+    body = client.get("/api/skills/lowonly/audit").json()
+    assert body["checks"] == []
+    assert len(body["lowRiskChecks"]) == 1
+    assert body["lowRiskChecks"][0]["id"] == "policy_violation"
 
 
 def test_evidence_is_never_exposed(client):
