@@ -68,3 +68,24 @@ class SkillEvaluateResult(CamelModel):
     cause: str | None = None
     checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []   # flat list, kept for the audit trail
+
+
+class SkillAuditReport(CamelModel):
+    """一个**已存在**技能当前发布版本的审计结论,面向详情页的只读展示。
+
+    与 ``SkillEvaluateResult`` 的区别是刻意的:那个是上传向导在提交前给作者看的实时预览,带完整
+    证据(``evidence``);这个是详情页给任何看得到该技能的人看的历史结论,**逐条发现里不含
+    ``evidence`` 原文** —— 那是证据片段,可能牵出技能内部实现或扫描规则细节,而详情端点本身不设
+    门禁(知道 id 即可访问)。类别、严重级和处置建议足以说明"审计发现了什么、该怎么改"。
+
+    ``available`` 为假表示这个技能没有可展示的审计记录(老数据,或从未审计过),此时其余字段为空,
+    前端据此显示"未审计"而不是"通过"。
+    """
+
+    available: bool = False
+    # pass | suspect | danger（danger 一般不会出现在详情页:那种技能不会被存储）。
+    state: str | None = None
+    # 为什么是这个结论,一句话。
+    reason: str = ""
+    coverage: str = ""
+    checks: list[AuditCheck] = []
