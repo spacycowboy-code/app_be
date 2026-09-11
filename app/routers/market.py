@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -183,12 +183,16 @@ def record_download(
 
     Only **synced** items can be served: a manual item has no GitLab project
     behind it, just a link someone typed. Serving those would mean trusting a
-    user-supplied URL, which is the same hole in a different shape.
+    user-supplied URL, which is the same hole in a different shape. Items whose
+    package lives upstream (``external_url``, set by the IVC/RVC index sync) are
+    the one exception, and they are answered with a 307 rather than proxied — the
+    portal never fetches those bytes either.
 
-    The download event is recorded **before** the transfer, and a failed fetch
-    raises. Recording after a successful transfer would look tidier but loses
-    every attempt that failed — and "nobody can download it" is precisely the
-    thing the counter should make visible.
+    The download event is recorded **before the transfer** but **after the static
+    preconditions**. A failed fetch still counts, deliberately: "nobody can
+    download it" is precisely the thing the counter should make visible. An item
+    that has no package *at all* does not count, because that failure never
+    resolves — counting it inflates the number permanently and invisibly.
     """
     item = db.get(RpAiMarketItem, item_id)
     if item is None:
@@ -199,6 +203,23 @@ def record_download(
     # is that handlers stop trusting a client-supplied eid.
     downloader = acting_eid(request, eid)
     _require_installable(item, downloader)
+
+    # **静态前置条件挡在记流水之前，瞬时失败挡在之后。** 两者性质不同，不能共用一侧：
+    #
+    # * 「这个条目根本没有包」是永久事实 —— 一个只有链接的登记条目永远不会变成可下载。把它记成
+    #   一次下载，计数就永久偏高，而且看不出任何异常：那一行说「有人下载过」，而事实是那个人拿到
+    #   了一个报错弹窗。
+    # * 「GitLab 这会儿取不到包」是瞬时失败，记在前面是**有意**的（见下面 502 那段）——
+    #   「大家都下不下来」这件事必须能从计数里看出来。
+    #
+    # 条件里必须带上 ``externally_hosted``：上游托管的条目 id 不是 ``gl-`` 开头，但它有地址、
+    # 下载是通的。漏掉这一项会把刚接进来的 agent 全部挡死，而症状是「下载按钮点了没反应」。
+    if not item.externally_hosted and not item.id.startswith("gl-"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "该项目不是从 GitLab 同步来的，没有可下载的代码包；请改用它的仓库地址",
+        )
+
     db.add(
         RpAiMarketDownload(
             item_id=item_id,
@@ -208,11 +229,17 @@ def record_download(
     )
     db.commit()
 
-    if not item.id.startswith("gl-"):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "该项目不是从 GitLab 同步来的，没有可下载的代码包；请改用它的仓库地址",
-        )
+    # 上游托管的包：跳过去，不在这边取字节。放在记流水之后是对的 —— 这是一条**成功**路径，
+    # 跳转本身就是下载。
+    #
+    # 307 而不是 302：302 允许客户端把方法改成 GET，而这是一个 POST；被改写后 Nexus 那边看到的
+    # 是一个它不认的请求，症状是浏览器里一个说不清的失败而门户日志干净。技能侧
+    # （``skills.py`` 的下载路由）已经是 307，这里保持一致。
+    #
+    # 注意前端必须用 ``<a href>`` 而不是 XHR 去打这个端点：XHR 跟不了到 Nexus 的跨域 307，
+    # 只显示 Network error，而服务端日志完全正常。2026-09-01 在技能侧踩过一次。
+    if item.externally_hosted:
+        return RedirectResponse(item.external_url, status_code=307)
     project_id = item.id[3:]
     try:
         blob = fetch_repo_archive(project_id)

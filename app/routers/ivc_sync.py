@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models.category import RpAiCategory
+from app.models.market import RpAiMarketItem
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.schemas.common import CamelModel
@@ -240,15 +241,7 @@ def _run_sync(
             continue
 
         if entry.kind != "skill":
-            # agent 走的是包上传管线（建 GitLab 项目、推送、打 tag），而那条路要包体。等防火墙
-            # 放行、或改成连包一起上传时再接，现在明确跳过而不是勉强登记成一个技能。
-            counts["skipped"] += 1
-            outcomes.append(
-                IvcSyncOutcome(
-                    kind=entry.kind, id=entry.id, name=entry.name, action="skipped",
-                    detail="agent 走包上传管线，需要包体，等 Nexus 可达后再同步",
-                )
-            )
+            _upsert_agent(db, entry, directory, outcomes, counts)
             continue
 
         sid = f"{ID_PREFIX}{entry.id}"
@@ -295,6 +288,91 @@ def _run_sync(
                 kind=entry.kind, id=sid, name=entry.name, action=action, detail=detail
             )
         )
+
+def _upsert_agent(
+    db: Session,
+    entry: ivc_index.Entry,
+    directory: DirectoryDepartments,
+    outcomes: list[IvcSyncOutcome],
+    counts: dict[str, int],
+) -> None:
+    """把一个 agent 登记进 **Agent 市场**（``rp_ai_market_item``），下载转往 Nexus。
+
+    **为什么不再跳过。** 原先这里明确跳过 agent，理由是"agent 走包上传管线（建 GitLab 项目、
+    推送、打 tag），而那条路要包体"。那个理由只对**上传**成立：登记一个目录条目根本不需要包体，
+    技能侧从 2026-09 起就是这么做的（``external_url`` + 下载时 307 转 Nexus）。真正缺的是市场
+    条目上没有外链字段，那两列现在补上了。
+
+    **为什么落市场表而不是技能表。** agent 在门户里是 Agent Market 的东西，塞进 ``rp_ai_skill``
+    会让它出现在 Skill Market 的列表和技能的报告口径里 —— 一个分类错误会同时污染两边的数字。
+
+    **``service_type`` 写 ``code``。** 它是一个可下载的包，不是一个在线服务；写 ``cloud`` 会让
+    卡片去展示一个不存在的服务地址。
+
+    **``creator`` 也写工号。** 它没有外键，但报告的归属链是 ``rp_ai_portal`` 那张表框死的
+    （``build_people``），所以还要 ``ensure_portal_user`` 补一行带部门的用户行 —— 否则这个 agent
+    落进「无法归属」，而且不报错。
+    """
+    aid = f"{ID_PREFIX}{entry.id}"
+    item = db.get(RpAiMarketItem, aid)
+    if item is None:
+        item = RpAiMarketItem(
+            id=aid,
+            name=entry.name,
+            item_type="agent",
+            service_type="code",
+            source=IVC_SOURCE,
+            category_id=IVC_CATEGORY_ID,
+            status="approved",
+        )
+        db.add(item)
+        action, detail = "created", ""
+    else:
+        changed = []
+        if item.version != entry.version:
+            changed.append(f"版本 {item.version} -> {entry.version}")
+        if item.external_url != entry.download_url:
+            changed.append("下载地址")
+        if item.description != entry.description:
+            changed.append("描述")
+        action = "updated" if changed else "unchanged"
+        detail = "；".join(changed)
+
+    item.description = entry.description
+    item.version = entry.version
+    item.tags = entry.tags
+    item.author = entry.eid
+    item.creator = entry.eid
+    item.external_url = entry.download_url
+    item.external_source = IVC_SOURCE
+    # 内容不在我们这边，这两个必须留空 —— 填了会让下载路径去 GitLab 找一个不存在的项目。
+    item.repo_url = None
+    item.service_url = None
+
+    if entry.eid:
+        ensure_portal_user(
+            db,
+            entry.eid,
+            display_name=entry.display_name,
+            department=directory.department_of(entry.eid),
+            origin="import",
+            lookup_directory=False,
+            promote_display_name=True,
+        )
+
+    # runtime 进 detail 而不是进某个字段：门户没有"这个包是给哪个 runtime 的"这个概念，而索引里
+    # 一个 agent 可以有多个 runtime（今天都只有一个）。解析器已经在多于一个时挂 problem，这里
+    # 只把选中的那个说出来，免得操作者以为两个 runtime 都登记进来了。
+    if entry.runtime:
+        detail = f"{detail}；runtime={entry.runtime}" if detail else f"runtime={entry.runtime}"
+
+    counts[action] += 1
+    outcomes.append(
+        IvcSyncOutcome(
+            kind=entry.kind, id=aid, name=entry.name, action=action, detail=detail
+        )
+    )
+
 
 def _ensured_user(
     db: Session,
