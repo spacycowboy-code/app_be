@@ -77,3 +77,30 @@ def require_dashboard_eid(request: Any, action: str) -> str:
     if eid not in get_settings().dashboard_eid_list:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"你没有{action}的权限。")
     return eid
+
+
+def require_rsw_page_eid(request: Any, action: str) -> str:
+    """Only the EIDs allowed on Admin -> RSW may do ``action``.
+
+    Deliberately a **different, wider** list than ``require_dashboard_eid``.
+    ``dashboard_eids`` guards the department usage report, which names every
+    individual and their usage; the RSW page guards one organisation's own asset
+    sync and who may edit its R&D Guide. Reusing one list for both meant that
+    "let this person run the sync" also handed over 950 people's names and usage
+    — which is why ECUIDEN was taken off that list on 2026-09-02 and lost the
+    page with it. See ``Settings.rsw_extra_page_eids``.
+
+    Shaped exactly like ``require_dashboard_eid`` on purpose: the two differ only
+    in which list they consult, and a reader comparing them should see that and
+    nothing else.
+    """
+    from fastapi import HTTPException, status
+
+    from app.config import get_settings
+
+    eid = str(getattr(getattr(request, "state", None), "eid", "") or "").strip().upper()
+    if not eid:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "未登录。")
+    if eid not in get_settings().rsw_page_eid_list:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"你没有{action}的权限。")
+    return eid

@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.repositories import gerrit_content
-from app.services.eids import require_dashboard_eid
+from app.services.eids import require_rsw_page_eid
 from app.services.gerrit_assets import sync_ai_assets
 
 router = APIRouter(prefix="/api/integrations/gerrit", tags=["gerrit-sync"])
@@ -70,8 +70,11 @@ def sync_now(request: Request, db: Session = Depends(get_db)) -> dict:
     """给 Admin 页面上那个按钮。和上面同一段逻辑、同一份返回体。
 
     **不看 ``GERRIT_SYNC_TOKEN``**:那个 token 管的是"没有会话的调用方凭什么进来",而这里
-    调用方已经登录并且在 ``dashboard_eids`` 里。让页面也依赖那个 token 会带来一个很难查的
+    调用方已经登录并且在 RSW 页那张名单里。让页面也依赖那个 token 会带来一个很难查的
     故障:token 忘配时页面报 503「未启用」,而人明明有权限。
+
+    闸门是 ``require_rsw_page_eid`` 而不是 ``require_dashboard_eid``:这一页只管 RSW
+    自己的资产，不该要求调用者同时有看逐人使用报告的权限（见 ``Settings.rsw_extra_page_eids``）。
     """
-    require_dashboard_eid(request, "同步 Gerrit 资产")
+    require_rsw_page_eid(request, "同步 Gerrit 资产")
     return _run(db)

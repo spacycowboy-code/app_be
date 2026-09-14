@@ -2,6 +2,9 @@
 
 GET  /api/rsw/rdg/stages          — full stage+node tree (all authenticated users)
 GET  /api/rsw/rdg/tool-mappings   — node_key → [tool_name] map (all authenticated users)
+GET  /api/rsw/rdg/admins          — who may edit the guide (rsw_admin only)
+POST /api/rsw/rdg/admins          — add an editor (rsw_admin only)
+DELETE /api/rsw/rdg/admins/{eid}  — remove an editor, never yourself (rsw_admin only)
 POST /api/rsw/rdg/nodes           — create node (rsw_admin only)
 PUT  /api/rsw/rdg/nodes/{id}      — update node (rsw_admin only)
 DELETE /api/rsw/rdg/nodes/{id}    — delete node + its tool mappings (rsw_admin only)
