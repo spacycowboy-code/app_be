@@ -229,13 +229,26 @@ class Settings(BaseSettings):
     # **同时**守着上面那份逐人报告 —— 一张名单管两件权限面差得很远的事,所以给她一个同步
     # 按钮的同时也给了她每个人的姓名和用量。
     #
-    # 移除她因此也一并收走了 RSW 同步页。这是那次决定的已知代价,不是疏漏。真正的解法是把
-    # 这张名单拆成两个(一个窄的「能跑同步」名单 + 现在这个「能看逐人报告」名单),那是一次
-    # 独立改动;在拆之前,任何"只想给某人同步权限"的请求都会连带给出逐人报告。
+    # 移除她因此也一并收走了 RSW 同步页。这是那次决定的已知代价,不是疏漏。
+    #
+    # 2026-09-14 那个「真正的解法」做了:名单拆成两张,见下面的 `rsw_extra_page_eids`。
+    # 所以这段历史现在只是历史 —— 她重新拿到了 RSW 页,而这张名单一个人都没多。
     #
     # **生产没有设 DASHBOARD_EIDS 环境变量**(查过容器 env),所以这里的默认值就是线上实际
     # 生效的名单 —— 改它才真的生效,前端 dashboard-access.ts 那份只决定显不显示入口。
     dashboard_eids: str = "EZHGMIO,ADMINMM,EHUIWUU,EBAOXUE"
+
+    # 上面那个「真正的解法」现在做了：这就是那张窄名单。
+    #
+    # 它只守 Admin -> RSW 那一页（Gerrit `radio/ai-assets` 同步 + 谁能编辑 R&D Guide），
+    # **不**守逐人使用报告、Dashboard、API Errors。所以往这里加人给出的就只是一个组织
+    # 自己的资产管理页，不再顺带把 950 人的姓名与用量给出去。
+    #
+    # 这里写的是**额外**的人，不是完整名单 —— 完整名单由 `rsw_page_eid_list` 拼出来，
+    # 等于 dashboard_eids + 这些人。写成增量而不是超集是为了不漂：写成完整名单的话，
+    # 以后往 dashboard_eids 加人就必须记得同时往这里加一遍，而漏了不报错、症状是那个人
+    # 能看逐人报告却看不到 RSW 页。
+    rsw_extra_page_eids: str = "ECUIDEN"
     # --- Department usage report ---------------------------------------------
     # Snapshot of the Microsoft Graph reporting tree — the same graph the Teams org
     # chart draws. Every head count and every percentage in the report is derived
@@ -323,6 +336,22 @@ class Settings(BaseSettings):
     @property
     def dashboard_eid_list(self) -> list[str]:
         return [e.strip().upper() for e in self.dashboard_eids.split(",") if e.strip()]
+
+    @property
+    def rsw_page_eid_list(self) -> list[str]:
+        """谁能看 Admin -> RSW 那一页 = dashboard 名单 + ``rsw_extra_page_eids``。
+
+        是超集而不是另一张独立名单：能看逐人报告的人本来就能看这一页，让他们为了点一次
+        同步按钮再被单独加一遍没有意义。反过来不成立 —— 这才是这次拆分的全部目的。
+
+        顺序稳定、去重，因为 403 的判定只看包含关系，但这个列表也会被测试逐项比对。
+        """
+        seen: list[str] = list(self.dashboard_eid_list)
+        for raw in self.rsw_extra_page_eids.split(","):
+            eid = raw.strip().upper()
+            if eid and eid not in seen:
+                seen.append(eid)
+        return seen
 
 @lru_cache
 def get_settings() -> Settings:
