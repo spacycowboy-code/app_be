@@ -95,14 +95,18 @@ UNKNOWN = "（查不到部门）"
 #: - ``PO`` is the org chart's segment for the group the portal calls ``pmo`` /
 #:   "PMO" (``dept_groups.DEPT_GROUP_MAP`` maps ``BNEW RTE RP PO`` -> ``pmo``).
 #:   Two names for one department in two places the same person reads.
-#: - ``QA`` follows the portal's group label, renamed to ``Q&A``.
+#:
+#: ``QA`` used to be here, renamed to "Q&A". It was removed: "Q&A" reads as
+#: "questions and answers", while the department is Quality Assurance, so the
+#: rename made the report say something the department is not. The code and the
+#: portal's group label are both ``QA`` now, so no mapping is needed and the
+#: identity fallback below is what serves it.
 #:
 #: ``SWD`` is deliberately **not** here: the portal calls that group "Radio SW"
 #: with the short code ``RSW``, so a mapping would be a third spelling rather than
 #: a reconciliation. Left for whoever decides what that column should say.
 BRANCH_DISPLAY: dict[str, str] = {
     "PO": "PMO",
-    "QA": "Q&A",
 }
 
 

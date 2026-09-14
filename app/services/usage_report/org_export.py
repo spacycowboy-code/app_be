@@ -48,7 +48,7 @@ def build_structure(conn: Connection, org_snapshot: object = None) -> dict:
     for signum, dept in placement.items():
         record = people.get(signum, {})
         # branch_display was applied when the Dept was built, so big_label is
-        # already the name the page shows (PO reads "PMO", QA reads "Q&A").
+        # already the name the page shows (PO reads "PMO").
         dept_names.setdefault(dept.big_key, dept.big_label)
         teams.setdefault(dept.big_key, {}).setdefault(dept.small_key, []).append(
             {

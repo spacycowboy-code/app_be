@@ -174,7 +174,7 @@ GROUP_CATEGORY_LABELS: dict[str, str] = {
     "radio-design-2": "Radio Design 2",
     "radio-design-3": "Radio Design 3",
     "radio-sw": "Radio SW",
-    "qa": "Q&A",
+    "qa": "QA",
     "pmo": "PMO",
     FALLBACK_GROUP_ID: "Others",
 }
