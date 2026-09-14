@@ -481,7 +481,9 @@ async def publish_package(
             try:
                 project = glw.create_project(
                     slug=_slug(name), name=name, description=description or None,
-                    target=target,
+                    # 按分类落到子组(`<父组>/<分类 slug>`),和技能仓内路径同一手法。
+                    # 子组没建就回落父组 —— 不能因为缺一层目录让上传失败。
+                    target=glw.subgroup_target(target, cid),
                 )
             except glw.CredentialExpired as exc:
                 raise HTTPException(
