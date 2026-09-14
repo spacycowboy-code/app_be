@@ -35,7 +35,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app.config import get_settings
@@ -283,6 +283,60 @@ def namespace_id(target: UploadTarget) -> int:
         raise GitLabWriteError(f"找不到 GitLab 组 {path}")
     _namespace_ids[path] = int(group["id"])
     return _namespace_ids[path]
+
+
+#: `(父组路径, 分类 slug)` → 真正要用的组路径。缓存的是**判定结果**而不是 id:回落发生在
+#: 「子组不存在」这个事实上,而那件事不会在一次进程生命周期里反复变。
+_group_paths: dict[tuple[str, str], str] = {}
+
+
+def subgroup_target(target: UploadTarget, category_slug: str | None) -> UploadTarget:
+    """把上传目标收窄到分类子组(`<父组>/<分类 slug>`);子组不存在就原样返回父组目标。
+
+    **为什么按分类分子组。** 技能侧早就这么做了 —— 仓内路径是 `<category_slug>/<目录>`
+    (`skill_storage.py`)。tool/agent 这边此前所有人的包都平铺在同一个组里,于是「这个包属于
+    哪个组织」在 GitLab 上看不出来,只能回门户查。两侧用同一个手法,以后新增一个部门只要在
+    GitLab 上建一个同名子组就自动生效,不用改代码。
+
+    **子组不存在时回落父组,不是报错。** 上传是用户面对的动作,不能因为管理员还没建那个子组
+    就失败 —— 那个失败对上传者毫无意义、也无从自救。回落之后包仍然进得去、条目仍然正确,只是
+    在 GitLab 上少一层目录。代价是「子组建错名字」会静默地表现为「都堆在父组」,所以返回值里
+    带上真实用的路径、由调用方记进日志。
+
+    **不自动建子组。** 建组是写操作,而这个凭据的角色是给「建项目」用的;让它顺手建组会把写
+    权限的用途悄悄扩大一档。缺子组由人去建,一次的事。
+
+    token 没配时原样返回:真正那句「哪个变量没配」的消息在后面 `create_project` 那步给,
+    在这里抢先抛一个措辞不同的错只会让人去查错的地方。
+    """
+    slug = (category_slug or "").strip().strip("/")
+    if not slug or not target.token:
+        return target
+    key = (target.group_path, slug)
+    cached = _group_paths.get(key)
+    if cached is None:
+        candidate = f"{target.group_path}/{slug}"
+        try:
+            group = _api(
+                "GET",
+                f"groups/{urllib.parse.quote(candidate, safe='')}",
+                target=target,
+            )
+            found = isinstance(group, dict) and "id" in group
+        except GitLabWriteError:
+            # 404(子组没建)、403、以及任何读不到的情况都按「没有这个子组」处理。读不到
+            # 子组的凭据也建不进去,回落父组是这两种情况下都对的答案。
+            found = False
+        cached = candidate if found else target.group_path
+        _group_paths[key] = cached
+        if cached == target.group_path:
+            log.info(
+                "GitLab 子组 %s/%s 不存在,包放在父组 %s 下",
+                target.group_path, slug, target.group_path,
+            )
+    if cached == target.group_path:
+        return target
+    return replace(target, group_path=cached)
 
 
 def create_project(
