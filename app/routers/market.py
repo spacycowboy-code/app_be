@@ -24,6 +24,7 @@ from app.schemas.market import (
     MarketSyncResult,
 )
 from app.services import gitlab_projects as glw
+from app.services import rdg_tags
 from app.services.archives import rewrap_single_top_dir
 from app.services.asset_stats import attach_market_stats
 from app.services.auth_tokens import create_scoped_token
@@ -396,6 +397,9 @@ def create_item(
             )
 
     data = payload.model_dump()
+    # ``rdg_tools`` 不是这张表上的列(它落在 ``rp_ai_rdg_asset_tag``),所以要先摘出来 ——
+    # 留在 dict 里会让下面的 ``RpAiMarketItem(**data)`` 直接 TypeError。
+    wanted_rdg_tools = data.pop("rdg_tools", None) or []
 
     # Category: same shape as the skill upload path (routers/upload.py) on
     # purpose — one behaviour for "which group does this belong to", not two.
@@ -435,6 +439,14 @@ def create_item(
 
     item = RpAiMarketItem(id=item_id, source="manual", creator=creator, **data)
     db.add(item)
+    # R&D Guide 关联和条目一起落。校验用**已经解析并校验过的** ``category_id``(上面那一段
+    # 会在为空时按部门兜底),不是 ``payload.category_id`` —— 后者可能是空的,那样一个 RSW 的人
+    # 登记条目挂关联会被拒,而他挂的是对的。
+    if wanted_rdg_tools:
+        rejection = rdg_tags.rejection_for(db, wanted_rdg_tools, category_id)
+        if rejection:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, rejection)
+        rdg_tags.set_tags(db, "item", item_id, wanted_rdg_tools)
     db.commit()
     db.refresh(item)
     return item
@@ -465,6 +477,9 @@ def delete_item(
             else "这个条目没有登记上传者,只有管理员可以删除",
         )
     db.delete(item)
+    # 关联表刻意没有外键(见 ``models/rdg.py``),所以级联删除得显式做。不清的话 R&D Guide
+    # 卡片上那个数字会把已经不存在的条目算进去 —— 点进去是空的计数比没有计数更坏。
+    rdg_tags.forget(db, "item", item_id)
     db.commit()
 
 
@@ -519,6 +534,22 @@ def update_item(
     item.tags = payload.tags or []
     item.author = payload.author
     item.version = payload.version
+
+    # R&D Guide 关联。``None`` 是「这次不改」,``[]`` 是「清空」—— 见 ``MarketItemCreate``
+    # 那个字段的注释。区分这两者是必须的:编辑弹窗如果不带这个字段(比如它压根不显示这一格),
+    # 按「清空」处理就会在用户改个描述的时候静默把关联删掉。
+    #
+    # 校验用**这次要落的分类**而不是条目原来的分类:这个接口能改 ``category_id``,所以
+    # 「把 RSW 的资产改成别的部门」这一步要连带否掉它身上的关联,否则那些关联会留在一个
+    # 已经不属于 RSW 的资产上,而卡片仍然把它算进去。
+    if payload.rdg_tools is not None:
+        rejection = rdg_tags.rejection_for(db, payload.rdg_tools, payload.category_id)
+        if rejection:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, rejection)
+        rdg_tags.set_tags(db, "item", item.id, payload.rdg_tools)
+    elif payload.category_id != rdg_tags.RSW_CATEGORY_ID:
+        # 分类被改出 RSW,而这次没提关联。留着会让卡片继续算一个不属于 RSW 的资产。
+        rdg_tags.forget(db, "item", item.id)
 
     db.commit()
     db.refresh(item)

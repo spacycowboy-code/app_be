@@ -23,6 +23,15 @@ class MarketItemCreate(CamelModel):
     category: str | None = None
     dept_color: str | None = None
     tags: list[str] = Field(default_factory=list)
+    #: 这个资产对应 R&D Guide 上的哪几个工具。可选、可多个。
+    #:
+    #: **和上面那个 ``tags`` 是两件事。** ``tags`` 是上传者自由输入的关键词;这一个的取值只能
+    #: 来自 R&D Guide 现有的工具名(``GET /api/rsw/rdg/tools``),而且只有 Radio SW 的资产能用。
+    #: 混进 ``tags`` 的话任何人手打一个同名词就能把自己的资产塞进 R&D Guide 的卡片计数里。
+    #:
+    #: ``None`` 与 ``[]`` 在编辑接口上**不是一回事**:``None`` 是「这次不改关联」,``[]`` 是
+    #: 「清空关联」。建条目时两者等价。
+    rdg_tools: list[str] | None = None
     author: str | None = None
     version: str | None = "1.0"
 

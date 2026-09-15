@@ -49,6 +49,7 @@ from app.models.market_version import RpAiMarketItemVersion
 from app.models.user import RpAiPortal
 from app.services import agent_package as pkg
 from app.services import gitlab_projects as glw
+from app.services import rdg_tags
 from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
 from app.services.eids import acting_eid
 from app.services.gitlab_sync import GitLabError, fetch_repo_archive
@@ -328,6 +329,11 @@ async def publish_package(
     description: str | None = Form(None),
     category_id: str | None = Form(None, alias="categoryId"),
     tags: str | None = Form(None),
+    rdg_tools: str | None = Form(
+        None,
+        alias="rdgTools",
+        description="R&D Guide tool names this package belongs to (JSON array or comma-separated)",
+    ),
     launch: str = Form(...),
     runtime: str = Form("oneshot"),
     keep: str | None = Form(None, description="JSON 数组或换行分隔"),
@@ -437,6 +443,17 @@ async def publish_package(
             category_label = existing.category or cid
         else:
             cid, category_label = _resolve_category(db, acting, category_id)
+        # R&D Guide 关联**只在首次上传时写**,和下面「更新时只动版本号」是同一条边界:换内容
+        # 和改说明是两个入口,改关联属于卡片上的「编辑」(``PUT /api/market/{id}``)。所以更新
+        # 路径上连解析都不做 —— 解析了又不用,下一个人会以为它生效。
+        #
+        # 校验放在**建 GitLab 项目、推包之前**:这个端点后面会在 GitLab 上留下真实痕迹(新项目、
+        # 一次提交、一个 tag),一个名字打错的请求不该先产生那些再被拒。
+        parsed_rdg_tools = _parse_tags(rdg_tools) if existing is None else []
+        if existing is None:
+            rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_tools, cid)
+            if rdg_rejection:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, rdg_rejection)
         keep_list = _parse_keep(keep)
         prereq_list = _parse_keep(prerequisites)
         declared = pkg.Declared(
@@ -561,6 +578,10 @@ async def publish_package(
             item.category = category_label
             item.tags = _parse_tags(tags)
             item.author = item.author or acting
+            # 关联和条目一起落,同一个事务 —— 条目写成了而关联没写成,卡片上的数字就少一个,
+            # 而没人会发现。仅首次上传写,理由见上面解析处。
+            if parsed_rdg_tools:
+                rdg_tags.set_tags(db, "item", item.id, parsed_rdg_tools)
         # 更新时**只动版本号**。名字、描述、分类、标签、类型都不碰 —— 换内容和改说明是两个
         # 入口(卡片上的「编辑」管说明,这里管内容),而它们原来共用一个表单:上传新版本时
         # 对话框里带着什么,条目上的这几格就被改成什么,顺手改掉条目名而上传者只是想传个包。
