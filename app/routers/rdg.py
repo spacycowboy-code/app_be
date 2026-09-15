@@ -2,6 +2,10 @@
 
 GET  /api/rsw/rdg/stages          — full stage+node tree (all authenticated users)
 GET  /api/rsw/rdg/tool-mappings   — node_key → [tool_name] map (all authenticated users)
+GET  /api/rsw/rdg/tools           — the tool names an asset may be tagged with
+GET  /api/rsw/rdg/tool-assets     — tool_name → count of portal assets tagged with it
+GET  /api/rsw/rdg/tool-assets/{tool_name} — the assets behind one of those counts
+GET  /api/rsw/rdg/asset-tags/{kind}/{id}  — which tools one asset is tagged with
 GET  /api/rsw/rdg/admins          — who may edit the guide (rsw_admin only)
 POST /api/rsw/rdg/admins          — add an editor (rsw_admin only)
 DELETE /api/rsw/rdg/admins/{eid}  — remove an editor, never yourself (rsw_admin only)
@@ -19,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.rdg import RpAiRdgAdmin, RpAiRdgNode, RpAiRdgToolMapping
+from app.services import rdg_tags
 
 router = APIRouter(prefix="/api/rsw/rdg", tags=["rsw-rdg"])
 
@@ -103,6 +108,41 @@ def get_tool_mappings(db: Session = Depends(get_db)) -> dict[str, list[str]]:
     return result
 
 
+@router.get("/tools")
+def get_tools(db: Session = Depends(get_db)) -> list[str]:
+    """上传表单那个「关联 R&D Guide 工具」下拉框的内容。
+
+    值是 ``tool-mappings`` 的 distinct ``tool_name``,不是另写的一份名单 —— 写入时的白名单
+    走同一个函数,所以下拉框里能选的和后端肯收的不可能不一致。见 ``services/rdg_tags.py``。
+    """
+    return rdg_tags.valid_tool_names(db)
+
+
+@router.get("/tool-assets")
+def get_tool_asset_counts(db: Session = Depends(get_db)) -> dict[str, int]:
+    """{ tool_name: 挂在它下面的门户资产数 },R&D Guide 卡片那一行读这个。
+
+    只返回有资产的工具,所以前端拿到的键就是「该显示那一行的卡片」。数字为 0 的不返回:
+    一张写着「0 个相关资产」的卡片是噪声。
+    """
+    return rdg_tags.counts_by_tool(db)
+
+
+@router.get("/tool-assets/{tool_name:path}")
+def get_tool_assets(tool_name: str, db: Session = Depends(get_db)) -> list[dict]:
+    """某个工具下挂着的资产清单,卡片点开之后那一层。
+
+    路径参数用 ``:path`` 是因为工具名字里有空格和别的字符(``AC Onboarding Assistant``、
+    ``DP Slot Info Decode``),名字本身就是这套东西的键 —— 见 ``services/rdg_tags.py`` 里
+    关于「为什么用名字不用 id」的注释。
+
+    **工具名字不存在与工具下没有资产,都返回空列表。** 不区分是刻意的:这个端点的调用方是
+    卡片,而卡片的名字来自 tool-mappings,不可能问出一个不存在的名字;真会问出来的场景是
+    工具刚被改名,那时候「空」正是事实。
+    """
+    return rdg_tags.assets_for_tool(db, tool_name)
+
+
 # ── Write endpoints (rsw_admin only) ─────────────────────────────────────────
 
 class NodeCreate(BaseModel):
@@ -123,6 +163,23 @@ class NodeUpdate(BaseModel):
 class ToolMappingUpdate(BaseModel):
     nodeKey: str
     toolNames: list[str]
+
+
+@router.get("/asset-tags/{kind}/{asset_id}")
+def get_asset_tags(
+    kind: str, asset_id: str, db: Session = Depends(get_db)
+) -> list[str]:
+    """一个资产现在挂在哪些工具上。
+
+    编辑弹窗回填用。**没有这个端点,「挂错了」就没有出路** —— 编辑接口把 ``rdgTools`` 当成
+    整体替换,前端不知道原值就只能要么不发(不改)要么发一份新的(覆盖),没法在原来的基础上改。
+
+    ``kind`` 只认 ``skill`` 与 ``item``,别的返回空列表而不是 400:调用方是前端两个已知的
+    弹窗,传别的值是代码错误,而这个端点的答案对代码错误来说「空」比一个错误码更好读。
+    """
+    if kind not in ("skill", "item"):
+        return []
+    return rdg_tags.tags_for(db, kind, asset_id)
 
 
 @router.get("/admins")

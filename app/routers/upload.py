@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.category import RpAiCategory
 from app.services.dept_groups import PSEUDO_CATEGORY_IDS, group_for_eid
+from app.services import rdg_tags
 from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 from app.models.version import RpAiSkillVersion
@@ -230,6 +231,11 @@ async def upload_skill(
     description: str | None = Form(None),
     author: str | None = Form(None, description="Display name; defaults to owner EID"),
     tags: str | None = Form(None, description="JSON array or comma-separated"),
+    rdg_tools: str | None = Form(
+        None,
+        alias="rdgTools",
+        description="R&D Guide tool names this skill belongs to (JSON array or comma-separated)",
+    ),
     instructions: str | None = Form(None),
     skill_id: str | None = Form(None, alias="id"),
     file: UploadFile | None = File(None),
@@ -302,6 +308,13 @@ async def upload_skill(
             status.HTTP_400_BAD_REQUEST, f"Unknown group '{category_id}'."
         )
     category_label = category.label
+
+    # R&D Guide 关联:**在动任何东西之前**校验。这个端点后面还要跑安全审计、往仓库推文件、
+    # 建复核 MR —— 一个名字打错的请求不该先产生这些副作用再被拒。
+    parsed_rdg_tools = _parse_tags(rdg_tools)
+    rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_tools, category_id)
+    if rdg_rejection:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, rdg_rejection)
 
     # Build manifest metadata (persisted alongside the files).
     parsed_tags = _parse_tags(tags)
@@ -397,6 +410,14 @@ async def upload_skill(
         skill.version = result.version
         skill.storage_path = result.storage_path
         skill.repo_commit = result.commit_sha
+        # R&D Guide 关联跟着这一版一起落。**只在直接发布这条路上写** —— 上面那条路
+        # (新版本要人工复核)把技能行整个 rollback 了,线上那一版一个字不动,所以这次表单里的
+        # 关联也不该生效:否则一份还没过审的上传就能改掉线上资产在 R&D Guide 上的位置。
+        # 那条路复核合并时会把暂存的内容搬过去,关联要不要一起搬是那条路自己的问题,今天
+        # 不在这个功能的范围里(暂存表里没有这个字段,所以行为是「保持原样」而不是「丢掉」)。
+        if parsed_rdg_tools or rdg_tags.tags_for(db, "skill", resolved_id):
+            # 空清单也要写,那是「取消全部关联」。加个条件只为省掉常见情况下的两次查询。
+            rdg_tags.set_tags(db, "skill", resolved_id, parsed_rdg_tools)
         # One lifecycle field gates visibility; the audit verdict decides its value.
         # A pass goes live immediately, a suspect waits for the review MR to be
         # merged, and a danger verdict never reaches this point (nothing is stored).
