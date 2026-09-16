@@ -21,9 +21,10 @@ from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
 from app.models.rdg import RpAiRdgAdmin, RpAiRdgNode, RpAiRdgToolMapping
-from app.services import rdg_tags
+from app.services import rdg_tags, rsw_admin
 
 router = APIRouter(prefix="/api/rsw/rdg", tags=["rsw-rdg"])
 
@@ -40,7 +41,12 @@ STAGES_META = [
 
 
 def _is_rsw_admin(eid: str, db: Session) -> bool:
-    return db.scalar(select(RpAiRdgAdmin).where(RpAiRdgAdmin.eid == eid.upper())) is not None
+    """保留这个名字给本模块内部用,判断委托给服务层。
+
+    判断本身挪进 ``services/rsw_admin.py`` 是因为 ``/api/auth/me`` 也要同一个答案 —— 两处各写
+    一遍会让界面显示一个按钮而后端拒绝它,且两边都不报错。
+    """
+    return rsw_admin.is_rsw_admin(db, eid)
 
 
 def _require_rsw_admin(request: Request, db: Session) -> str:
@@ -186,10 +192,18 @@ def get_asset_tags(
 def list_admins(
     request: Request,
     db: Session = Depends(get_db),
-) -> list[str]:
-    """List RSW admin EIDs. Requires rsw_admin."""
+) -> list[dict]:
+    """谁能编辑 R&D Guide,带来源。需要 rsw_admin。
+
+    返回 ``[{eid, source}]`` 而不是一串工号:权限有两条来源(表里显式加的、以及门户 admin 名单),
+    而**只有显式那种能在界面上移除**。不带来源的话界面只能给所有人画一个移除按钮,而按在门户
+    admin 上会 404 —— 一个点了报错的按钮比没有按钮更坏。
+
+    这也修掉一个更早的问题:在门户 admin 也算 RSW admin 之前,一个门户 admin 打开这一页会看到
+    一份不包含自己的名单,而他自己其实编辑得了 —— 一份与事实不符的名单。
+    """
     _require_rsw_admin(request, db)
-    return [r.eid for r in db.scalars(select(RpAiRdgAdmin)).all()]
+    return rsw_admin.effective_admins(db)
 
 
 @router.post("/admins", status_code=status.HTTP_201_CREATED)
@@ -221,6 +235,14 @@ def remove_admin(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot remove yourself.")
     row = db.scalar(select(RpAiRdgAdmin).where(RpAiRdgAdmin.eid == target))
     if not row:
+        # 分开说:这个人是门户 admin(有权限但没有可删的行)和这个人压根没有权限,是两种情况,
+        # 而对界面来说前者需要一句能读懂的解释。
+        if target in [e.upper() for e in get_settings().rsw_page_eid_list]:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"{target} 的权限来自门户 admin 名单,不在这里管理 —— "
+                "要收走就把他从门户 admin 名单里去掉。",
+            )
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Admin not found.")
     db.delete(row)
     db.commit()

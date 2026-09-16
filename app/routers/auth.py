@@ -22,9 +22,9 @@ from app.config import get_settings
 from app.database import get_db
 from app.models.category import RpAiCategory
 from app.models.login_event import RpAiLoginEvent
-from app.models.rdg import RpAiRdgAdmin
+from app.models.rdg import RpAiRdgAdmin  # noqa: F401  仅为注册模型；判断已移到 services.rsw_admin
 from app.models.user import RpAiPortal
-from app.services import ldap_auth
+from app.services import ldap_auth, rsw_admin
 from app.services.auth_tokens import create_token
 from app.services.dept_groups import verified_group
 
@@ -196,7 +196,9 @@ def me(request: Request, db: Session = Depends(get_db)) -> MeResponse:
     if not eid:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not signed in.")
     row = db.scalar(select(RpAiPortal).where(RpAiPortal.eid == eid))
-    is_rsw_admin = db.scalar(select(RpAiRdgAdmin).where(RpAiRdgAdmin.eid == eid.upper())) is not None
+    # 判断走 services/rsw_admin：这里和 rdg 路由的闸门必须给同一个答案，否则界面显示一个按钮
+    # 而后端拒绝它（或反过来），两边都不报错、只是不一致。
+    is_rsw_admin = rsw_admin.is_rsw_admin(db, eid)
     return MeResponse(
         eid=eid,
         displayName=getattr(request.state, "display_name", None),
