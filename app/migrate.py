@@ -7,7 +7,7 @@ creates any new tables (e.g. rp_ai_skill_version) with the utf8mb4 charset.
 Usage:
     python -m app.migrate
 """
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.database import Base, engine
 
@@ -322,6 +322,78 @@ def _column_type(conn, table: str, column: str) -> str | None:
     return None if row is None else str(row[0]).lower()
 
 
+def _migrate_asset_tags_to_nodes(db) -> None:
+    """把旧的「资产 -> 工具名」关联搬成「资产 -> 流程节点」。一次性,幂等。
+
+    2026-09-16 关联的对象改了一层:原先关的是 ``rp_ai_rdg_asset_tag.tool_name``(工具),现在关
+    ``rp_ai_rdg_asset_node.node_key``(流程节点)。Miao 的原话:「本来就是数字资产和 workflow
+    的关联」。
+
+    **怎么搬:反查那个工具挂在哪几道工序上。** ``rp_ai_rdg_tool_mapping`` 就是「工具挂在哪个
+    node_key 上」,所以「这个资产对应工具 T」在新口径下最接近的意思是「这个资产用在 T 所服务
+    的那几道工序上」。一行可能搬成多行,这是预期的 —— 一个工具跨多道工序是常态。
+
+    **``stage:*`` 那些 key 要排除。** 那张映射表里除了真实 node_key 还有 ``stage:development``
+    这类阶段级条目,它们不是流程节点(``rp_ai_rdg_node`` 里查不到),搬进来会得到点不开的卡片。
+
+    **旧表不删、旧行不删。** 删表和删行都不可逆,而这里只有个位数的行。留着的代价近乎零,换来
+    的是搬错了还能重来。判断"已经搬过"靠新表里有没有这一对,而不是靠删旧行 —— 所以重复执行
+    安全,而这个函数每次启动都会跑。
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    # 局部 import，跟着这个文件里 _seed_rdg 的风格 —— 模块顶层只留 Base/engine，避免
+    # 模型 import 顺序影响 create_all。
+    from app.models.rdg import RpAiRdgAssetNode, RpAiRdgNode, RpAiRdgToolMapping
+
+    insp = sa_inspect(db.get_bind())
+    if "rp_ai_rdg_asset_tag" not in insp.get_table_names():
+        return  # 全新库,没有要搬的东西
+
+    old_rows = db.execute(
+        text("SELECT asset_kind, asset_id, tool_name FROM rp_ai_rdg_asset_tag")
+    ).all()
+    if not old_rows:
+        return
+
+    # 工具 -> 它挂着的真实流程节点(排除 stage:* 与容器节点)
+    selectable = {
+        n.node_key
+        for n in db.scalars(select(RpAiRdgNode)).all()
+        if n.node_type != "parallel-group" and (n.label or "").strip()
+    }
+    nodes_of_tool: dict[str, set[str]] = {}
+    for m in db.scalars(select(RpAiRdgToolMapping)).all():
+        if m.node_key in selectable:
+            nodes_of_tool.setdefault(m.tool_name, set()).add(m.node_key)
+
+    existing = {
+        (r.asset_kind, r.asset_id, r.node_key)
+        for r in db.scalars(select(RpAiRdgAssetNode)).all()
+    }
+    added = 0
+    unmapped: list[str] = []
+    for kind, asset_id, tool_name in old_rows:
+        targets = nodes_of_tool.get(tool_name, set())
+        if not targets:
+            # 这个工具没挂在任何真实工序上(只有 stage:* 条目,或映射被删了)。不猜:
+            # 猜一个工序比没有关联更坏,它会让卡片上出现一个没人认领的数字。
+            unmapped.append(f"{kind}:{asset_id} -> {tool_name}")
+            continue
+        for node_key in sorted(targets):
+            if (kind, asset_id, node_key) in existing:
+                continue
+            db.add(RpAiRdgAssetNode(asset_kind=kind, asset_id=asset_id, node_key=node_key))
+            existing.add((kind, asset_id, node_key))
+            added += 1
+    if added:
+        db.commit()
+        print(f"  + rdg asset tags migrated to workflow nodes ({added} rows)")
+    if unmapped:
+        # 说出来而不是静默跳过:一条搬不过去的关联意味着有人的资产在新界面上会显示为"没关联"。
+        print(f"  ! {len(unmapped)} old tag(s) had no real workflow node, left behind: {unmapped}")
+
+
 def main() -> None:
     # 1) Create any missing tables.
     Base.metadata.create_all(bind=engine)
@@ -337,6 +409,11 @@ def main() -> None:
     # 3) Seed R&D Guide initial data (idempotent — skips if already present).
     with SessionLocal() as db:
         _seed_rdg(db)
+
+    # 3b) Move old「资产 -> 工具名」关联到「资产 -> 流程节点」。必须在 _seed_rdg 之后 ——
+    #     搬迁要按 rp_ai_rdg_tool_mapping 反查,那张表是上一步种下的。
+    with SessionLocal() as db:
+        _migrate_asset_tags_to_nodes(db)
 
     # 4) Add missing columns to existing tables (MySQL-specific introspection).
     #    On other dialects (e.g. sqlite in staging/tests) create_all above already

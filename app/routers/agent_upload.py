@@ -329,9 +329,9 @@ async def publish_package(
     description: str | None = Form(None),
     category_id: str | None = Form(None, alias="categoryId"),
     tags: str | None = Form(None),
-    rdg_tools: str | None = Form(
+    rdg_nodes: str | None = Form(
         None,
-        alias="rdgTools",
+        alias="rdgNodes",
         description="R&D Guide tool names this package belongs to (JSON array or comma-separated)",
     ),
     launch: str = Form(...),
@@ -449,9 +449,9 @@ async def publish_package(
         #
         # 校验放在**建 GitLab 项目、推包之前**:这个端点后面会在 GitLab 上留下真实痕迹(新项目、
         # 一次提交、一个 tag),一个名字打错的请求不该先产生那些再被拒。
-        parsed_rdg_tools = _parse_tags(rdg_tools) if existing is None else []
+        parsed_rdg_nodes = _parse_tags(rdg_nodes) if existing is None else []
         if existing is None:
-            rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_tools, cid)
+            rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_nodes, cid)
             if rdg_rejection:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, rdg_rejection)
         keep_list = _parse_keep(keep)
@@ -580,8 +580,8 @@ async def publish_package(
             item.author = item.author or acting
             # 关联和条目一起落,同一个事务 —— 条目写成了而关联没写成,卡片上的数字就少一个,
             # 而没人会发现。仅首次上传写,理由见上面解析处。
-            if parsed_rdg_tools:
-                rdg_tags.set_tags(db, "item", item.id, parsed_rdg_tools)
+            if parsed_rdg_nodes:
+                rdg_tags.set_tags(db, "item", item.id, parsed_rdg_nodes)
         # 更新时**只动版本号**。名字、描述、分类、标签、类型都不碰 —— 换内容和改说明是两个
         # 入口(卡片上的「编辑」管说明,这里管内容),而它们原来共用一个表单:上传新版本时
         # 对话框里带着什么,条目上的这几格就被改成什么,顺手改掉条目名而上传者只是想传个包。

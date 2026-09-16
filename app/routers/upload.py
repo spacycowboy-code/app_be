@@ -231,9 +231,9 @@ async def upload_skill(
     description: str | None = Form(None),
     author: str | None = Form(None, description="Display name; defaults to owner EID"),
     tags: str | None = Form(None, description="JSON array or comma-separated"),
-    rdg_tools: str | None = Form(
+    rdg_nodes: str | None = Form(
         None,
-        alias="rdgTools",
+        alias="rdgNodes",
         description="R&D Guide tool names this skill belongs to (JSON array or comma-separated)",
     ),
     instructions: str | None = Form(None),
@@ -311,8 +311,8 @@ async def upload_skill(
 
     # R&D Guide 关联:**在动任何东西之前**校验。这个端点后面还要跑安全审计、往仓库推文件、
     # 建复核 MR —— 一个名字打错的请求不该先产生这些副作用再被拒。
-    parsed_rdg_tools = _parse_tags(rdg_tools)
-    rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_tools, category_id)
+    parsed_rdg_nodes = _parse_tags(rdg_nodes)
+    rdg_rejection = rdg_tags.rejection_for(db, parsed_rdg_nodes, category_id)
     if rdg_rejection:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, rdg_rejection)
 
@@ -415,9 +415,9 @@ async def upload_skill(
         # 关联也不该生效:否则一份还没过审的上传就能改掉线上资产在 R&D Guide 上的位置。
         # 那条路复核合并时会把暂存的内容搬过去,关联要不要一起搬是那条路自己的问题,今天
         # 不在这个功能的范围里(暂存表里没有这个字段,所以行为是「保持原样」而不是「丢掉」)。
-        if parsed_rdg_tools or rdg_tags.tags_for(db, "skill", resolved_id):
+        if parsed_rdg_nodes or rdg_tags.tags_for(db, "skill", resolved_id):
             # 空清单也要写,那是「取消全部关联」。加个条件只为省掉常见情况下的两次查询。
-            rdg_tags.set_tags(db, "skill", resolved_id, parsed_rdg_tools)
+            rdg_tags.set_tags(db, "skill", resolved_id, parsed_rdg_nodes)
         # One lifecycle field gates visibility; the audit verdict decides its value.
         # A pass goes live immediately, a suspect waits for the review MR to be
         # merged, and a danger verdict never reaches this point (nothing is stored).

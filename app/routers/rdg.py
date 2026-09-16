@@ -2,10 +2,10 @@
 
 GET  /api/rsw/rdg/stages          — full stage+node tree (all authenticated users)
 GET  /api/rsw/rdg/tool-mappings   — node_key → [tool_name] map (all authenticated users)
-GET  /api/rsw/rdg/tools           — the tool names an asset may be tagged with
-GET  /api/rsw/rdg/tool-assets     — tool_name → count of portal assets tagged with it
-GET  /api/rsw/rdg/tool-assets/{tool_name} — the assets behind one of those counts
-GET  /api/rsw/rdg/asset-tags/{kind}/{id}  — which tools one asset is tagged with
+GET  /api/rsw/rdg/workflow-nodes  — the workflow nodes an asset may be linked to
+GET  /api/rsw/rdg/node-assets     — node_key → count of portal assets linked to it
+GET  /api/rsw/rdg/node-assets/{node_key} — the assets behind one of those counts
+GET  /api/rsw/rdg/asset-tags/{kind}/{id}  — which workflow nodes one asset is linked to
 GET  /api/rsw/rdg/admins          — who may edit the guide (rsw_admin only)
 POST /api/rsw/rdg/admins          — add an editor (rsw_admin only)
 DELETE /api/rsw/rdg/admins/{eid}  — remove an editor, never yourself (rsw_admin only)
@@ -114,39 +114,57 @@ def get_tool_mappings(db: Session = Depends(get_db)) -> dict[str, list[str]]:
     return result
 
 
-@router.get("/tools")
-def get_tools(db: Session = Depends(get_db)) -> list[str]:
-    """上传表单那个「关联 R&D Guide 工具」下拉框的内容。
+@router.get("/workflow-nodes")
+def get_workflow_nodes(db: Session = Depends(get_db)) -> list[dict]:
+    """可以被关联的流程节点,给上传表单那个选择器用。
 
-    值是 ``tool-mappings`` 的 distinct ``tool_name``,不是另写的一份名单 —— 写入时的白名单
-    走同一个函数,所以下拉框里能选的和后端肯收的不可能不一致。见 ``services/rdg_tags.py``。
+    返回 ``[{nodeKey, label, stageKey, nodeType}]``,按阶段与流程顺序。**和写入时的白名单走
+    同一个函数**,所以界面上能选的和后端肯收的不可能不一致。
+
+    带上 ``stageKey`` 是因为可选节点有 78 个,平铺成一列不能用 —— 选择器按阶段分组。
+    ``parallel-group`` 容器不在返回里(它不是一道工序,见 ``services/rdg_tags.py``)。
+
+    2026-09-16 这个端点取代了 ``/tools``:那个返回的是工具名,而资产该关联的是流程节点。
     """
-    return rdg_tags.valid_tool_names(db)
+    return rdg_tags.selectable_nodes(db)
 
 
-@router.get("/tool-assets")
-def get_tool_asset_counts(db: Session = Depends(get_db)) -> dict[str, int]:
-    """{ tool_name: 挂在它下面的门户资产数 },R&D Guide 卡片那一行读这个。
+@router.get("/node-assets")
+def get_node_asset_counts(db: Session = Depends(get_db)) -> dict[str, int]:
+    """{ node_key: 用在这道工序上的门户资产数 },R&D Guide 节点卡片那一行读这个。
 
-    只返回有资产的工具,所以前端拿到的键就是「该显示那一行的卡片」。数字为 0 的不返回:
-    一张写着「0 个相关资产」的卡片是噪声。
+    只含大于 0 的节点,所以前端拿到的键就是「该显示那一行的节点」。
     """
-    return rdg_tags.counts_by_tool(db)
+    return rdg_tags.counts_by_node(db)
 
 
-@router.get("/tool-assets/{tool_name:path}")
-def get_tool_assets(tool_name: str, db: Session = Depends(get_db)) -> list[dict]:
-    """某个工具下挂着的资产清单,卡片点开之后那一层。
+@router.get("/node-assets/{node_key}")
+def get_node_assets(node_key: str, db: Session = Depends(get_db)) -> list[dict]:
+    """某道工序下挂着的资产清单,点开计数之后那一层用。
 
-    路径参数用 ``:path`` 是因为工具名字里有空格和别的字符(``AC Onboarding Assistant``、
-    ``DP Slot Info Decode``),名字本身就是这套东西的键 —— 见 ``services/rdg_tags.py`` 里
-    关于「为什么用名字不用 id」的注释。
+    和计数走同一道可见性过滤,所以「卡片上写 3 个」和「点开看到 3 条」不会对不上。
 
-    **工具名字不存在与工具下没有资产,都返回空列表。** 不区分是刻意的:这个端点的调用方是
-    卡片,而卡片的名字来自 tool-mappings,不可能问出一个不存在的名字;真会问出来的场景是
-    工具刚被改名,那时候「空」正是事实。
+    路径参数**不需要** ``:path``:``node_key`` 是 slug(如 ``pcs`` / ``oa-scope``),不含空格。
+    上一版 ``/tool-assets/{tool_name:path}`` 需要它,因为工具名里有空格。
     """
-    return rdg_tags.assets_for_tool(db, tool_name)
+    return rdg_tags.assets_for_node(db, node_key)
+
+
+@router.get("/asset-tags/{kind}/{asset_id}")
+def get_asset_tags(
+    kind: str, asset_id: str, db: Session = Depends(get_db)
+) -> list[str]:
+    """一个资产现在用在哪些流程节点上,返回 node_key 列表。
+
+    编辑弹窗回填用。**没有这个端点,「挂错了」就没有出路** —— 编辑接口把 ``rdgNodes`` 当成
+    整体替换,前端不知道原值就只能要么不发(不改)要么发一份新的(覆盖),没法在原来的基础上改。
+
+    ``kind`` 只认 ``skill`` 与 ``item``,别的返回空列表而不是 400:调用方是前端两个已知的
+    弹窗,传别的值是代码错误,而这个端点的答案对代码错误来说「空」比一个错误码更好读。
+    """
+    if kind not in ("skill", "item"):
+        return []
+    return rdg_tags.tags_for(db, kind, asset_id)
 
 
 # ── Write endpoints (rsw_admin only) ─────────────────────────────────────────
@@ -169,23 +187,6 @@ class NodeUpdate(BaseModel):
 class ToolMappingUpdate(BaseModel):
     nodeKey: str
     toolNames: list[str]
-
-
-@router.get("/asset-tags/{kind}/{asset_id}")
-def get_asset_tags(
-    kind: str, asset_id: str, db: Session = Depends(get_db)
-) -> list[str]:
-    """一个资产现在挂在哪些工具上。
-
-    编辑弹窗回填用。**没有这个端点,「挂错了」就没有出路** —— 编辑接口把 ``rdgTools`` 当成
-    整体替换,前端不知道原值就只能要么不发(不改)要么发一份新的(覆盖),没法在原来的基础上改。
-
-    ``kind`` 只认 ``skill`` 与 ``item``,别的返回空列表而不是 400:调用方是前端两个已知的
-    弹窗,传别的值是代码错误,而这个端点的答案对代码错误来说「空」比一个错误码更好读。
-    """
-    if kind not in ("skill", "item"):
-        return []
-    return rdg_tags.tags_for(db, kind, asset_id)
 
 
 @router.get("/admins")
