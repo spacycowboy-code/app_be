@@ -31,7 +31,7 @@ class MarketItemCreate(CamelModel):
     #:
     #: ``None`` 与 ``[]`` 在编辑接口上**不是一回事**:``None`` 是「这次不改关联」,``[]`` 是
     #: 「清空关联」。建条目时两者等价。
-    rdg_tools: list[str] | None = None
+    rdg_nodes: list[str] | None = None
     author: str | None = None
     version: str | None = "1.0"
 
