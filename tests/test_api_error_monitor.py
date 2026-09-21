@@ -6,17 +6,19 @@ from __future__ import annotations
 
 import json
 import urllib.error
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import database
 from app.config import get_settings
 from app.database import SessionLocal
 from app.main import app
 from app.models.api_error import RpAiApiError
-from app.services import api_errors
+from app.services import api_errors, reporting_windows
 from app.services.auth_tokens import create_token
 
 ADMIN = "EZHGMIO"       # 在 dashboard_eids 里
@@ -407,3 +409,38 @@ def test_timestamps_go_out_labelled(client):
         )
     item = client.get("/api/admin/api-errors", headers=_headers()).json()["items"][0]
     assert item["lastSeen"].endswith("+00:00") or item["lastSeen"].endswith("Z")
+
+
+def test_the_emitted_instant_is_right_when_the_db_clock_is_not_utc(client, monkeypatch):
+    """库时钟不等于 UTC 时，发出去的**绝对时刻**仍必须是真实时刻。
+
+    上面那条只看结尾有没有 ``+00:00`` —— 而口径错了 2 小时的时间戳照样带 ``+00:00``，
+    生产上就是这么错过去的：写入用的是容器时钟（UTC），序列化按全仓约定「naive = 库本地
+    时间」给它盖上 ``db_utc_offset()``（这台库是 UTC+2），于是绝对时刻早了 2 小时，页面上
+    显示 09:03 而真实是 11:03，不抛任何异常。
+
+    必须伪装库偏移才测得出来：hermetic 套件跑 sqlite，``TIMESTAMPDIFF`` 不存在、
+    ``db_utc_offset()`` 落到返回 0 的兜底分支，而偏移为 0 时写错口径与写对口径的输出
+    **完全一样**。
+    """
+    offset = timedelta(hours=2)
+    monkeypatch.setattr(database, "db_utc_offset", lambda: offset)
+    monkeypatch.setattr(reporting_windows, "db_utc_offset", lambda: offset)
+
+    before = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        api_errors.record(
+            db, method="GET", path="/api/tz-abs", status=500, exc=ValueError("v")
+        )
+    after = datetime.now(timezone.utc)
+
+    items = client.get("/api/admin/api-errors", headers=_headers()).json()["items"]
+    item = next(i for i in items if i["path"] == "/api/tz-abs")
+
+    for column in ("firstSeen", "lastSeen"):
+        emitted = datetime.fromisoformat(item[column])
+        assert emitted.tzinfo is not None, f"{column} 没带时区"
+        slack = timedelta(seconds=5)
+        assert before - slack <= emitted <= after + slack, (
+            f"{column} 偏了：发出 {emitted}，真实区间 {before}–{after}"
+        )

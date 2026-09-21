@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.api_error import RpAiApiError
+from app.services.reporting_windows import db_now
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +111,13 @@ def record(
         exc_message = (str(exc)[:2000] or None) if exc is not None else None
         trace = _app_frames(exc) if exc is not None else None
         fp = fingerprint(method, path, exc_type)
-        now = datetime.now()
+        # 必须用库时钟而不是 ``datetime.now()``。这一列是 naive DATETIME，全仓的约定是
+        # 「naive = 库服务器本地时间」（``server_default=func.now()`` 写出来的就是它），
+        # 序列化时 ``schemas/common.py::as_utc`` 正是按这个约定给它盖上 ``db_utc_offset()``。
+        # 用容器时钟（UTC）写进去，盖上库的 +02:00 之后绝对时刻就早了 2 小时 —— 页面上是
+        # 09:03 而真实是 11:03，而且这个错不抛任何异常。同一张表的 ``resolved_at`` 走的是
+        # ``func.now()``（库侧），不改这里的话表内部两种口径并存。
+        now = db_now()
 
         row = db.execute(
             select(RpAiApiError).where(RpAiApiError.fingerprint == fp)
@@ -266,7 +273,7 @@ def diagnose(db: Session, row: RpAiApiError) -> RpAiApiError:
     row.diagnosis_cause = str(fields.get("cause") or "").strip() or None
     row.diagnosis_scope = str(fields.get("scope") or "").strip() or None
     row.diagnosis_action = str(fields.get("action") or "").strip() or None
-    row.diagnosed_at = datetime.now()
+    row.diagnosed_at = db_now()  # 库时钟，同 first_seen / last_seen
     row.diagnosis_error = None
     db.commit()
     return row
