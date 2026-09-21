@@ -191,14 +191,14 @@ def _visible_ids(db: Session, kind: str, ids: set[str]) -> set[str]:
     return {r[0] for r in rows}
 
 
-def counts_by_node(db: Session) -> dict[str, int]:
+def counts_by_node(db: Session) -> dict[str, dict]:
     """每道工序上用了几个**看得见的**门户资产。R&D Guide 节点卡片那一行读这个。
 
-    只返回大于 0 的节点,所以前端拿到的键就是「该显示那一行的卡片」。0 不返回:一张写着
-    「0 个相关资产」的卡片是噪声,而这一行的价值恰恰在于它出现的时候。
+    返回 ``{ node_key: {count, stageKey} }``。``stageKey`` 来自 ``rp_ai_rdg_node`` 表;
+    如果 ``node_key`` 在节点树里找不到(孤儿 —— 节点被改名或删除后遗留的关联),
+    ``stageKey`` 为 ``None``,前端把这类资产归到 Unassigned 区供 admin 追溯。
 
-    三次查询而不是一句 group by:计数要过可见性(见 ``_visible_ids``),而可见性在另外两张表上。
-    一句 SQL 要做两个 join 再 union,而这批数据的量级是几十行 —— 那个复杂度换不到东西。
+    只返回大于 0 的节点,0 不返回:一张写着「0 个相关资产」的卡片是噪声。
     """
     rows = db.execute(
         select(
@@ -215,11 +215,26 @@ def counts_by_node(db: Session) -> dict[str, int]:
         for kind in _MODEL_BY_KIND
     }
 
+    # node_key → stage_key 映射,找不到的为 None(孤儿)
+    all_node_keys = {r[2] for r in rows}
+    node_stage: dict[str, str | None] = {
+        nk: None for nk in all_node_keys
+    }
+    if all_node_keys:
+        for node in db.scalars(
+            select(RpAiRdgNode).where(RpAiRdgNode.node_key.in_(list(all_node_keys)))
+        ).all():
+            node_stage[node.node_key] = node.stage_key
+
     counts: dict[str, int] = {}
     for kind, asset_id, node_key in rows:
         if asset_id in visible.get(kind, set()):
             counts[node_key] = counts.get(node_key, 0) + 1
-    return counts
+
+    return {
+        nk: {"count": cnt, "stageKey": node_stage.get(nk)}
+        for nk, cnt in counts.items()
+    }
 
 
 def assets_for_node(db: Session, node_key: str) -> list[dict]:

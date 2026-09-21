@@ -151,7 +151,7 @@ def test_the_count_covers_both_kinds_of_asset(guide):
         rdg_tags.set_tags(db, "item", "gl-1", [PCS])
         rdg_tags.set_tags(db, "skill", "sk-1", [PCS])
         db.commit()
-        assert rdg_tags.counts_by_node(db) == {PCS: 2}
+        assert rdg_tags.counts_by_node(db) == {PCS: {"count": 2, "stageKey": "early-phase"}}
 
 
 def test_an_archived_skill_is_not_counted(guide):
@@ -166,7 +166,7 @@ def test_an_archived_skill_is_not_counted(guide):
         rdg_tags.set_tags(db, "skill", "sk-live", [PCS])
         rdg_tags.set_tags(db, "skill", "sk-gone", [PCS])
         db.commit()
-        assert rdg_tags.counts_by_node(db) == {PCS: 1}
+        assert rdg_tags.counts_by_node(db) == {PCS: {"count": 1, "stageKey": "early-phase"}}
 
 
 def test_a_pending_item_is_not_counted(guide):
@@ -178,7 +178,7 @@ def test_a_pending_item_is_not_counted(guide):
         rdg_tags.set_tags(db, "item", "gl-live", [PCS])
         rdg_tags.set_tags(db, "item", "gl-pending", [PCS])
         db.commit()
-        assert rdg_tags.counts_by_node(db) == {PCS: 1}
+        assert rdg_tags.counts_by_node(db) == {PCS: {"count": 1, "stageKey": "early-phase"}}
 
 
 def test_a_node_with_no_assets_is_absent_rather_than_zero(guide):
@@ -189,7 +189,7 @@ def test_a_node_with_no_assets_is_absent_rather_than_zero(guide):
         rdg_tags.set_tags(db, "item", "gl-1", [PCS])
         db.commit()
         counts = rdg_tags.counts_by_node(db)
-    assert counts == {PCS: 1}
+    assert counts == {PCS: {"count": 1, "stageKey": "early-phase"}}
     assert OA_SCOPE not in counts
 
 
@@ -204,7 +204,7 @@ def test_the_list_behind_the_count_matches_the_count(guide):
             rdg_tags.set_tags(db, kind, aid, [PCS])
         db.commit()
 
-        count = rdg_tags.counts_by_node(db)[PCS]
+        count = rdg_tags.counts_by_node(db)[PCS]["count"]
         listed = rdg_tags.assets_for_node(db, PCS)
     assert count == len(listed) == 2
     # 合并之后才按名字排,否则 skill 会永远排在 tool/agent 前面 —— 那是表的顺序。
@@ -255,7 +255,7 @@ def test_the_endpoints_serve_what_the_card_needs(client, guide):
 
     r = client.get("/api/rsw/rdg/node-assets")
     assert r.status_code == 200
-    assert r.json() == {PCS: 1}
+    assert r.json() == {PCS: {"count": 1, "stageKey": "early-phase"}}
 
     # 工具名字里有空格,所以路径参数用了 :path。这条钉住那个决定。
     r = client.get("/api/rsw/rdg/node-assets/pcs")

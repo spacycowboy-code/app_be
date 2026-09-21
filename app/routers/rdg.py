@@ -130,10 +130,11 @@ def get_workflow_nodes(db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.get("/node-assets")
-def get_node_asset_counts(db: Session = Depends(get_db)) -> dict[str, int]:
-    """{ node_key: 用在这道工序上的门户资产数 },R&D Guide 节点卡片那一行读这个。
+def get_node_asset_counts(db: Session = Depends(get_db)) -> dict[str, dict]:
+    """{ node_key: {count, stageKey} },R&D Guide 节点卡片那一行读这个。
 
-    只含大于 0 的节点,所以前端拿到的键就是「该显示那一行的节点」。
+    只含大于 0 的节点。``stageKey`` 为 null 表示孤儿资产(node_key 在节点树里找不到,
+    通常是节点被改名或删除后遗留的关联),前端把这类资产归到 Unassigned 区供 admin 追溯。
     """
     return rdg_tags.counts_by_node(db)
 
