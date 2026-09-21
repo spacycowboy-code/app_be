@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from app.config import get_settings
 from app.repositories import skill_content
 from app.services.audit_engine import AuditResult
+from app.services.skill_manifest import frontmatter_version
 
 settings = get_settings()
 
@@ -36,6 +38,12 @@ class StoreResult:
     tag: str | None
     artifact_name: str | None
     pushed: bool
+    # Where ``version`` came from: "declared" (SKILL.md), "auto" (platform
+    # numbering), or "unchanged" (content identical, no new version cut).
+    version_source: str = "auto"
+    # One sentence for the author when the declared version was passed over.
+    # Empty when there is nothing to explain — see ``VersionPlan``.
+    version_note: str = ""
 
 
 def sanitize_segment(text: str, fallback: str = "skill") -> str:
@@ -56,6 +64,99 @@ def bump_minor(version: str | None) -> str:
     major = int(parts[0])
     minor = int(parts[1]) if len(parts) > 1 else 0
     return f"{major}.{minor + 1}.0"
+
+
+def version_key(version: str | None) -> tuple[int, int, int]:
+    """Comparable key for two version strings. Missing components read as 0.
+
+    Only used to answer "is the declared version newer than what is already
+    published". It is intentionally forgiving because ``version`` is free text:
+    one production skill versions itself ``2026.09.09``. Digits are read in
+    order, so that scheme compares sensibly against itself; comparing it against
+    a semver scheme is meaningless, but that only happens when an author changes
+    scheme mid-stream, and the answer then ("not newer, keep auto-numbering") is
+    the safe one either way.
+    """
+    parts = re.findall(r"\d+", version or "")[:3]
+    nums = [int(p) for p in parts] + [0] * (3 - len(parts))
+    return (nums[0], nums[1], nums[2])
+
+
+@dataclass(frozen=True)
+class VersionPlan:
+    """Which version this upload will publish as, and why.
+
+    ``note`` is written for the author and shown in the upload wizard **before
+    publishing**. It is empty when there is nothing to explain: an author who
+    declares no version, or whose declared version is simply accepted, should
+    not be handed a sentence about a mechanism they never touched.
+    """
+
+    version: str
+    # "declared" = taken from SKILL.md; "auto" = platform's own minor bump.
+    source: str
+    note: str = ""
+
+
+def plan_version(
+    *, declared: str | None, current: str | None, taken: Iterable[str] = ()
+) -> VersionPlan:
+    """Decide the version to publish from the author's declared one.
+
+    **Why the author's number wins when it can.** The platform used to number
+    every upload itself with ``bump_minor``, which made the badge on the detail
+    page disagree with the ``version`` in the author's own SKILL.md — measured on
+    production, 12 of the 12 skills that declare a version disagreed, and none
+    agreed. Worse, ``bump_minor`` cannot express what only the author knows: it
+    answers 1.1.0 where the author means 2.0.0 because this release breaks the
+    previous one.
+
+    **Why it does not always win.** Two shapes must not be published verbatim,
+    and both exist in production today:
+
+    * a version that was already published — the tag is ``<id>@<version>``, so a
+      duplicate is refused by GitLab at the last step, *after* the content is
+      already on the branch: a half-published state only visible by looking at
+      GitLab.
+    * a version older than what is already out — 6 production skills declare one
+      (``plda-test-report-bundle`` says 0.5.0 while 1.7.0 is published). Taking
+      it would walk the badge and the tag sequence backwards.
+
+    In both cases the platform keeps numbering and ``note`` says which value in
+    the file was passed over and why, so the author can fix the file rather than
+    discover the drift on the detail page afterwards.
+
+    ``current`` is the basis for auto-numbering and must come from the manifest
+    in the content repo, not from the database — see the comment at its call
+    site in ``store``. ``taken`` is only a guard, so reading it from the database
+    is safe: a stale read at worst misses a duplicate that the tag write then
+    catches.
+    """
+    published = {(v or "").strip() for v in taken if (v or "").strip()}
+    auto = bump_minor(current)
+    value = (declared or "").strip()
+
+    if not value:
+        return VersionPlan(version=auto, source="auto")
+
+    if value in published:
+        return VersionPlan(
+            version=auto,
+            source="auto",
+            note=f"SKILL.md 里写的 {value} 已经发布过了，这一版发 {auto}。",
+        )
+
+    if current and version_key(value) <= version_key(current):
+        return VersionPlan(
+            version=auto,
+            source="auto",
+            note=(
+                f"SKILL.md 里写的 {value} 不比已发布的 {current} 新，"
+                f"这一版发 {auto}。"
+            ),
+        )
+
+    return VersionPlan(version=value, source="declared")
 
 
 class SkillStorage:
@@ -82,6 +183,9 @@ class SkillStorage:
         audit: AuditResult,
         action: str = "upload",
         target_branch: str | None = None,
+        # 这个技能已经发布过的版本号,只用于拦住撞号的声明值(见 `plan_version`)。
+        # 默认空集合让老的调用方行为不变:没有已发集合时,声明值只受"要比当前新"这一条约束。
+        taken: Iterable[str] = (),
     ) -> StoreResult:
         """Write/refresh a skill folder, bump version, commit, tag and push.
 
@@ -177,9 +281,18 @@ class SkillStorage:
                 tag=None,
                 artifact_name=artifact_name,
                 pushed=True,
+                version_source="unchanged",
             )
 
-        version = bump_minor(version_in_repo or current_version)
+        # 版本号优先用作者在 SKILL.md frontmatter 里声明的那个,平台自增只是兜底 ——
+        # 判断规则与「为什么」见 `plan_version`。自增基准仍是**仓库里那份 manifest**
+        # (上面那段注释),`taken` 只做撞号守卫、可以来自数据库。
+        plan = plan_version(
+            declared=frontmatter_version(instructions or ""),
+            current=version_in_repo or current_version,
+            taken=taken,
+        )
+        version = plan.version
 
         full_manifest = {
             **manifest,
@@ -215,6 +328,8 @@ class SkillStorage:
             artifact_name=artifact_name,
             # 没有本地提交了:publish 返回即内容在远端。写不成会抛,由调用方决定怎么失败。
             pushed=True,
+            version_source=plan.source,
+            version_note=plan.note,
         )
 
 

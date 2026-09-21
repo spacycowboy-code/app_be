@@ -27,6 +27,11 @@ class SkillUploadResult(CamelModel):
     tag: str | None = None
     storage_path: str
     pushed: bool
+    # ``version`` 是从哪来的：``declared`` = SKILL.md frontmatter 里的 `version`，
+    # ``auto`` = 平台自增，``unchanged`` = 内容没变、没有发新版本。
+    version_source: str = "auto"
+    # 声明值被跳过时给作者的一句话；直接采用或未声明时为空串。
+    version_note: str = ""
     # Audit outcome so the wizard can show state + findings (no score).
     audit_state: str | None = None      # pass | suspect
     # Why, in one line. A suspect verdict does not always have findings — "a layer did not

@@ -58,6 +58,7 @@ from app.services.asset_stats import (
     content_updated_at,
 )
 from app.services.skill_storage import sanitize_segment, skill_storage
+from app.services.skill_versions import versions_taken
 from app.services import gitlab_mr
 from app.services import asset_content
 from app.services import reporting_windows
@@ -751,6 +752,7 @@ async def update_skill(
         audit=audit,
         action="edit",
         target_branch=decision.review_branch,
+        taken=versions_taken(db, skill.id),
     )
 
     if decision.stays_published:
