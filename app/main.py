@@ -35,6 +35,7 @@ from app.routers import (
     skills,
     upload,
     usage,
+    usage_export,
     usage_report,
     users,
 )
@@ -296,6 +297,7 @@ app.include_router(departments.router)
 app.include_router(market.router)
 app.include_router(agent_upload.router)
 app.include_router(usage.router)
+app.include_router(usage_export.router)
 app.include_router(usage_report.router)
 app.include_router(rsw_inventory.router)
 app.include_router(rdg.router)
