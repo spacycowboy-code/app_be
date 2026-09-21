@@ -17,6 +17,7 @@ _FM_NAME = re.compile(r"(?im)^\s*name\s*:")
 _FM_DESC = re.compile(r"(?im)^\s*description\s*:")
 _FM_NAME_VAL = re.compile(r"(?im)^\s*name\s*:\s*(.+?)\s*$")
 _FM_DESC_VAL = re.compile(r"(?im)^\s*description\s*:\s*(.+?)\s*$")
+_FM_VERSION_VAL = re.compile(r"(?im)^\s*version\s*:\s*(.+?)\s*$")
 # Leading YAML frontmatter block delimited by --- ... --- (CRLF/LF tolerant).
 _FM_BLOCK = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n", re.DOTALL)
 
@@ -189,6 +190,54 @@ def parse_frontmatter(text: str) -> tuple[str | None, str | None]:
         _clean(n.group(1)) if n else None,
         _clean(d.group(1)) if d else None,
     )
+
+
+def frontmatter_version(text: str) -> str | None:
+    """Extract the ``version`` value from the markdown frontmatter, if declared.
+
+    ``version`` is an optional field in the Agent Skills spec, and the authors who
+    do maintain it treat it as the single source of truth — the packaging script
+    reads it to name the zip, README and CHANGELOG follow it. Reading it here is
+    what lets the published version be the author's number instead of a second,
+    platform-invented one that drifts away from it.
+
+    Deliberately **not** validated or normalised here: this only reports what the
+    file says. Whether that value can actually be published — is it new, is it
+    newer than what is already out — is decided by
+    ``skill_storage.plan_version``, which is where the published history is
+    known. Splitting it this way keeps this module free of publishing policy.
+
+    Returns ``None`` when there is no frontmatter, no ``version`` key, or the
+    value is empty. A missing version is the common case (44 of 56 skills in
+    production declare none), so it must read as "nothing to say", not an error.
+    """
+    if not text:
+        return None
+
+    block_match = _FM_BLOCK.match(text.lstrip("\ufeff"))
+    if block_match:
+        try:
+            data = yaml.safe_load(block_match.group(1))
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            if "version" not in data:
+                return None
+            raw = data.get("version")
+            # YAML turns an unquoted ``1.6`` into a float and ``2026`` into an int;
+            # str() keeps the author's number readable either way. What it cannot
+            # recover is the trailing zero in ``1.60`` — quoting is the author's
+            # call, and guessing would publish a version they did not write.
+            return (str(raw).strip() or None) if raw is not None else None
+
+    # No/invalid ``---`` block: fall back to the inline value, same as name/desc.
+    m = _FM_VERSION_VAL.search(text)
+    if not m:
+        return None
+    value = m.group(1).strip().strip('"').strip("'").strip()
+    if value in (">", ">-", "|", "|-", ">+", "|+"):
+        return None
+    return value or None
 
 
 def with_frontmatter(body: str, name: str, description: str | None) -> str:

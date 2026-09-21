@@ -68,6 +68,16 @@ class SkillEvaluateResult(CamelModel):
     cause: str | None = None
     checks: list[AuditCheck] = []
     findings: list[AuditFinding] = []   # flat list, kept for the audit trail
+    # 这次发布会用哪个版本号，以及为什么 —— 在作者点发布**之前**告诉他。
+    #
+    # 徽标上的版本号原来完全由平台自增，与作者 SKILL.md 里的 `version` 无关，于是两个数字
+    # 各走各路（生产实测：12 个声明了版本号的技能，12 个都不一致）。现在优先用声明值，而
+    # 声明值不可用时（已发布过、或不比已发布的新）回落自增 —— 那两种情况才有
+    # `version_note`，说明文件里哪个值被跳过了、为什么。作者因此能去改文件，而不是发布完
+    # 在详情页上发现对不上。
+    planned_version: str | None = None
+    # 空串表示没什么要解释的：声明值被直接采用，或者作者压根没声明。
+    version_note: str = ""
 
 
 class SkillAuditReport(CamelModel):

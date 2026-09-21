@@ -33,11 +33,13 @@ from app.schemas.version import SkillUploadResult, SkillVersionRead
 from app.schemas.audit import SkillEvaluateResult, AuditFinding, AuditCheck
 from app.services.skill_manifest import (
     extract_skill_md_from_zip,
+    frontmatter_version,
     has_name_and_description,
     frontmatter_problem,
     parse_frontmatter,
 )
-from app.services.skill_storage import skill_storage
+from app.services.skill_storage import plan_version, skill_storage
+from app.services.skill_versions import versions_taken
 from app.services.notify import notify_version_update
 from app.services.eids import acting_eid, normalize_eid
 from app.services.audit_engine import AuditResult, audit_skill, content_key
@@ -191,12 +193,21 @@ async def evaluate_skill(
     name: str = Form(...),
     instructions: str | None = Form(None),
     file: UploadFile | None = File(None),
+    skill_id: str | None = Form(
+        None,
+        alias="id",
+        description="Existing skill being updated; omit for a first upload",
+    ),
 ) -> SkillEvaluateResult:
     """Audit-only preview: run the audit, store NOTHING, return the verdict.
 
     The upload wizard calls this at its 'evaluating' step so the result screen
     shows the real state + findings (no score) before the user commits. publish
     re-runs the same audit as the authoritative, non-bypassable gate.
+
+    ``skill_id`` is what makes the version preview meaningful for an update: the
+    already-published versions are keyed by it. Without it this is a first
+    upload, where nothing is published yet and the declared version stands.
     """
     eid = acting_eid(request, eid)
     definition, artifact_bytes, artifact_filename = await _read_upload(file, instructions)
@@ -212,10 +223,22 @@ async def evaluate_skill(
             db, reference, audit, skill_id=None, skill_name=name, uploader_eid=eid or None
         )
         db.commit()
+    # 版本号预告走的是**同一个** `plan_version`,不是为界面另写一份判断 —— 两份判断会漂,
+    # 而漂的方向恰好是「界面说会发 1.6.0、实际发了 1.7.0」这种最难解释的形态。
+    # 这里的 `current` 取库里那一行的 version:发布时用的是内容仓 manifest 里那个(并发更
+    # 安全),两者正常情况下相同;不同的时候预告可能与实际差一格,这是预告的固有代价,不值
+    # 得为它在预检阶段去读一次内容仓。
+    existing = db.get(RpAiSkill, skill_id) if skill_id else None
+    plan = plan_version(
+        declared=frontmatter_version(definition or ""),
+        current=existing.version if existing else None,
+        taken=versions_taken(db, skill_id) if existing else (),
+    )
     return SkillEvaluateResult(
         state=audit.state, reference=reference, reason=audit.reason,
         coverage=audit.coverage, cause=audit.cause,
         checks=_checks_out(audit), findings=_findings_out(audit),
+        planned_version=plan.version, version_note=plan.note,
     )
 
 
@@ -372,6 +395,7 @@ async def upload_skill(
         existing_storage_path=existing.storage_path if existing else None,
         audit=audit,
         target_branch=review_branch,
+        taken=versions_taken(db, resolved_id) if existing else (),
     )
 
     # Upsert the skill row.
@@ -512,6 +536,8 @@ async def upload_skill(
         tag=result.tag,
         storage_path=result.storage_path,
         pushed=result.pushed,
+        version_source=result.version_source,
+        version_note=result.version_note,
         audit_state=audit.state,
         reason=audit.reason,
         coverage=audit.coverage,
