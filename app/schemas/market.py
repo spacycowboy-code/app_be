@@ -96,6 +96,10 @@ class MarketItemVersionRead(CamelModel):
     artifact_bytes: int | None = None
     metadata_json: dict | None = None
     audit_json: dict | None = None
+    #: 上传者给这一版写的说明,可选。空白与「没写」是同一个值(``None``),见
+    #: ``agent_upload._clean_note`` —— 一个空字符串在版本历史里会渲染成一个看不出来
+    #: 是「写了空的」还是「没写」的空格子。
+    notes: str | None = None
     created_at: datetime | None = None
 
 
