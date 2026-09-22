@@ -127,6 +127,35 @@ def _check_version(raw: str, *, taken: set[str]) -> str:
     return value
 
 
+#: 一条版本说明的上限。列是 TEXT,所以这个数字不是存储限制,而是「这一格是给人读的」——
+#: 版本历史那张表里每一版一行,粘一段日志进来会把整张表撑成没法读的样子。2000 字符放得下
+#: 十几行变更说明,又拦得住一次误粘贴。
+_NOTE_MAX = 2000
+
+
+def _clean_note(raw: str | None) -> str | None:
+    """规范化上传者写的版本说明。**不填是合法的**,所以这里不抛「请填写」。
+
+    **只有包上传那条路收它。** `/metadata`(改包信息)不收 —— 它不换包,所以它产生的版本行
+    在「说明」那一列是空的,那是定下来的口径而不是漏了。这个助手因此只有一个调用方;留成独立
+    函数是因为上限和「空白等于没写」这两条判断值得有一个能指的地方。
+
+    空白与「没写」归成同一个值 ``None``:一个空字符串在版本历史里是个既不像「写了空的」
+    也不像「没写」的空格子,而两者本来就是一件事。超长则直接拒而不截断 —— 悄悄截掉一半
+    等于把作者没打算发的说明发出去,而那是他最可能想写清楚的一版。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if len(value) > _NOTE_MAX:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"版本说明最多 {_NOTE_MAX} 个字符(现在 {len(value)} 个)。"
+            "长的内容放进包里的 README 或 CHANGELOG 更合适。",
+        )
+    return value
+
+
 def _versions_taken(db: Session, item_id: str) -> set[str]:
     """这个条目已经用过的版本号。`_check_version` 的查重依据。"""
     rows = db.scalars(
@@ -341,6 +370,10 @@ async def publish_package(
     item_id: str | None = Form(None, alias="itemId"),
     item_type: str = Form("agent", alias="itemType"),
     version_in: str | None = Form(None, alias="version"),
+    notes: str | None = Form(
+        None,
+        description="这一版的说明,可选。留空就是没有说明。",
+    ),
     file: UploadFile | None = File(None),
     x_user_eid: str | None = Header(None),
 ) -> dict:
@@ -370,6 +403,9 @@ async def publish_package(
     if not acting:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少上传者身份")
     itype = _item_type(item_type)
+    # 说明在**收包之前**校验,和版本号同一个理由:超长如果在最后一米才被拒,项目里已经多了一个
+    # 提交,而上传者只看到一句「版本说明太长」。
+    note = _clean_note(notes)
     # 授权在环境检查**之前**。谁能改这个条目是关于这个请求的事实,凭据配没配是关于这次部署
     # 的事实 —— 反过来的话,一个越权请求在部署没配好时会拿到 503「服务不可用」,既误导上传者,
     # 也把一次越权尝试记成了一次故障。
@@ -603,6 +639,11 @@ async def publish_package(
                 ],
             },
             # audit_json 留空:包不再跑安全审计。历史行里那份留痕不动,审核页照旧显示它。
+            #
+            # 说明存在**版本行**上,不是条目上:「这一版改了什么」是关于这一版的事实,写到
+            # 条目上会被下一版盖掉,而版本历史里那一行永远该说得出它自己那次的事。条目上的
+            # `description` 是另一回事 —— 它答「这东西是什么」,归卡片上的「编辑」管。
+            notes=note,
         ))
         db.commit()
         db.refresh(item)
@@ -773,6 +814,9 @@ def revise_package_metadata(
                 # 这一版是改说明、不是换内容。审核页据此说得出"代码与上一版相同"。
                 "revisionOf": previous.version if previous else None,
             },
+            # `notes` 留空:说明这一格只长在**包上传**那条路上(见 `_clean_note`)。这条路
+            # 不收包,所以它产生的版本行在版本历史的「说明」那一列永远是一个破折号 —— 这是
+            # 有意的,不是漏了。要改这个决定,改的是这里和前端那个弹窗,而不是 `_clean_note`。
         ))
         db.commit()
         db.refresh(item)
