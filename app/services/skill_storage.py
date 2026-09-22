@@ -106,21 +106,28 @@ def plan_version(
     **Why the author's number wins when it can.** The platform used to number
     every upload itself with ``bump_minor``, which made the badge on the detail
     page disagree with the ``version`` in the author's own SKILL.md — measured on
-    production, 12 of the 12 skills that declare a version disagreed, and none
-    agreed. Worse, ``bump_minor`` cannot express what only the author knows: it
-    answers 1.1.0 where the author means 2.0.0 because this release breaks the
-    previous one.
+    production 2026-09-22, of the 5 skills that declare a top-level ``version``,
+    **none** matched the published number. Worse, ``bump_minor`` cannot express
+    what only the author knows: it answers 1.1.0 where the author means 2.0.0
+    because this release breaks the previous one — and 4 of those 5 declare
+    exactly such a jump (4.0.0 and 3.0.0 against a published 1.0.0).
 
-    **Why it does not always win.** Two shapes must not be published verbatim,
-    and both exist in production today:
+    **Only the top-level key counts.** A further 7 skills carry a ``version:``
+    nested under another key (``metadata:``), which this does not read and must
+    not: ``version`` is a top-level field in the Agent Skills spec, and guessing
+    which nesting path an author meant is the kind of prediction that is wrong
+    silently. Those 7 are counted as "declares nothing" and keep auto-numbering.
+
+    **Why it does not always win.** Two shapes must be refused, and the guards
+    are deliberately kept even though **no production skill triggers either one
+    today** — all 5 top-level declarations are ahead of what is published:
 
     * a version that was already published — the tag is ``<id>@<version>``, so a
       duplicate is refused by GitLab at the last step, *after* the content is
       already on the branch: a half-published state only visible by looking at
       GitLab.
-    * a version older than what is already out — 6 production skills declare one
-      (``plda-test-report-bundle`` says 0.5.0 while 1.7.0 is published). Taking
-      it would walk the badge and the tag sequence backwards.
+    * a version older than what is already out — it would walk the badge and the
+      tag sequence backwards.
 
     In both cases the platform keeps numbering and ``note`` says which value in
     the file was passed over and why, so the author can fix the file rather than
