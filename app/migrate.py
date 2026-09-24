@@ -87,6 +87,10 @@ COLUMNS = [
     # 读法不变。
     ("rp_ai_skill", "external_url", "VARCHAR(1024) NULL"),
     ("rp_ai_skill", "external_source", "VARCHAR(32) NULL"),
+    # 工具的 OpenAPI spec 地址(见 models/market.py 里为什么和 service_url 分开、
+    # 为什么是 1024)。**必须 NULLable 且无默认值**:老数据全为空,而"为空"正是
+    # 「这个条目不能被直接调用」的意思 —— 给它一个默认值会让每一条老记录都声称自己有契约。
+    ("rp_ai_market_item", "openapi_url", "VARCHAR(1024) NULL"),
 ]
 
 # (table, column, 期望的 information_schema.column_type, MODIFY 用的类型声明) 四元组。

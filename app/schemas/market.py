@@ -18,6 +18,12 @@ class MarketItemCreate(CamelModel):
     service_type: ServiceType
     repo_url: str | None = None
     service_url: str | None = None
+    #: 这个工具的 OpenAPI spec 地址。填了它，这个工具就能在 Kiro 对话里被**直接调用**
+    #: （rp-ai-mcp 的 dispatcher 拿它取契约），使用者不必安装任何东西。
+    #:
+    #: 可选，绝大多数条目没有。它和 ``service_url`` 是两件事：后者是给人点开的入口，
+    #: 这一个必须是机器可读的 spec —— 见 ``models/market.py`` 的同名列。
+    openapi_url: str | None = None
     embeddable: bool = False
     category_id: str | None = None
     category: str | None = None
@@ -50,6 +56,9 @@ class MarketItemRead(CamelModel):
     source: str
     repo_url: str | None = None
     service_url: str | None = None
+    #: OpenAPI spec 地址。**有值即"可以被直接调用"** —— rp-ai-mcp 就是靠这个字段判断
+    #: 要不要把这个条目列进"现在就能调的工具"。为空是绝大多数条目的常态。
+    openapi_url: str | None = None
     embeddable: bool = False
     category_id: str | None = None
     category: str | None = None
