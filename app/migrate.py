@@ -78,6 +78,9 @@ COLUMNS = [
     # models/market.py 里为什么是 1024 而不是 512。
     ("rp_ai_market_item", "external_url", "VARCHAR(1024) NULL"),
     ("rp_ai_market_item", "external_source", "VARCHAR(32) NULL"),
+    # 上游那边的身份（IVC 的 web 资产是 workspace UUID）。见模型里那段说明:web 型的门户 id
+    # 是人工显示名的 slug,和对方的 id 无关,所以不能靠拼前缀匹配。
+    ("rp_ai_market_item", "external_ref", "VARCHAR(128) NULL"),
     # 外部托管的技能:内容在别人的仓库里,门户只登记它并把下载转过去。第一个来源是 IVC 的
     # Nexus —— 它对生产机房整段 TCP 不可达(ICMP 通、22/80/443/8081/8443 全部静默超时、无代理
     # 配置),所以门户拿不到包体,只拿得到目录。``external_url`` 为空即普通技能,老数据全部为空,
@@ -103,6 +106,23 @@ COLUMN_TYPES = [
     # ORDER BY 变成字典序、让自增只能读-改-写。见 models/skill.py 里那段注释。
     # MySQL 会把 '43' 这样的值自动转成 43;线上核对过,52 行全是纯数字,没有需要人工处理的值。
     ("rp_ai_skill", "downloads", "int", "INT NOT NULL DEFAULT 0"),
+]
+
+
+#: ``(表, 索引名, 建索引的 DDL 片段)``。
+#:
+#: 为什么需要这一道：``create_all`` **只对新表**建索引，所以一个加在已存在表上的
+#: ``UniqueConstraint`` 永远不会出现在生产库里，而且完全无声 —— 模型里写着约束、代码按
+#: "库会挡重复"写，实际那个约束不在。
+INDEXES = [
+    # 一个上游资产在门户里只能有一行。对得上 ``RpAiMarketItem.__table_args__``。
+    # 两列都可为 NULL，而 MySQL 的唯一索引允许多个 NULL —— 人工建的那几十行 ``external_ref``
+    # 是空的，不受约束，只有 IVC 推来的行受。
+    (
+        "rp_ai_market_item",
+        "uq_market_item_external_ref",
+        "UNIQUE INDEX uq_market_item_external_ref (external_source, external_ref)",
+    ),
 ]
 
 
@@ -293,6 +313,24 @@ def _column_exists(conn, table: str, column: str) -> bool:
     return bool(row)
 
 
+def _index_exists(conn, table: str, index: str) -> bool:
+    """这个表上有没有这个名字的索引。
+
+    需要这道探测是因为 ``migrate.py`` 原本只有加列和改类型两道：``create_all`` **只对新表**
+    建索引，所以一个写进 ``__table_args__`` 的 ``UniqueConstraint`` 在已经存在的表上永远不会
+    出现。那种失败最坏的地方在于它完全无声 —— 模型里写着唯一约束、代码按"库会挡重复"写，
+    而生产上那个约束根本不在，直到某天真出现两行才发现。
+    """
+    row = conn.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = :t AND index_name = :i"
+        ),
+        {"t": table, "i": index},
+    ).scalar()
+    return bool(row)
+
+
 def _retype_sql(table: str, column: str, type_decl: str) -> str:
     """The ``ALTER`` that changes one column's type.
 
@@ -445,6 +483,17 @@ def main() -> None:
             else:
                 conn.execute(text(_retype_sql(table, column, type_decl)))
                 print(f"  ~ {table}.{column}: {have} -> {want}")
+
+    # 5) Add missing indexes. ``create_all`` only indexes tables it creates, so an
+    #    index declared on an already-existing table never lands without this pass.
+    with engine.begin() as conn:
+        for table, index, ddl in INDEXES:
+            if _index_exists(conn, table, index):
+                print(f"  = {table}.{index} already present")
+            else:
+                conn.execute(text(f"ALTER TABLE {table} ADD {ddl}"))
+                print(f"  + added index {table}.{index}")
+
     print("Migration complete.")
 
 

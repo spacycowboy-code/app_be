@@ -41,12 +41,39 @@ SOURCE_RVC = "nexus-ivc"
 VERB_DOWNLOAD = "download"
 VERB_LIKE = "like"
 VERB_UNLIKE = "unlike"
-ALLOWED_VERBS = frozenset({VERB_DOWNLOAD, VERB_LIKE, VERB_UNLIKE})
+#: 访问量：对方那边有人打开了一个 web 型资产（``service_type=cloud``，用户点开就跳到
+#: ``serviceUrl``）。这类资产没有下载动作，所以它是它唯一的使用信号。
+#:
+#: **它落 ``rp_ai_usage_event``（``verb=tool_open``），不落这张表的业务侧。** 这和
+#: download / like 的处理刚好相反,理由是同一条:落点要选那个已经被下游消费的表。
+#: download 有 ``rp_ai_skill_download`` / ``rp_ai_market_download`` 两张专用表、Grafana 直接
+#: 查它们;而"打开"的专用落点本来就是 ``rp_ai_usage_event`` 的 ``tool_open`` —— 门户自己记的
+#: 那 646 条就在那里,部门页与月报读的也是它。所以推过来的 open 进那张表,两边口径自动一致,
+#: 不需要在报告侧再加一条分支。
+#:
+#: 外部契约里叫 ``open`` 而不是 ``tool_open``:对方推的是 agent 也是 tool,动词名里带 tool
+#: 会读成"只适用于 tool"。映射写在 ``routers/external_usage._apply``。
+VERB_OPEN = "open"
+ALLOWED_VERBS = frozenset({VERB_DOWNLOAD, VERB_LIKE, VERB_UNLIKE, VERB_OPEN})
 
 #: 资产类型。``skill`` 落技能两张表，``agent`` 落市场两张表。
 KIND_SKILL = "skill"
 KIND_AGENT = "agent"
-ALLOWED_KINDS = frozenset({KIND_SKILL, KIND_AGENT})
+#: ``tool`` 与 ``agent`` 在门户里是同一张表的两种 ``item_type``,所以落点相同;分开收是因为
+#: 报告按 ``item_type`` 分列,而对方最清楚自己那个资产是哪一种 —— 让我们去猜就会猜错。
+KIND_TOOL = "tool"
+ALLOWED_KINDS = frozenset({KIND_SKILL, KIND_AGENT, KIND_TOOL})
+
+#: 哪些 (verb, kind) 组合成立。``open`` 只对市场条目成立:技能是下载的,``tool_open`` 的
+#: ``object_type`` 闭集里也没有技能这一项(见 ``usage_event.ALLOWED_OBJECT_TYPES``)。
+#: 不成立的组合是 422 而不是 skipped —— skipped 意味着"形状对、落不了地",而这种是形状本身
+#: 说不通,收下来只会在报表里变成一个没人解释得清的 0。
+ALLOWED_VERB_KINDS = frozenset(
+    {(VERB_DOWNLOAD, KIND_SKILL), (VERB_DOWNLOAD, KIND_AGENT), (VERB_DOWNLOAD, KIND_TOOL)}
+    | {(VERB_LIKE, KIND_SKILL), (VERB_LIKE, KIND_AGENT), (VERB_LIKE, KIND_TOOL)}
+    | {(VERB_UNLIKE, KIND_SKILL), (VERB_UNLIKE, KIND_AGENT), (VERB_UNLIKE, KIND_TOOL)}
+    | {(VERB_OPEN, KIND_AGENT), (VERB_OPEN, KIND_TOOL)}
+)
 
 #: 逐条处理结果，返回体里逐条给出。
 ACTION_APPLIED = "applied"      # 落库了，业务表也改了

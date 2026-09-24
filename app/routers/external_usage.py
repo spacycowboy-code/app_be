@@ -16,8 +16,28 @@ RVC 那边的资产（skill / agent）托管在 Nexus 上，人是在他们那�
        "assetId":"skill-creator","eid":"EPENYAN","occurredAt":1756702800}
     ]}
 
-全部字段必填。``verb`` 是 ``download | like | unlike``，``kind`` 是 ``skill | agent``，
-``assetId`` 是**对方自己的** id，``occurredAt`` 收带时区 ISO 8601 或秒级 epoch。
+全部字段必填。``verb`` 是 ``download | like | unlike | open``，``kind`` 是
+``skill | agent | tool``，``assetId`` 是**对方自己的** id，``occurredAt`` 收带时区 ISO 8601
+或秒级 epoch。
+
+**``open`` 是 web 型资产（``service_type=cloud``）的访问量。** 这类资产用户点开就跳到
+``serviceUrl``，没有下载动作，所以"打开"是它唯一的使用信号。它只对 ``agent`` / ``tool``
+成立，``open`` + ``skill`` 是 422 而不是 skipped —— 技能是下载的，那个组合重推多少次也落不了
+地，标成 skipped 只会让对方一直重试。组合矩阵见
+``models/external_usage_event.ALLOWED_VERB_KINDS``。
+
+``open`` 的落点与其它动词不同：它进门户原生的 ``rp_ai_usage_event``（``verb=tool_open``，
+``source=nexus-ivc``），因为那张表本来就是 ``tool_open`` 的专用落点，门户自己记的那批也在
+那里 —— 进同一张表，两边口径自动一致，报告侧不用加分支。理由详见
+``models/external_usage_event.VERB_OPEN``。
+
+**``kind`` 只有一半在选表，另一半是一道一致性闸门。** ``skill`` 与其余两者决定查
+``rp_ai_skill`` 还是 ``rp_ai_market_item``（两张表用同一个 ``ivc-`` 前缀，光凭 ``assetId``
+分不出来）；而 ``agent`` 与 ``tool`` 落同一张表、门户侧那行上已经有 ``item_type`` 了，所以
+这个区别对选表没有作用。它没被忽略，而是拿去和那行比：不一致时整条 ``skipped`` 并把两边各是
+什么都写进 ``detail``。静默采纳任意一边都会出事 —— 采纳门户的，对方按 tool 统计、我们按
+agent，数字对不上而两边各自自洽；采纳对方的，一次推送就能让这个条目在市场页上换一个 tab，
+而没有人做过那个决定。
 
 **为什么 ``eid`` 破例出现在请求体里。** 门户原生的 ``POST /api/usage/events`` 刻意没有这个
 字段，注释写明：接受它等于让任何登录用户把行为记到同事名下。这里没有会话可取 —— token 认证
@@ -29,9 +49,20 @@ RVC 那边的资产（skill / agent）托管在 Nexus 上，人是在他们那�
 全收下了 —— 这个失败形状两边都觉得正常、只有数字对不上，所以计数和逐条结果都在返回体里，
 并且每条也落进 ``rp_ai_external_usage_event.action``，事后查得出来。
 
-**已知落地缺口：``kind": "agent"`` 今天必然 skipped。** ``ivc_sync.py`` 明确跳过所有 agent
-（那条路要包体），所以门户库里没有任何 RVC 侧的 agent 资产，而两张落点表都带外键，父行不存在
-时这条事件物理上插不进去。不是把它做成 4xx，因为这是门户这边的欠账，不是对方的请求错。
+**落地前提：资产必须先在门户里有一行。** 两张落点表都带外键，父行不存在时这条事件物理上
+插不进去，所以 ``_resolve`` 会把它标成 ``skipped`` 并说明补法。按资产形态分三种情况：
+
+* **skill** —— 走 ``ivc_sync.py`` 的索引同步（生产已有 29 行）。
+* **带包体的 agent** —— 也走那条同步（``ivc_sync._upsert_agent``），写 ``service_type=code``
+  并把下载转往 Nexus（生产已有 2 行）。**这段以前写着"agent 必然 skipped"，那是过期的**：
+  ``_upsert_agent`` 后来补上了，跳过 agent 的那个版本已经不在了。
+* **web 型的 agent / tool**（``service_type=cloud``，用户点开就跳到 ``serviceUrl``）——
+  这类此前**只能人工在界面上填表**（生产那 3 行 ``ivc-*`` 的 ``source`` 是 ``manual``、
+  ``external_source`` 为空），所以新增 ``POST /api/integrations/ivc/web-assets`` 让对方自己
+  登记，见 ``routers/ivc_web_assets.py``。``open`` 事件的父行就是它造出来的。
+
+**这里是 skipped 而不是 4xx**，因为"门户还没有这个资产"是门户这边的欠账，不是对方的请求错；
+补上父行之后原样重推就能落地，``eventId`` 那道唯一约束保证不会重复计数。
 """
 from __future__ import annotations
 
@@ -64,8 +95,14 @@ from app.models.external_usage_event import (
     SOURCE_RVC,
     VERB_DOWNLOAD,
     VERB_LIKE,
+    VERB_OPEN,
     VERB_UNLIKE,
     RpAiExternalUsageEvent,
+)
+from app.models.usage_event import (
+    OBJECT_MARKET_ITEM,
+    VERB_TOOL_OPEN,
+    RpAiUsageEvent,
 )
 from app.models.favorite import RpAiUserFavorite
 from app.models.market import RpAiMarketItem
@@ -75,7 +112,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 # 从 ivc_sync 借这两个常量而不是照抄一份。门户侧的 id 是 `ivc-<上游 id>`、分组是 `ivc`，同步那边
 # 建行用的就是它们；这里再写一遍字面量，等于埋一个「哪天改了、同步改了这边没改」的静默失配。
-from app.routers.ivc_sync import ID_PREFIX, IVC_CATEGORY_ID as IVC_GROUP
+from app.routers.ivc_sync import ID_PREFIX, IVC_CATEGORY_ID as IVC_GROUP, IVC_SOURCE
 from app.schemas.external_usage import (
     DEFAULT_FEED_LIMIT,
     MAX_EVENTS_PER_BATCH,
@@ -130,16 +167,86 @@ def _to_db_naive(value):
 
 
 def _resolve(db: Session, kind: str, asset_id: str) -> tuple[str | None, str | None]:
-    """把对方的资产 id 解析成门户侧的 id。返回 ``(resolved_id, 说不通的原因)``。"""
-    portal_id = f"{ID_PREFIX}{asset_id}"
+    """把对方的资产 id 解析成门户侧的 id。返回 ``(resolved_id, 说不通的原因)``。
+
+    两套口径，因为门户里这两类行的来历不同：
+
+    * ``skill`` 走 ``ivc-<assetId>`` 主键。那些行是 ``ivc_sync`` 按对方 Nexus 索引里的 id 建的
+      （``ivc_sync.py`` 的 ``f"{ID_PREFIX}{entry.id}"``），同一个 id 空间，拼前缀必然命中。
+    * ``agent`` / ``tool``（web 型）走 ``external_ref``。那些行是人在界面上手工建的，主键是
+      **显示名的 slug**，和对方的 id 毫无关系 —— ``ivc-globalknowledge`` 开头那个 ``ivc-`` 是
+      名字「IVC-GlobalKnowledge」slug 化之后碰巧带上的，不是前缀。所以身份必须靠登记接口写下的
+      ``external_ref`` 查，拼前缀在这条路上只会偶然对上。
+    """
     if kind == KIND_SKILL:
+        portal_id = f"{ID_PREFIX}{asset_id}"
         if db.get(RpAiSkill, portal_id) is None:
             return None, f"门户里没有技能 {portal_id}，先跑一次索引同步"
         return portal_id, None
-    if db.get(RpAiMarketItem, portal_id) is None:
-        # 见模块 docstring：这是门户这边的欠账，agent 从来没被同步进来过。
-        return None, f"门户里没有市场条目 {portal_id}（agent 尚未接入同步）"
-    return portal_id, None
+
+    item = db.scalars(
+        select(RpAiMarketItem).where(
+            RpAiMarketItem.external_source == IVC_SOURCE,
+            RpAiMarketItem.external_ref == asset_id,
+        )
+    ).first()
+    if item is None:
+        # 父行不存在时两张落点表的外键会拒,所以这里先挡下并说明补法。
+        # 顺序是硬的:先登记建立身份,才能推这个资产的用量。刻意不给"按 ``ivc-<assetId>`` 再兜
+        # 一次"的退路 —— 那会让少数 id 恰好撞上门户 slug 的条目偶然能推,于是"先登记"从一条硬
+        # 规则变成"有时需要有时不需要",对方遇到时比直接被拒更难查。
+        return None, (
+            f"门户里没有登记过 {asset_id}，"
+            f"先用 POST /api/integrations/ivc/web-assets 登记它再重推"
+        )
+
+    # ``agent`` 与 ``tool`` 落同一张表,所以这个区别对**选表**没有作用 —— 但它是一道免费的
+    # 一致性闸门,所以不忽略它。门户侧的 ``item_type`` 是登记时写下的,对方推送时又说了一遍;
+    # 两处不一致意味着有一边记错了,而两边都是"真相"的候选。
+    #
+    # **为什么不静默采纳任意一边。** 采纳门户的 → 对方的报表按 tool 统计、我们按 agent,数字
+    # 对不上而两边各自都自洽;采纳对方的 → 一次推送就能改写条目的类型,而那会让它在市场页上
+    # 换一个 tab,没有人做过这个决定。报出来让人去改其中一处,是唯一不丢信息的处理。
+    if item.item_type != kind:
+        return None, (
+            f"类型对不上：你推的是 {kind}，门户里 {item.id} 登记成 {item.item_type}。"
+            f"改一处再重推（登记走 POST /api/integrations/ivc/web-assets）"
+        )
+    return item.id, None
+
+
+def _apply_open(
+    db: Session,
+    event: ExternalUsageEventIn,
+    resolved_id: str,
+    department: str | None,
+    occurred_at,
+) -> str | None:
+    """把一次"打开"记进 ``rp_ai_usage_event``。
+
+    为什么不进这张流水表自己的业务侧、而是进门户原生那张表:见
+    ``models/external_usage_event.VERB_OPEN`` 的注释 —— ``tool_open`` 的专用落点本来就是
+    那张表,门户自己记的那批也在那里,进同一张表两边口径自动一致。
+
+    ``created_at`` 显式写成对方给的 ``occurredAt``,不让它走 server default。那张表只有
+    ``created_at`` 一列时间,用 ``now()`` 会把对方一整夜的事件全戳在批处理那一刻,而报告是
+    滚动 7 天／月窗口,边界上的归属会错。推送延迟不会因此丢掉 —— ``rp_ai_external_usage_event``
+    同时存了 ``occurred_at`` 与它自己的 ``created_at``,两者之差就是延迟。
+    """
+    item = db.get(RpAiMarketItem, resolved_id)
+    row = RpAiUsageEvent(
+        eid=event.eid,
+        department=department,
+        verb=VERB_TOOL_OPEN,
+        object_type=OBJECT_MARKET_ITEM,
+        object_id=resolved_id,
+        object_name=(item.name if item is not None else None),
+        # 与门户自己记的那批分得开。报告要能回答"这个数里有多少是上游推来的"。
+        source=SOURCE_RVC,
+    )
+    row.created_at = occurred_at
+    db.add(row)
+    return None
 
 
 def _apply(
@@ -151,6 +258,10 @@ def _apply(
 ) -> str | None:
     """改业务表。返回 ``None`` 表示改了，返回字符串表示没什么可改（附原因）。"""
     is_skill = event.kind == KIND_SKILL
+
+    if event.verb == VERB_OPEN:
+        # 组合校验已经保证 kind 不是 skill（见 schemas 的 ``_verb_fits_kind``）。
+        return _apply_open(db, event, resolved_id, department, occurred_at)
 
     if event.verb == VERB_DOWNLOAD:
         # 下载是流水，重复的下载是真实信号（同一个人下了两次），不去重 —— 唯一下载人数由读取侧
