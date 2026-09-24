@@ -7,9 +7,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from pydantic import Field, field_serializer, field_validator
+from pydantic import Field, field_serializer, field_validator, model_validator
 
-from app.models.external_usage_event import ALLOWED_KINDS, ALLOWED_VERBS
+from app.models.external_usage_event import (
+    ALLOWED_KINDS,
+    ALLOWED_VERB_KINDS,
+    ALLOWED_VERBS,
+)
 from app.schemas.common import CamelModel, as_utc
 
 #: 单批上限。定这个数是为了让 413 有个明确的边界：没有上限时，一个跑飞的批处理能用一次
@@ -21,6 +25,28 @@ MAX_EVENTS_PER_BATCH = 500
 #: 而不是报错。所以上界也要卡。
 _EPOCH_MIN = 1_577_836_800   # 2020-01-01T00:00:00Z
 _EPOCH_MAX = 4_102_444_800   # 2100-01-01T00:00:00Z
+
+
+def aware_or_epoch(value: datetime | int) -> datetime:
+    """统一成带时区的 ``datetime``。两个 IVC 端点共用。
+
+    **裸本地时间一律拒。** 对方在另一个站点、另一个时区，一个不带偏移的
+    ``2026-09-01T14:22:31`` 无法还原成时刻；猜一个偏移会让整批事件整体偏几小时，而几小时
+    刚好够把月底那几条挪到上个月。这一条拒得比宽容更省事：现在是一个 422，宽容下去是
+    一个事后无法分辨对错的报表。
+
+    抽成模块级函数而不是在 ``routers/ivc_web_assets`` 里再写一遍：两份校验迟早漂成一份拒
+    裸时间、一份猜一个偏移，而那种不一致只体现在数字上、不报错。
+    """
+    if isinstance(value, bool):  # bool 是 int 的子类，挡在下面那支之前
+        raise ValueError("时间不能是布尔值")
+    if isinstance(value, int):
+        if not _EPOCH_MIN <= value <= _EPOCH_MAX:
+            raise ValueError(f"{value} 不像秒级 epoch（毫秒级请除以 1000）")
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if value.tzinfo is None:
+        raise ValueError("时间必须带时区偏移，或改用秒级 epoch")
+    return value
 
 
 class ExternalUsageEventIn(CamelModel):
@@ -70,24 +96,34 @@ class ExternalUsageEventIn(CamelModel):
     @field_validator("occurred_at")
     @classmethod
     def _aware_or_epoch(cls, value: datetime | int) -> datetime:
-        """统一成带时区的 ``datetime``。
+        """统一成带时区的 ``datetime``。逻辑在 ``aware_or_epoch``，两个端点共用。
 
-        **裸本地时间一律拒。** 对方在另一个站点、另一个时区，一个不带偏移的
-        ``2026-09-01T14:22:31`` 无法还原成时刻；猜一个偏移会让整批事件整体偏几小时，而几小时
-        刚好够把月底那几条挪到上个月。这一条拒得比宽容更省事：现在是一个 422，宽容下去是
-        一个事后无法分辨对错的报表。
+        这里只把错误消息里的字段名补上 —— 对方拿到的提示要指向 ``occurredAt``，而不是一句
+        不知道说的是哪个字段的「时间必须带时区偏移」。
         """
-        if isinstance(value, bool):  # bool 是 int 的子类，挡在下面那支之前
-            raise ValueError("occurredAt 不能是布尔值")
-        if isinstance(value, int):
-            if not _EPOCH_MIN <= value <= _EPOCH_MAX:
-                raise ValueError(
-                    f"occurredAt={value} 不像秒级 epoch（毫秒级请除以 1000）"
-                )
-            return datetime.fromtimestamp(value, tz=timezone.utc)
-        if value.tzinfo is None:
-            raise ValueError("occurredAt 必须带时区偏移，或改用秒级 epoch")
-        return value
+        try:
+            return aware_or_epoch(value)
+        except ValueError as exc:
+            raise ValueError(f"occurredAt: {exc}") from exc
+
+    @model_validator(mode="after")
+    def _verb_fits_kind(self) -> "ExternalUsageEventIn":
+        """``verb`` 与 ``kind`` 的组合必须成立。
+
+        单独校验两个字段挡不住 ``open`` + ``skill``：两个取值各自都在闭集里，合起来才说不通
+        （技能是下载的，没有"打开"这个动作）。这里拒掉，而不是让它走到落库阶段变成一条
+        ``skipped`` —— ``skipped`` 的含义是"形状对、门户这边落不了地，补了数据就能重推"，
+        而这种请求重推一万次也落不了地。把它标成 skipped 会让对方一直重试。
+        """
+        if (self.verb, self.kind) not in ALLOWED_VERB_KINDS:
+            ok = ", ".join(
+                f"{v}+{k}" for v, k in sorted(ALLOWED_VERB_KINDS) if v == self.verb
+            )
+            raise ValueError(
+                f"verb={self.verb!r} 不适用于 kind={self.kind!r}"
+                f"（{self.verb} 可用的组合：{ok or '无'}）"
+            )
+        return self
 
 
 class ExternalUsageBatchIn(CamelModel):

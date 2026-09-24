@@ -286,11 +286,16 @@ def test_an_unlike_with_nothing_to_remove_is_recorded_not_an_error(client):
 # --- 落不了地的那些 --------------------------------------------------------
 
 
-def test_an_agent_event_is_skipped_because_agents_are_not_synced_yet(client):
-    """已知欠账：``ivc_sync`` 跳过所有 agent，所以门户库里没有父行。
+def test_an_agent_event_is_skipped_when_the_item_is_not_in_the_portal(client):
+    """父行不在时 skipped，并在返回体里点名是哪一行。
 
-    不是 4xx —— 这是门户这边的欠账，不是对方的请求错。但必须出现在返回体里，否则对方看着
-    202 会以为收下了。
+    **这条测试原先叫 ``..._because_agents_are_not_synced_yet``，那个理由已经过期**：
+    ``ivc_sync._upsert_agent`` 后来补上了，agent 现在能同步进市场（生产已有 2 行
+    ``agent/code``），web 型的还能走 ``POST /api/integrations/ivc/web-assets`` 登记。
+    所以钉住的不再是"agent 这条路没接"，而是"父行不在就落不了地"——那对任何 kind 都成立。
+
+    不是 4xx —— 门户还没有这个资产是门户这边的欠账，不是对方的请求错。但必须出现在返回体里，
+    否则对方看着 202 会以为收下了。
     """
     r = _post(client, [_event(kind="agent", assetId=AGENT_UPSTREAM_ID)])
     assert r.status_code == 202, r.text
@@ -431,9 +436,15 @@ def test_the_placeholder_verb_from_the_doc_is_refused_with_the_allowed_values(cl
 
 
 def test_an_unknown_kind_is_refused_with_the_allowed_values(client):
-    r = _post(client, [_event(kind="tool")])
+    """未知 ``kind`` 是 422，且消息里列出全部合法取值。
+
+    **例子不能再用 ``tool``** —— 它从"web 型资产访问量"那一版起就是合法取值了。这里换成一个
+    确实不在集合里的值；三个合法值都断言上，是为了让"以后又加了一个却忘了让消息跟着变"在这条
+    测试上变红，而不是让对方照着一条不全的提示去猜。
+    """
+    r = _post(client, [_event(kind="dataset")])
     assert r.status_code == 422
-    assert "skill" in r.text and "agent" in r.text
+    assert "skill" in r.text and "agent" in r.text and "tool" in r.text
 
 
 def test_an_empty_batch_is_refused(client):

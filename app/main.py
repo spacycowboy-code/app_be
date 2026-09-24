@@ -25,6 +25,7 @@ from app.routers import (
     gerrit_sync,
     external_usage,
     ivc_sync,
+    ivc_web_assets,
     login_stats,
     market,
     market_favorites,
@@ -119,6 +120,8 @@ AUTH_WHITELIST = {
     # RVC 用量推送 — ivc_push_token。同上：调用方是对方机房的无人值守服务，没有会话。
     # 不进这个白名单的话，站点级鉴权会在路由之前答 401，症状是「端点好像不存在」。
     "/api/integrations/ivc/usage/events",
+    # IVC web 型资产登记 — ivc_asset_token。同上：机器入口，没有会话。
+    "/api/integrations/ivc/web-assets",
 }
 
 
@@ -289,6 +292,7 @@ app.include_router(audit.router)
 app.include_router(skill_import.router)
 app.include_router(gerrit_sync.router)
 app.include_router(ivc_sync.router)
+app.include_router(ivc_web_assets.router)
 app.include_router(external_usage.router)
 app.include_router(reviews.router)
 app.include_router(comments.router)
