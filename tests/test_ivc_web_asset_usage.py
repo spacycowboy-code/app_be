@@ -39,9 +39,14 @@ USAGE_PATH = "/api/integrations/ivc/usage/events"
 #: 模块 docstring）。写成一个常量而不是两个同值的,是为了让"哪天又分开"只改一处。
 PUSH_TOKEN = "ivc-push-test-secret"
 
-UPSTREAM_ID = "replir-allocation"
-PORTAL_ID = "ivc-replir-allocation"
-SERVICE_URL = "https://ivc.internal.example/replir"
+#: 上游身份用 IVC 真实的形状:一个 workspace UUID。刻意不用一段可读 slug —— 那样
+#: "门户主键不是从 externalId 拼出来的"这件事在断言上看不出差别,而它正是这一版的核心改动。
+UPSTREAM_ID = "6301963c-321b-4546-acfc-95406f5c9cae"
+#: 门户主键是**显示名的 slug**(与人工登记路径同一套规则),不带 ``ivc-`` 前缀、和上游 id 无关。
+PORTAL_ID = "replir-allocation"
+SERVICE_URL = (
+    f"https://ivc.internal.example/idea-hub/explore/workspace/{UPSTREAM_ID}?mode=agent"
+)
 
 EID = "EZHGMIO"
 DEPT = "BNEW RTE RP IVC T4 Team 4"
@@ -98,6 +103,11 @@ def _clean():
         ).delete(synchronize_session=False)
         db.query(RpAiExternalUsageEvent).filter(
             RpAiExternalUsageEvent.asset_id == UPSTREAM_ID
+        ).delete(synchronize_session=False)
+        # 按 external_ref 清,不只按主键 —— 认领用例造的行主键各不相同(lab-dashboard、
+        # hwd-chatbot…),漏掉它们会让下一条用例的 UUID 查询命中上一条的残留。
+        db.query(RpAiMarketItem).filter(
+            RpAiMarketItem.external_ref == UPSTREAM_ID
         ).delete(synchronize_session=False)
         row = db.get(RpAiMarketItem, PORTAL_ID)
         if row:
@@ -182,23 +192,138 @@ def test_registering_twice_is_unchanged_not_duplicated(client):
     assert second["created"] == 0 and second["unchanged"] == 1
 
 
-def test_taking_over_a_manually_created_row_says_so(client):
-    """人手工建的行被对方登记时，来源改写必须**显式报出来**。
+def _manual_row(db, *, item_id=PORTAL_ID, name="手工建的", url=SERVICE_URL, kind="agent"):
+    """造一行人在界面上手工建的条目：``source=manual``、``external_ref`` 为空。"""
+    db.add(RpAiMarketItem(
+        id=item_id, name=name, item_type=kind,
+        service_type="cloud", source="manual", category_id="ivc",
+        status="approved", service_url=url, description="人写的描述",
+    ))
+    db.commit()
 
-    悄悄把 ``source=manual`` 改成 ``nexus-ivc``，事后没人解释得清那行是谁的。
+
+def test_a_manual_row_is_claimed_by_workspace_uuid(client):
+    """人手工建的行靠 ``serviceUrl`` 里的 workspace UUID 被认领，并且**显式报出来**。
+
+    这是历史那 12 行唯一可用的对应键:门户主键是显示名的 slug、和上游 id 无关,而按名字对不上
+    （门户「IVC Auto-Recovery Agent」在 IVC 侧叫「Recover Workflow」）。
     """
     with SessionLocal() as db:
-        db.add(RpAiMarketItem(
-            id=PORTAL_ID, name="手工建的", item_type="agent",
-            service_type="cloud", source="manual", category_id="ivc",
-            status="approved",
-        ))
-        db.commit()
+        _manual_row(db, item_id="lab-dashboard", name="Lab-Dashboard")
 
     body = _register(client).json()
-    assert body["updated"] == 1
-    detail = body["outcomes"][0]["detail"]
-    assert "manual" in detail and "nexus-ivc" in detail
+    assert body["claimed"] == 1, body
+    assert body["created"] == 0
+    outcome = body["outcomes"][0]
+    assert outcome["id"] == "lab-dashboard"
+    assert "认领" in outcome["detail"]
+
+    with SessionLocal() as db:
+        row = db.get(RpAiMarketItem, "lab-dashboard")
+        assert row.external_ref == UPSTREAM_ID
+        assert row.external_source == "nexus-ivc"
+        assert row.source == "nexus-ivc"
+
+
+def test_claiming_keeps_the_human_authored_name_and_description(client):
+    """认领只建立身份。显示名是用户在市场页上认卡片的依据，覆盖了就找不回来。
+
+    生产上这不是假设:门户「IVC Auto-Recovery Agent」对 IVC 的「Recover Workflow」、门户
+    「CIRC(…) RAG」对 IVC 的「CSR」。按登记方给的名字覆盖，用户再也搜不到那张卡片，而
+    ``description`` 是 Text、原文没有备份。
+    """
+    with SessionLocal() as db:
+        _manual_row(db, item_id="lab-dashboard", name="Lab-Dashboard")
+
+    _register(client)
+
+    with SessionLocal() as db:
+        row = db.get(RpAiMarketItem, "lab-dashboard")
+        assert row.name == "Lab-Dashboard"
+        assert row.description == "人写的描述"
+
+
+def test_claiming_does_not_move_the_row_to_the_ivc_group(client):
+    """分组决定部门统计把这个资产算给谁，认领不能改它。
+
+    ``hwd-chatbot`` 跑在 IVC 平台上但归属 RD2，门户里在 ``radio-design-2``。按登记方给的分组
+    改，会把 RD2 的资产算到 IVC 头上，而部门页和月报都读这一列。
+    """
+    with SessionLocal() as db:
+        if db.get(RpAiCategory, "radio-design-2") is None:
+            db.add(RpAiCategory(id="radio-design-2", label="Radio Design 2"))
+            db.commit()
+        _manual_row(db, item_id="hwd-chatbot", name="HWD Chatbot")
+        db.query(RpAiMarketItem).filter(
+            RpAiMarketItem.id == "hwd-chatbot"
+        ).update({"category_id": "radio-design-2"}, synchronize_session=False)
+        db.commit()
+
+    _register(client)
+
+    with SessionLocal() as db:
+        assert db.get(RpAiMarketItem, "hwd-chatbot").category_id == "radio-design-2"
+        db.query(RpAiMarketItem).filter(
+            RpAiMarketItem.id == "hwd-chatbot"
+        ).delete(synchronize_session=False)
+        db.commit()
+
+
+def test_claiming_does_fix_a_wrong_service_url(client):
+    """服务地址是认领的例外，允许覆盖。
+
+    生产上有 4 行贴的是 staging 环境的 workspace 链接、甚至是 IVC 的建器页面，用户点进去到的
+    不是那个 agent。对方是自己服务地址的权威，这一列不覆盖等于把一个坏链接永久保留。
+    """
+    stale = (
+        "https://rvc-staging.internal.example/idea-hub/explore/workspace/"
+        f"{UPSTREAM_ID}?mode=agent&conversationId=e110995c"
+    )
+    with SessionLocal() as db:
+        _manual_row(db, item_id="lab-dashboard", name="Lab-Dashboard", url=stale)
+
+    assert _register(client).json()["claimed"] == 1
+
+    with SessionLocal() as db:
+        assert db.get(RpAiMarketItem, "lab-dashboard").service_url == SERVICE_URL
+
+
+def test_claiming_is_idempotent_and_then_reads_as_unchanged(client):
+    """认领一次之后走 ``external_ref``，不会再认领第二次、也不会新建。"""
+    with SessionLocal() as db:
+        _manual_row(db, item_id="lab-dashboard", name="Lab-Dashboard")
+
+    assert _register(client).json()["claimed"] == 1
+    second = _register(client).json()
+    assert second["claimed"] == 0 and second["created"] == 0
+    assert second["updated"] + second["unchanged"] == 1
+
+    with SessionLocal() as db:
+        rows = db.scalars(
+            select(RpAiMarketItem).where(RpAiMarketItem.external_ref == UPSTREAM_ID)
+        ).all()
+        assert len(rows) == 1
+
+
+def test_a_row_without_a_workspace_uuid_is_not_claimed(client):
+    """抽不到 UUID 就不猜。名字相同不足以认领 —— 误合两个资产是不可逆的。"""
+    with SessionLocal() as db:
+        _manual_row(
+            db,
+            item_id="replir-allocation-old",
+            name="ReplIR Allocation",
+            url="https://ivc.internal.example/idea-hub/studio/ai-agent-builder",
+        )
+
+    body = _register(client).json()
+    assert body["created"] == 1 and body["claimed"] == 0
+
+    with SessionLocal() as db:
+        assert db.get(RpAiMarketItem, "replir-allocation-old").source == "manual"
+        db.query(RpAiMarketItem).filter(
+            RpAiMarketItem.id == "replir-allocation-old"
+        ).delete(synchronize_session=False)
+        db.commit()
 
 
 def test_a_non_http_service_url_is_rejected(client):
@@ -206,10 +331,44 @@ def test_a_non_http_service_url_is_rejected(client):
     assert resp.status_code == 422, resp.text
 
 
-def test_an_external_id_with_a_slash_is_rejected(client):
-    """id 会被拼成主键并出现在前端路由里；带斜杠会造出点进去 404 的卡片。"""
-    resp = _register(client, externalId="team/replir")
+def test_an_external_id_with_a_control_character_is_rejected(client):
+    """id 会被原样回显进 ``outcomes`` 并写进日志。
+
+    带 ``\\n`` 的 id 会把一行日志断成两行，排查时看起来像两条不同的记录。它不再被拼成主键，
+    所以路径字符不必拦 —— IVC 的 id 是 UUID，本来就不含它们。
+    """
+    resp = _register(client, externalId="replir\nallocation")
     assert resp.status_code == 422, resp.text
+
+
+def test_embeddable_from_the_pusher_is_not_applied(client):
+    """内嵌是把对方的页面放进门户的同源框架里，是个钓鱼面，该由人决定。
+
+    今天前端还没按这个字段渲染 iframe，但那个功能一做起来，批量推进来的 true 会一夜之间全部
+    生效，而没有人为此做过决定。
+    """
+    assert _register(client, embeddable=True).json()["created"] == 1
+    with SessionLocal() as db:
+        assert db.get(RpAiMarketItem, PORTAL_ID).embeddable is False
+
+
+def test_the_primary_key_is_the_name_slug_not_the_upstream_id(client):
+    """主键只为可读性服务，身份由 ``external_ref`` 承载。
+
+    拼 ``ivc-<externalId>`` 会造出 ``ivc-6301963c-321b-4546-acfc-95406f5c9cae`` —— 一个人读不懂
+    的主键，而它直接出现在市场的前端路由里。
+    """
+    assert _register(client).json()["outcomes"][0]["id"] == PORTAL_ID
+    with SessionLocal() as db:
+        row = db.get(RpAiMarketItem, PORTAL_ID)
+        assert row.external_ref == UPSTREAM_ID
+        assert UPSTREAM_ID not in row.id
+
+
+def test_a_closed_category_is_refused(client):
+    """``official`` 表示门户审过，不该由一个 token 认证的机器入口自己授予。"""
+    body = _register(client, categoryId="official").json()
+    assert body["skipped"] == 1
 
 
 def test_ai_platform_is_not_an_accepted_kind(client):

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -103,6 +103,24 @@ class RpAiMarketItem(TimestampMixin, Base):
     external_url: Mapped[str | None] = mapped_column(String(1024))
     # 哪个上游。与 ``RpAiSkill.external_source`` 同一套取值（今天只有 ``nexus-ivc``）。
     external_source: Mapped[str | None] = mapped_column(String(32))
+    # 这个资产在上游那边的身份（IVC 的 web 资产是它的 workspace UUID）。
+    #
+    # **为什么不把它编码进 ``id``。** 同步来的技能和 code 型条目走的是 ``ivc-<对方的 id>``，
+    # 那套能用是因为那些行本来就是 ``ivc_sync`` 按对方的 id 建的。web 型不行：生产上那 12 行
+    # 是人在界面上手工建的，``id`` 是**显示名的 slug**，和对方的 id 毫无关系 —— 而其中
+    # ``ivc-globalknowledge`` 那几行开头的 ``ivc-`` 是名字叫「IVC-GlobalKnowledge」slug 化之后
+    # 碰巧带上的，不是前缀。靠拼前缀去匹配，撞上撞不上全是巧合，撞不上就多一张重复卡片。
+    #
+    # 所以主键只当主键用，外部身份单独存一列，去重是一次索引查询而不是字符串拼接。
+    external_ref: Mapped[str | None] = mapped_column(String(128))
+
+    __table_args__ = (
+        # 一个上游资产在门户里只能有一行。人工建的行这一列是 NULL，而 MySQL 的唯一索引允许
+        # 多个 NULL，所以既有那几十行不受影响。
+        UniqueConstraint(
+            "external_source", "external_ref", name="uq_market_item_external_ref"
+        ),
+    )
 
     # EID of the user who manually created this item (None for GitLab-synced).
     creator: Mapped[str | None] = mapped_column(String(64))

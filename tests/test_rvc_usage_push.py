@@ -40,10 +40,13 @@ from app.routers import external_usage
 PATH = "/api/integrations/ivc/usage/events"
 TOKEN = "rvc-push-test-secret"
 
+#: 技能侧仍然是 ``ivc-<上游 id>``:那些行是 ``ivc_sync`` 按对方 Nexus 索引里的 id 建的,同一个
+#: id 空间,拼前缀必然命中。
 SKILL_UPSTREAM_ID = "skill-creator"
 SKILL_PORTAL_ID = "ivc-skill-creator"
+#: 市场条目侧**没有**对应的门户 id 常量:身份靠 ``external_ref``,主键与上游 id 无关。
+#: 写一个 ``AGENT_PORTAL_ID = "ivc-code-reviewer"`` 会把已经废掉的拼前缀口径重新固化进测试。
 AGENT_UPSTREAM_ID = "code-reviewer"
-AGENT_PORTAL_ID = "ivc-code-reviewer"
 
 EID = "EZHGMIO"
 DEPT = "BNEW RTE RP IVC T4 Team 4"
@@ -301,23 +304,31 @@ def test_an_agent_event_is_skipped_when_the_item_is_not_in_the_portal(client):
     assert r.status_code == 202, r.text
     body = r.json()
     assert (body["applied"], body["skipped"]) == (0, 1)
-    assert AGENT_PORTAL_ID in body["outcomes"][0]["detail"]
+    # 点名的是**上游 id**，不再是拼出来的门户 id：现在还不知道它会落在哪一行，正因为没登记过。
+    assert AGENT_UPSTREAM_ID in body["outcomes"][0]["detail"]
     with SessionLocal() as db:
         assert db.scalars(select(RpAiMarketDownload)).all() == []
         # 流水仍要落，且带原因 —— 否则「那批到底收下多少」事后无处可查。
         assert db.scalars(select(RpAiExternalUsageEvent)).one().action == "skipped"
 
 
-def test_an_agent_event_lands_once_the_item_exists(client):
-    """反面对照：上面那条 skipped 是因为父行不在，不是因为 agent 这条路本身没接。"""
+def test_an_agent_event_lands_once_the_item_is_registered(client):
+    """反面对照：上面那条 skipped 是因为身份没建立，不是因为 agent 这条路本身没接。
+
+    **身份靠 ``external_ref``，不靠 ``ivc-<assetId>`` 拼主键。** 这里刻意把主键取成一个和上游
+    id 毫无关系的值，好让"拼前缀还能不能对上"在断言上能被看见 —— 生产上那 12 行正是这样：
+    主键是人工显示名的 slug。
+    """
     with SessionLocal() as db:
         db.add(
             RpAiMarketItem(
-                id=AGENT_PORTAL_ID,
+                id="a-slug-nobody-can-derive",
                 name="code-reviewer",
                 item_type="agent",
                 service_type="code",
                 category_id="public",
+                external_source="nexus-ivc",
+                external_ref=AGENT_UPSTREAM_ID,
             )
         )
         db.commit()
@@ -326,7 +337,8 @@ def test_an_agent_event_lands_once_the_item_exists(client):
     assert r.status_code == 202, r.text
     assert r.json()["applied"] == 1
     with SessionLocal() as db:
-        assert db.scalars(select(RpAiMarketDownload)).one().item_id == AGENT_PORTAL_ID
+        got = db.scalars(select(RpAiMarketDownload)).one()
+        assert got.item_id == "a-slug-nobody-can-derive"
 
 
 def test_an_unknown_skill_is_skipped_with_the_portal_id_named(client):

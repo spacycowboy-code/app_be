@@ -112,7 +112,7 @@ from app.models.skill import RpAiSkill
 from app.models.user import RpAiPortal
 # 从 ivc_sync 借这两个常量而不是照抄一份。门户侧的 id 是 `ivc-<上游 id>`、分组是 `ivc`，同步那边
 # 建行用的就是它们；这里再写一遍字面量，等于埋一个「哪天改了、同步改了这边没改」的静默失配。
-from app.routers.ivc_sync import ID_PREFIX, IVC_CATEGORY_ID as IVC_GROUP
+from app.routers.ivc_sync import ID_PREFIX, IVC_CATEGORY_ID as IVC_GROUP, IVC_SOURCE
 from app.schemas.external_usage import (
     DEFAULT_FEED_LIMIT,
     MAX_EVENTS_PER_BATCH,
@@ -167,20 +167,36 @@ def _to_db_naive(value):
 
 
 def _resolve(db: Session, kind: str, asset_id: str) -> tuple[str | None, str | None]:
-    """把对方的资产 id 解析成门户侧的 id。返回 ``(resolved_id, 说不通的原因)``。"""
-    portal_id = f"{ID_PREFIX}{asset_id}"
+    """把对方的资产 id 解析成门户侧的 id。返回 ``(resolved_id, 说不通的原因)``。
+
+    两套口径，因为门户里这两类行的来历不同：
+
+    * ``skill`` 走 ``ivc-<assetId>`` 主键。那些行是 ``ivc_sync`` 按对方 Nexus 索引里的 id 建的
+      （``ivc_sync.py`` 的 ``f"{ID_PREFIX}{entry.id}"``），同一个 id 空间，拼前缀必然命中。
+    * ``agent`` / ``tool``（web 型）走 ``external_ref``。那些行是人在界面上手工建的，主键是
+      **显示名的 slug**，和对方的 id 毫无关系 —— ``ivc-globalknowledge`` 开头那个 ``ivc-`` 是
+      名字「IVC-GlobalKnowledge」slug 化之后碰巧带上的，不是前缀。所以身份必须靠登记接口写下的
+      ``external_ref`` 查，拼前缀在这条路上只会偶然对上。
+    """
     if kind == KIND_SKILL:
+        portal_id = f"{ID_PREFIX}{asset_id}"
         if db.get(RpAiSkill, portal_id) is None:
             return None, f"门户里没有技能 {portal_id}，先跑一次索引同步"
         return portal_id, None
-    item = db.get(RpAiMarketItem, portal_id)
+
+    item = db.scalars(
+        select(RpAiMarketItem).where(
+            RpAiMarketItem.external_source == IVC_SOURCE,
+            RpAiMarketItem.external_ref == asset_id,
+        )
+    ).first()
     if item is None:
         # 父行不存在时两张落点表的外键会拒,所以这里先挡下并说明补法。
-        # 历史上这条路对 agent 是死的(``ivc_sync.py`` 跳过所有 agent,门户库里没有任何
-        # IVC 侧 agent 行);现在可以先用 ``POST /api/integrations/ivc/web-assets`` 登记
-        # 这个条目,再重推这批事件。
+        # 顺序是硬的:先登记建立身份,才能推这个资产的用量。刻意不给"按 ``ivc-<assetId>`` 再兜
+        # 一次"的退路 —— 那会让少数 id 恰好撞上门户 slug 的条目偶然能推,于是"先登记"从一条硬
+        # 规则变成"有时需要有时不需要",对方遇到时比直接被拒更难查。
         return None, (
-            f"门户里没有市场条目 {portal_id}，"
+            f"门户里没有登记过 {asset_id}，"
             f"先用 POST /api/integrations/ivc/web-assets 登记它再重推"
         )
 
@@ -193,10 +209,10 @@ def _resolve(db: Session, kind: str, asset_id: str) -> tuple[str | None, str | N
     # 换一个 tab,没有人做过这个决定。报出来让人去改其中一处,是唯一不丢信息的处理。
     if item.item_type != kind:
         return None, (
-            f"类型对不上：你推的是 {kind}，门户里 {portal_id} 登记成 {item.item_type}。"
+            f"类型对不上：你推的是 {kind}，门户里 {item.id} 登记成 {item.item_type}。"
             f"改一处再重推（登记走 POST /api/integrations/ivc/web-assets）"
         )
-    return portal_id, None
+    return item.id, None
 
 
 def _apply_open(
