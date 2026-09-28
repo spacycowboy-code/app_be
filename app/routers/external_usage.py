@@ -582,17 +582,25 @@ def _handle_one(
     db: Session, event: ExternalUsageEventIn, department: str | None
 ) -> tuple[str, str | None]:
     """一条事件：判重 -> 建人 -> 解析资产 -> 改业务表 -> 落流水。"""
-    # **承重的是流水表上那道唯一约束，不是这句判重。** 反面探针证明的：把这句删掉，全部测试照样
-    # 绿 —— 因为落流水时 flush 会抛 IntegrityError，外层接住、SAVEPOINT 回滚，业务表一个字没改。
-    # 这句留着是快路径（省掉做完再回滚的那一趟，也省掉日志里一条噪声异常），不是保证。
-    # 保证由 ``uq_ext_usage_source_event`` 提供，并由 test_the_ledger_has_the_unique_constraint
-    # 钉住 —— 那道约束一旦被谁删掉，翻倍就会静默发生。
-    if db.scalar(
-        select(RpAiExternalUsageEvent.id).where(
+    # **判重只看「已经落地过」的事件，不是「这个 eventId 见过没有」。**
+    #
+    # ``skipped`` 的行没有改动任何业务表 —— 它只是一条审计记录（「收到过，但当时那个资产还不在
+    # 门户里」）。原先这里按「行存不存在」判重，于是一条 skipped 永久占掉它的 ``eventId``：
+    # 补齐前提之后重推拿到的是 ``duplicate``，事件永远落不了地，而 ``_resolve`` 返回的那三句
+    # 「…再重推」因此全是空话 —— 对方照着做也没用，还会以为 ``duplicate`` 意味着已经收下了。
+    #
+    # 生产实证：2026-09-24 09:53 IVC 推来 18 条技能下载/收藏，那 5 个技能当时不在门户里，全部
+    # skipped；9-28 07:55 索引同步把它们拉进来了，前提已经满足，可那 18 条再也推不进来。
+    #
+    # 承重的仍然是 ``uq_ext_usage_source_event``：下面落流水时复用同一行而不插新行，所以一个
+    # ``eventId`` 始终只有一行，「这条事件最终怎么了」只有一个答案。
+    existing = db.scalar(
+        select(RpAiExternalUsageEvent).where(
             RpAiExternalUsageEvent.source == SOURCE_RVC,
             RpAiExternalUsageEvent.event_id == event.event_id,
         )
-    ):
+    )
+    if existing is not None and existing.action == ACTION_APPLIED:
         return ACTION_DUPLICATE, "eventId 已入库"
 
     occurred_at = _to_db_naive(event.occurred_at)
@@ -619,19 +627,32 @@ def _handle_one(
         detail = _apply(db, event, resolved_id, department, occurred_at)
         action = ACTION_APPLIED
 
-    db.add(
-        RpAiExternalUsageEvent(
-            source=SOURCE_RVC,
-            event_id=event.event_id,
-            verb=event.verb,
-            kind=event.kind,
-            asset_id=event.asset_id,
-            resolved_id=resolved_id,
-            eid=event.eid,
-            department=department,
-            occurred_at=occurred_at,
-            action=action,
-            detail=detail,
+    if existing is None:
+        db.add(
+            RpAiExternalUsageEvent(
+                source=SOURCE_RVC,
+                event_id=event.event_id,
+                verb=event.verb,
+                kind=event.kind,
+                asset_id=event.asset_id,
+                resolved_id=resolved_id,
+                eid=event.eid,
+                department=department,
+                occurred_at=occurred_at,
+                action=action,
+                detail=detail,
+            )
         )
-    )
+    else:
+        # 重推一条此前 skipped 的事件：**复用同一行，不插新行。** 唯一约束在
+        # ``(source, event_id)`` 上，插新行会撞；而且一个 eventId 对应一行时，
+        # 「这条事件最终怎么了」只有一个答案，审计上不需要按时间挑最后一行。
+        #
+        # ``verb`` / ``kind`` / ``asset_id`` / ``eid`` **刻意不更新**：这四个变了说明这不是同一个
+        # 事件，而是对方复用了 eventId。保留原值，事后能看出这种不一致；跟着改会把证据抹掉。
+        existing.resolved_id = resolved_id
+        existing.department = department
+        existing.occurred_at = occurred_at
+        existing.action = action
+        existing.detail = detail
     return action, detail

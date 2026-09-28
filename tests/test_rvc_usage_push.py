@@ -348,12 +348,126 @@ def test_an_unknown_skill_is_skipped_with_the_portal_id_named(client):
     assert "ivc-never-synced" in body["outcomes"][0]["detail"]
 
 
-def test_the_ledger_has_the_unique_constraint_that_actually_prevents_doubling(client):
-    """幂等的**保证**在这道约束上，不在那句显式判重上。
+# --- 重推 -------------------------------------------------------------------
+#
+# 这一组钉的是「skipped 之后补齐前提能重推」。生产上出过一次：2026-09-24 IVC 推来 18 条技能
+# 下载/收藏，那 5 个技能当时不在门户里，全部 skipped;9-28 索引同步把它们拉进来了,前提已经
+# 满足,可那 18 条再也推不进来 —— 判重按「这个 eventId 见过没有」算,而 skipped 的行也占位。
+# 于是 detail 里那三句「…再重推」全是空话,对方照着做还会以为 duplicate 意味着已经收下了。
 
-    反面探针证明的：把 ``_handle_one`` 里那句判重删掉，全部测试照样绿 —— flush 时约束抛
-    ``IntegrityError``，外层接住、SAVEPOINT 回滚，业务表一个字没改。所以那句是快路径，
-    而这条测试钉的是真正的闸门。约束被谁删掉时翻倍会静默发生，必须有一条测试立在这里。
+
+def _ledger_rows(event_id: str):
+    with SessionLocal() as db:
+        return db.scalars(
+            select(RpAiExternalUsageEvent).where(
+                RpAiExternalUsageEvent.event_id == event_id
+            )
+        ).all()
+
+
+def test_a_skipped_event_can_be_retried_with_the_same_event_id(client):
+    """补齐前提后用**同一个 eventId** 重推 → applied，且业务表真的加了行。
+
+    这是 detail 里那句「先跑一次索引同步」的兑现。钉不住它，那句话就是骗人的。
+    """
+    first = _post(client, [_event(eventId="retry-1", assetId="late-skill")]).json()
+    assert (first["applied"], first["skipped"]) == (0, 1)
+
+    # 前提补上：索引同步把这个技能拉进来了。
+    with SessionLocal() as db:
+        db.add(
+            RpAiSkill(
+                id="ivc-late-skill",
+                name="late-skill",
+                status="approved",
+                category_id="public",
+                external_url="https://nexus.example/skills/late-skill",
+                external_source="nexus-ivc",
+            )
+        )
+        db.commit()
+
+    second = _post(client, [_event(eventId="retry-1", assetId="late-skill")]).json()
+    assert (second["applied"], second["duplicate"], second["skipped"]) == (1, 0, 0)
+
+    with SessionLocal() as db:
+        got = db.scalars(
+            select(RpAiSkillDownload).where(
+                RpAiSkillDownload.skill_id == "ivc-late-skill"
+            )
+        ).all()
+        assert len(got) == 1, "重推必须真的写业务表，不只是把返回体改成 applied"
+
+
+def test_retrying_reuses_the_same_ledger_row(client):
+    """一个 eventId 始终只有一行流水，action 从 skipped 改成 applied。
+
+    插新行会撞 ``uq_ext_usage_source_event``，被外层当成 duplicate 接住 —— 那样重推看起来
+    成功了，业务表却一个字没改。而两行并存则让「这条事件最终怎么了」需要按时间挑最后一行。
+    """
+    _post(client, [_event(eventId="retry-2", assetId="late-skill-2")])
+    assert [r.action for r in _ledger_rows("retry-2")] == ["skipped"]
+
+    with SessionLocal() as db:
+        db.add(
+            RpAiSkill(
+                id="ivc-late-skill-2",
+                name="late-skill-2",
+                status="approved",
+                category_id="public",
+                external_url="https://nexus.example/skills/late-skill-2",
+                external_source="nexus-ivc",
+            )
+        )
+        db.commit()
+
+    _post(client, [_event(eventId="retry-2", assetId="late-skill-2")])
+    rows = _ledger_rows("retry-2")
+    assert len(rows) == 1
+    assert rows[0].action == "applied"
+    assert rows[0].resolved_id == "ivc-late-skill-2"
+
+
+def test_an_applied_event_is_still_refused_on_replay(client):
+    """放开重推**不能**把真正的幂等一起放开。
+
+    这条是上面两条的反面对照：如果判重条件写成「行不存在就处理」，下载会翻倍，而返回体看起来
+    完全正常。
+    """
+    first = _post(client, [_event(eventId="replay-1")]).json()
+    assert first["applied"] == 1
+
+    second = _post(client, [_event(eventId="replay-1")]).json()
+    assert (second["applied"], second["duplicate"]) == (0, 1)
+
+    with SessionLocal() as db:
+        got = db.scalars(
+            select(RpAiSkillDownload).where(
+                RpAiSkillDownload.skill_id == SKILL_PORTAL_ID
+            )
+        ).all()
+        assert len(got) == 1, "重放一条已落地的事件不能再写一行下载"
+
+
+def test_two_skips_in_a_row_keep_one_ledger_row_with_the_latest_reason(client):
+    """前提一直没补上时，重推仍然 skipped，流水仍只有一行，原因更新成最新的。"""
+    _post(client, [_event(eventId="retry-3", assetId="still-missing")])
+    _post(client, [_event(eventId="retry-3", assetId="still-missing")])
+    rows = _ledger_rows("retry-3")
+    assert len(rows) == 1
+    assert rows[0].action == "skipped"
+    assert "ivc-still-missing" in (rows[0].detail or "")
+
+
+def test_the_ledger_has_the_unique_constraint_that_actually_prevents_doubling(client):
+    """幂等的**保证**在这道约束上。
+
+    约束被谁删掉时翻倍会静默发生，必须有一条测试立在这里。
+
+    **这条 docstring 原先写着「把 ``_handle_one`` 里那句判重删掉，全部测试照样绿，所以那句只是
+    快路径」——那个说法在 2026-09-28 之后不成立了**：判重那一句现在同时决定「插新行还是更新旧
+    行」，删掉它会让重推走进插新行那条路、撞上这道约束、被外层报成 duplicate，于是重推静默失效。
+    钉住这件事的是 ``test_retrying_reuses_the_same_ledger_row``。
     """
     from app.models.external_usage_event import RpAiExternalUsageEvent as Ledger
 
