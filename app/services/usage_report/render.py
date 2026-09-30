@@ -530,9 +530,11 @@ table.sortable th.desc::after{content:"\\2193";color:var(--accent);font-size:16p
 #: Sorting reads ``data-v`` instead of the cell's text. Cells show things like
 #: "8 / 21" (people / events) and "13%", which sort wrongly as strings — "9"
 #: after "10", and any percent sign making the whole value non-numeric.
-#: ``data-v2`` holds the event count, so a second click on an activity column
-#: sorts by intensity rather than reach; those are different questions and the
-#: table can answer both without a second table.
+#: ``data-v2`` holds the event count and is what an activity column sorts on
+#: first — the number after the slash is the one people compare. A later click
+#: switches to ``data-v`` (distinct people), which ranks by reach rather than by
+#: volume; those are different questions and the table can answer both without a
+#: second table.
 SORT_JS = r"""
 <script>
 (function () {
@@ -570,12 +572,16 @@ SORT_JS = r"""
       // still got the third click wrong.
       //
       //   plain column   : 0 primary desc -> 1 primary asc -> 0 ...
-      //   activity column: 0 people desc  -> 1 people asc
-      //                  -> 2 events desc -> 3 events asc -> 0 ...
+      //   activity column: 0 times desc   -> 1 times asc
+      //                  -> 2 people desc -> 3 people asc -> 0 ...
       //
-      // Both orders are worth having on an activity column: people answers "how
-      // far did it spread", events answers "how hard is it used", and they rank
-      // departments differently.
+      // Both orders are worth having on an activity column: times answers "how
+      // much of it is there", people answers "how far did it spread", and they
+      // rank departments differently. Times comes first because the question
+      // asked of these columns is almost always "who produced how many" — a
+      // first click that ranked by head count instead read as the wrong answer
+      // to the obvious question, and the number people compare is the one after
+      // the slash.
       var states = hasSecond ? 4 : 2;
       th.dataset.state = '-1';
       th.addEventListener('click', function () {
@@ -584,7 +590,9 @@ SORT_JS = r"""
         // so a numeric column starts descending. Guessing right saves a click.
         if (i === 0 && next === 0) next = 1;
         th.dataset.state = String(next);
-        var useSecond = next >= 2;
+        // ``hasSecond`` guards it so a plain column never asks for a ``data-v2``
+        // it has not got: the fallback in ``val`` would hide the mistake.
+        var useSecond = hasSecond && next < 2;
         var desc = next % 2 === 0;
         Array.prototype.forEach.call(heads, function (h) {
           h.classList.remove('asc', 'desc');
