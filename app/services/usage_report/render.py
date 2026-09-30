@@ -446,6 +446,7 @@ COLS = [
     "skill_upload",
     "skill_update",
     "agent_upload",
+    "tool_upload",
 ]
 
 CSS = """

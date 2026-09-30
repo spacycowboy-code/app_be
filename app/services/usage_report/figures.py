@@ -394,16 +394,15 @@ def collect(conn: Connection) -> list[Metric]:
     )
 
     # --- agents / market ---------------------------------------------------
-    # Every market download so far is of an item whose type is 'agent', so this
-    # is literally "used an agent" rather than a proxy for it. The join is kept
-    # anyway: the moment a tool gets downloaded, the number should stop counting
-    # it as agent use on its own.
+    # The join on item_type is load-bearing, not defensive: tools are now taken
+    # from the market too (41 downloads by 23 people as of 2026-09-30), so a bare
+    # count over rp_ai_market_download would report tool use as agent use.
     add(
         Metric(
             "agent_use",
             "使用 agent（下载 / 取用）",
             "个 agent",
-            "市场里目前被取用的项全部是 agent 类型，所以这条就是 agent 使用量。"
+            "只统计 item_type 为 agent 的项被取用，工具的取用不计入这一条。"
             "门户能观测到的「使用」是取走或复制安装命令，agent 之后在本地跑多少次，"
             "门户看不到。**同一人多次取用同一个 agent 只记一次**，与 skill 一条口径。",
             per_eid=_tally(
@@ -419,6 +418,16 @@ def collect(conn: Connection) -> list[Metric]:
         ),
         "rp_ai_market_download",
     )
+    # agent and tool are counted separately rather than as one "packages" number.
+    # They are two different market tabs, two different GitLab groups and two
+    # different things to ask a department about, so a combined column would hide
+    # which of the two a department is actually producing. The combined view still
+    # exists one metric down, for the contributor table.
+    #
+    # ``where`` narrows the date range to the metric's own type. Without it the
+    # tool column's header would read "since <the first agent>" — 2025-10-17,
+    # nine months before the first tool — which is the same lie ``_range``'s
+    # docstring describes for the update metric.
     add(
         Metric(
             "agent_upload",
@@ -434,7 +443,24 @@ def collect(conn: Connection) -> list[Metric]:
             ),
         ),
         "rp_ai_market_item",
-        where=_MARKET_COUNTED,
+        where=f"item_type = 'agent' and {_MARKET_COUNTED}",
+    )
+    add(
+        Metric(
+            "tool_upload",
+            "上传 tool",
+            "个 tool",
+            "只统计人工提交的工具。从 GitLab 同步进来的项没有提交人，"
+            "把它们算作某人上传会凭空造出一个作者。" + _SCOPE_NOTE_MARKET,
+            per_eid=_tally(
+                conn,
+                "select creator, count(*) from rp_ai_market_item "
+                "where item_type = 'tool' and creator is not null "
+                f"and {_MARKET_COUNTED} group by creator",
+            ),
+        ),
+        "rp_ai_market_item",
+        where=f"item_type = 'tool' and {_MARKET_COUNTED}",
     )
     add(
         Metric(
