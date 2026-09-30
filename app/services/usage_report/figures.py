@@ -561,6 +561,8 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
                 "skills": 0,
                 "versions": 0,
                 "market_items": 0,
+                "agents": 0,
+                "tools": 0,
                 "skill_taken": 0,
                 "skill_takers": 0,
                 "market_taken": 0,
@@ -610,6 +612,24 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
         )
     ):
         row(str(eid).upper())["market_items"] = n
+
+    # Split by type as well as kept in total. The contributor table shows the two
+    # types in their own columns — agent and tool are two market tabs and two
+    # different things to be credited for — while ``market_items`` stays the row's
+    # "did this person put anything in the market at all" test. The two do not add
+    # up to it and are not meant to: an AI platform entry is a third type, four of
+    # them exist, and they belong in neither column. The note under the table says
+    # so rather than letting the arithmetic look broken.
+    for item_type, field in (("agent", "agents"), ("tool", "tools")):
+        for eid, n in conn.execute(
+            text(
+                "select creator, count(*) from rp_ai_market_item "
+                "where item_type = :t and creator is not null "
+                f"and {_MARKET_COUNTED} group by creator"
+            ),
+            {"t": item_type},
+        ):
+            row(str(eid).upper())[field] = n
 
     # 「被取用」数的是**不同的 (技能, 人) 组合**，不是下载动作的次数。等价于"他名下每个
     # 技能的去重下载人数之和"，所以与门户卡片、榜单、月报别处一个口径
@@ -667,6 +687,14 @@ def contributions(conn: Connection) -> tuple[dict[str, dict], dict[str, int]]:
         "market_items_without_creator": one(
             "select count(*) from rp_ai_market_item where creator is null "
             f"and {_MARKET_COUNTED}"
+        ),
+        # The third market type. It has no column of its own in the contributor
+        # table — four entries portal-wide would be a column of dashes — so the
+        # count is reported in prose instead, which is what stops "agent + tool
+        # does not equal the market total" from reading as an error.
+        "platform_items": one(
+            "select count(*) from rp_ai_market_item where item_type = 'ai-platform' "
+            f"and creator is not null and {_MARKET_COUNTED}"
         ),
         # The download totals are NOT narrowed by status. They are a denominator over
         # real events, and dropping events from it to match the asset columns would

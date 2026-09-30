@@ -90,8 +90,10 @@ _ZH: dict[str, str] = {
     # --- contributor table columns ---------------------------------------
     "col_contrib_upload": "上传 skill",
     "col_contrib_version": "更新版本",
-    "col_contrib_market": "上传市场项",
+    "col_contrib_agent": "上传 agent",
+    "col_contrib_tool": "上传 tool",
     "col_contrib_taken": "skill 被取用",
+    "col_contrib_market_taken": "agent / tool 被取用",
     "col_contrib_taken_unit": "人数 / 取用数",
     "col_contrib_version_note": "不含首版",
     # --- activity columns (render.COLS) ----------------------------------
@@ -124,6 +126,13 @@ _ZH: dict[str, str] = {
                  "次数看总共有多少，人数看铺开了多少，这两个问题排出来的名次不一样，"
                  "同一张表都能看。\n底色条按人数画，与首次点击的次数排序不是同一个数。"
                  "渗透率 ≥20% 绿色，&lt;20% 橙色，0 灰色。",
+    "lead_other_row": "<b>Other 这一行是组织架构图上认不出来的人</b>，共 {people}。"
+                      "他们的 <span class=\"code\">department</span> 字段指向的单位\n"
+                      "在 Graph 汇报树上找不到（通常是刚调动或目录还没同步），"
+                      "所以没有对应的部门人数、渗透率也就算不出来。\n"
+                      "<b>他们的活动仍然计入各活动列与合计</b>，只是不算进任何一个"
+                      "部门的渗透率 —— 把他们按自己写的部门并进去，\n"
+                      "等于用一个不含他们的分母去除他们的活动，会把那个部门的渗透率抬高。",
     "lead_teams_1": "小部门即 EID 直属的那一级，共 {teams}、{head}"
                     "（<b>包括一个人都没用过的</b>）。\n第二行灰字是它所属的大部门。",
     "lead_teams_2": "这张表<b>只列小组</b>，所以合计是 {teams_head} 而不是 {scope_real} ——\n"
@@ -171,6 +180,10 @@ _ZH: dict[str, str] = {
         "意思是他上传的东西还没有再改过。",
     "note_not_ranking": "<b>这是贡献名单，不是排名。</b>「被取用」多少取决于做的是什么东西 ——\n"
                         "一个通用工具天然比一个专用脚本被更多人拿走，这不说明谁做得更好。",
+    "note_platform_items":
+        "<b>「上传 agent」加「上传 tool」不等于这个人交进市场的全部。</b>市场还有第三种"
+        "类型 —— AI 平台入口，\n全库共 {platform} 条，它们不在这两列里。"
+        "四条撑不起一列，写在这里比让两列的和看起来算错了更好。",
     "note_non_dir": "<b>{names} 不是目录里的人。</b>它上传了 {skills} 个 skill、"
                     "被取用 {taken} 次（按人去重后的取用数）。"
                     "没有把它从表里删掉，因为它是真实的内容来源 ——"
@@ -256,8 +269,10 @@ _EN: dict[str, str] = {
     # --- contributor table columns ---------------------------------------
     "col_contrib_upload": "Skills uploaded",
     "col_contrib_version": "New versions",
-    "col_contrib_market": "Market items",
+    "col_contrib_agent": "Agents uploaded",
+    "col_contrib_tool": "Tools uploaded",
     "col_contrib_taken": "Skills taken",
+    "col_contrib_market_taken": "Agents / tools taken",
     "col_contrib_taken_unit": "people / take-ups",
     "col_contrib_version_note": "first version excluded",
     # --- activity columns (render.COLS) ----------------------------------
@@ -315,6 +330,17 @@ _EN: dict[str, str] = {
                  "both.\nThe shaded bar is drawn from the people count, which is "
                  "not the number the first click sorts on. "
                  "Adoption ≥20% is green, &lt;20% orange, 0 grey.",
+    "lead_other_row": "<b>The Other row is the people the org chart cannot place</b> — "
+                      "{people}. The unit their\n"
+                      "<span class=\"code\">department</span> field points at is not on "
+                      "the Graph reporting tree (usually a recent move, or a directory "
+                      "that has not caught up),\nso there is no head count for them "
+                      "and no adoption figure can be worked out. <b>Their activity "
+                      "still counts in every activity column and in the total</b>; "
+                      "it simply counts towards no department's adoption —\nfolding "
+                      "them into the unit they name would divide their activity by a "
+                      "denominator that excludes them, and push that unit's adoption "
+                      "up.",
     "lead_teams_1": "A team here is the level an EID reports into directly: "
                     "{teams}, {head}\n(<b>including the ones where "
                     "nobody has used it at all</b>). The grey second line is the "
@@ -418,6 +444,12 @@ _EN: dict[str, str] = {
                         "general-purpose tool is naturally taken by more people "
                         "than a single-purpose script, which says nothing about who "
                         "did the better work.",
+    "note_platform_items":
+        "<b>\u201cAgents uploaded\u201d plus \u201cTools uploaded\u201d is not "
+        "everything a person put into the market.</b> There is a third type — AI "
+        "platform entries, {platform} portal-wide —\nand they are in neither column. "
+        "Four of them cannot carry a column of their own, and saying so here beats "
+        "leaving the two columns looking as though they do not add up.",
     "note_non_dir": "<b>{names} is not a person in the directory.</b> It uploaded "
                     "{skills} skills, with {taken} take-ups (deduplicated per "
                     "person). It has not been removed "
