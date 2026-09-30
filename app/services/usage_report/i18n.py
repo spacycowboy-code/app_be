@@ -120,9 +120,9 @@ _ZH: dict[str, str] = {
         "但没有单独的列。\nRP 内有 <b>{off_column}</b>只做过这些没有列的动作，"
         "所以横着加会比这一列少。",
     "hint_sort": "<b>点表头可排序。</b>数字列首次点击按从大到小，再点反向；\n"
-                 "部门名列按字母序。活动列有四档循环：人数↓、人数↑、次数↓、次数↑ ——\n"
-                 "人数看铺开了多少，次数看用得多深，这两个问题排出来的名次不一样，"
-                 "同一张表都能看。\n底色条是同一列内的相对高度。"
+                 "部门名列按字母序。活动列有四档循环：次数↓、次数↑、人数↓、人数↑ ——\n"
+                 "次数看总共有多少，人数看铺开了多少，这两个问题排出来的名次不一样，"
+                 "同一张表都能看。\n底色条按人数画，与首次点击的次数排序不是同一个数。"
                  "渗透率 ≥20% 绿色，&lt;20% 橙色，0 灰色。",
     "lead_teams_1": "小部门即 EID 直属的那一级，共 {teams}、{head}"
                     "（<b>包括一个人都没用过的</b>）。\n第二行灰字是它所属的大部门。",
@@ -309,10 +309,11 @@ _EN: dict[str, str] = {
     "hint_sort": "<b>The headers sort.</b> A number column sorts high-to-low on the "
                  "first click and reverses on the second;\nthe department name "
                  "column sorts alphabetically. Activity columns cycle through four "
-                 "settings: people↓, people↑, times↓, times↑ —\npeople shows how "
-                 "far something spread, times shows how heavily it is used, the two "
+                 "settings: times↓, times↑, people↓, people↑ —\ntimes shows how "
+                 "much there is in total, people shows how far it spread, the two "
                  "questions produce different rankings, and one table answers "
-                 "both.\nThe shaded bar is relative height within its own column. "
+                 "both.\nThe shaded bar is drawn from the people count, which is "
+                 "not the number the first click sorts on. "
                  "Adoption ≥20% is green, &lt;20% orange, 0 grey.",
     "lead_teams_1": "A team here is the level an EID reports into directly: "
                     "{teams}, {head}\n(<b>including the ones where "
