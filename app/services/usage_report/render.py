@@ -302,6 +302,32 @@ def org_attribution(
     return placement, dict(big_head), dict(small_head), labels, skipped
 
 
+#: The big table's row for portal users the org chart does not place.
+#:
+#: Two key spaces meet in ``aggregate``. A person ON the reporting tree is keyed by
+#: their branch code (``RD1``); a person who is not is keyed by the code path their
+#: own ``department`` string parses to (``BNEW/RTE/RP/RD1``). Those never collide,
+#: so somebody absent from the tree produced a SECOND row for a unit that already
+#: had one — labelled ``RP / RD1``, head count ``—``, sitting under the real
+#: ``RD1 | 99 | 43 | 43%``. A reader cannot tell that from a typo.
+#:
+#: They are NOT folded into the real unit, which would look like the obvious fix:
+#: the head count comes from the reporting tree and does not include them, so their
+#: activity would be divided by a denominator they are not in and push that unit's
+#: penetration above what it is. Collapsing them into one row keeps numerator and
+#: denominator describing the same population, and the row's own head count stays
+#: a dash because there is no unit to count.
+#:
+#: One row for all of them rather than one each: the number of such people is
+#: whatever the directory happens to be missing this month, and a table that grows
+#: a new dashed row per stray account is worse than a table with one.
+OTHER_BIG_KEY = "__other__"
+#: Left in English on both pages on purpose. It is one word, it reads the same to
+#: both audiences, and a translated label here would make the two pages disagree
+#: about the name of a row that has no unit behind it.
+OTHER_BIG_LABEL = "Other"
+
+
 def aggregate(
     people: dict[str, Person],
     metrics: list[Metric],
@@ -327,6 +353,13 @@ def aggregate(
 
     def keyof(d: Dept) -> tuple[str, str, str]:
         if level == "big":
+            # ``big_head`` is keyed by org-chart branch code, so a key absent from it
+            # means the org chart never named this unit — see ``OTHER_BIG_KEY``. The
+            # remap lives here rather than at the call sites because this function is
+            # the one thing both loops below go through: doing it in the first loop
+            # only produced groups the second loop then failed to find.
+            if in_scope and d.big_key not in big_head:
+                return OTHER_BIG_KEY, OTHER_BIG_LABEL, ""
             return d.big_key, d.big_label, ""
         return d.small_key, d.small_label, d.big_label
 
@@ -813,6 +846,14 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
             if r["skill_taken"]
             else "—"
         )
+        # Same shape as the skill column beside it, and from the same de-duplicated
+        # (item, person) pairs — two "被取用" columns read side by side must not be
+        # counting two different things.
+        market_taken = (
+            f'{r["market_takers"]}<span class="sl"> / {r["market_taken"]}</span>'
+            if r["market_taken"]
+            else "—"
+        )
         contrib_rows.append(
             (
                 label,
@@ -820,12 +861,18 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
                 [
                     (str(r["skills"] or "—"), r["skills"]),
                     (str(r["versions"] or "—"), r["versions"]),
-                    (str(r["market_items"] or "—"), r["market_items"]),
+                    (str(r["agents"] or "—"), r["agents"]),
+                    (str(r["tools"] or "—"), r["tools"]),
                     (taken, r["skill_takers"]),
+                    (market_taken, r["market_takers"]),
                 ],
             )
         )
-    contrib_rows.sort(key=lambda x: (-x[2][3][1], -x[2][0][1], x[0]))
+    # Still ordered by how many people took this person's skills, then by how many
+    # skills they uploaded. Deliberately not re-ranked on the new columns: this
+    # table has been read in that order every month, and changing what sits at the
+    # top is a different decision from showing two more columns.
+    contrib_rows.sort(key=lambda x: (-x[2][4][1], -x[2][0][1], x[0]))
 
     active_eids = {
         e for m in metrics if m.key not in SIGNIN_KEYS for e in m.per_eid
@@ -878,8 +925,10 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
     contrib_head = [
         (s["col_contrib_upload"], ""),
         (s["col_contrib_version"], s["col_contrib_version_note"]),
-        (s["col_contrib_market"], ""),
+        (s["col_contrib_agent"], ""),
+        (s["col_contrib_tool"], ""),
         (s["col_contrib_taken"], s["col_contrib_taken_unit"]),
+        (s["col_contrib_market_taken"], s["col_contrib_taken_unit"]),
     ]
 
     people_section = f"""
@@ -899,7 +948,9 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
 )}</div>
 {person_table(contrib_rows, contrib_head, s)}
 
-
+<div class="note">{s.fmt(
+    "note_platform_items", platform=gaps.get("platform_items", 0)
+)}</div>
 
 {non_dir_note}
 
@@ -1077,6 +1128,10 @@ def render(people, excluded, excluded_active, metrics, big, small, out_big,
 <h2>{esc(s["h2_big"])}</h2>
 <p class="lead">{s["lead_cells"]}</p>
 {table(big, by_key, True, True, s)}
+{f'<p class="lead">' + s.fmt(
+    "lead_other_row",
+    people=s.count("cnt_people", big[OTHER_BIG_KEY].users),
+) + "</p>" if OTHER_BIG_KEY in big else ""}
 <p class="lead">{s.pick(
     "lead_used_vs_recent", len(inside_eids),
     since_ever=by_key["ever_signed_in"].first_seen or "—",
