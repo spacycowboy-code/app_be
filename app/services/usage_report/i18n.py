@@ -100,6 +100,7 @@ _ZH: dict[str, str] = {
     "col_skill_upload": "上传 skill",
     "col_skill_update": "更新 skill",
     "col_agent_upload": "上传 agent",
+    "col_tool_upload": "上传 tool",
     # --- 口径 prose ------------------------------------------------------
     "warn_disabled": "渗透率的分母含 <b>{disabled} 个已停用账号</b>（Teams 也算它们），\n"
                      "这批人登不进门户，所以<b>报告里的渗透率是偏保守的下限</b> ——\n"
@@ -265,6 +266,7 @@ _EN: dict[str, str] = {
     "col_skill_upload": "Skills uploaded",
     "col_skill_update": "Skill updates",
     "col_agent_upload": "Agents uploaded",
+    "col_tool_upload": "Tools uploaded",
     # --- methodology prose -----------------------------------------------
     "warn_disabled": "The denominator includes <b>{disabled} disabled accounts</b> "
                      "(Teams counts them too),\nand those people cannot sign in at "
@@ -463,6 +465,7 @@ _METRIC_EN: dict[str, tuple[str, str]] = {
     "skill_comment": ("Skill comments", "comments"),
     "agent_use": ("Agents used (downloaded / taken)", "times taken"),
     "agent_upload": ("Agents uploaded", "agents"),
+    "tool_upload": ("Tools uploaded", "tools"),
     "market_item_upload": (
         "Market items uploaded (agent / tool / platform, combined)",
         "market items",
@@ -514,12 +517,18 @@ _METRIC_NOTE_EN: dict[str, str] = {
         "The only trace of two-way interaction: somebody was willing to write "
         "something, rather than just taking the file away.",
     "agent_use":
-        "Every market item taken so far is of type agent, so this row is agent "
-        "usage. What the portal can observe as \u201cuse\u201d is taking the item or "
+        "Only items of type agent count here; taking a tool does not. What the "
+        "portal can observe as \u201cuse\u201d is taking the item or "
         "copying its install command; how many times the agent then runs locally is "
         "not something the portal sees.",
     "agent_upload":
         "Only agents submitted by a person. Items synced in from GitLab have no "
+        "submitter, and crediting them to somebody would invent an author. Scope: "
+        "still in review and rejected are excluded (they were never visible to "
+        "anyone). Deleted market items are not here either — deleting one removes "
+        "the row, and its downloads and favourites go with it.",
+    "tool_upload":
+        "Only tools submitted by a person. Items synced in from GitLab have no "
         "submitter, and crediting them to somebody would invent an author. Scope: "
         "still in review and rejected are excluded (they were never visible to "
         "anyone). Deleted market items are not here either — deleting one removes "
