@@ -207,9 +207,13 @@ def frontmatter_version(text: str) -> str | None:
     ``skill_storage.plan_version``, which is where the published history is
     known. Splitting it this way keeps this module free of publishing policy.
 
-    Returns ``None`` when there is no frontmatter, no ``version`` key, or the
-    value is empty. A missing version is the common case (44 of 56 skills in
-    production declare none), so it must read as "nothing to say", not an error.
+    Returns ``None`` when there is no frontmatter, no **top-level** ``version``
+    key, or the value is empty. Two things are deliberately not versions here:
+    a missing one — the common case, 44 of 56 production skills declare none —
+    and one nested under another key (7 more carry ``version:`` under
+    ``metadata:``). ``version`` is a top-level field in the spec, and guessing
+    which nesting an author meant is wrong silently; both read as "nothing to
+    say", not as an error.
     """
     if not text:
         return None

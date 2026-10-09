@@ -1,14 +1,16 @@
 """发布的版本号来自作者 SKILL.md 里声明的 `version`，平台自增只是兜底。
 
 **这个缺陷原来的形状。** 徽标上的版本号完全由 `bump_minor` 自增，与 frontmatter 里的
-`version` 无关，两个数字各走各路。生产实测（2026-09-21，56 个有内容引用的已上市技能）：
-声明了 `version` 的 12 个**全部**与徽标不一致，一致的是 0 个；44 个压根没声明。
+`version` 无关，两个数字各走各路。生产实测（2026-09-22，56 个有内容引用的已上市技能）：
+**顶层**声明了 `version` 的有 5 个，没有一个与徽标一致；另有 7 个只把 `version` 写在
+`metadata:` 底下（不是规范里那个顶层字段，本实现刻意不读，按「没声明」处理）；44 个完全没写。
 `outlook-assistant` 那次把两个数字写进了同一行数据库记录 —— 版本号 `1.5.0`，而同一行的
 `artifact_name` 是 `outlook-assistant-v1.6.0.zip`。
 
-**为什么不能无条件采用声明值。** 两种形状在生产里都存在，采用了会出事：已经发布过的号会让
-tag 在最后一步被拒（内容已经进了分支、只有 tag 没打上）；比已发布的旧的号（6 个技能声明了
-这种）会让徽标和 tag 序列往回走。这两种回落自增，并且要告诉作者哪个值被跳过了。
+**为什么不能无条件采用声明值。** 两种形状必须拒：已经发布过的号会让 tag 在最后一步被拒
+（内容已经进了分支、只有 tag 没打上）；比已发布的旧的号会让徽标和 tag 序列往回走。这两道守卫
+**今天在生产上都不会被触发** —— 那 5 个顶层声明全部领先于已发布值 —— 但守卫仍然要在，因为
+触发时的后果一个是半成品状态、一个是静默回退。它们各有一条单元测试钉着。
 
 **同步来的技能不在这条路上**：IVC / Gerrit / official 三条同步路径直接沿用上游版本号，
 从来不走 `bump_minor`，本次一个字没动它们。
@@ -72,6 +74,32 @@ def test_nothing_in_nothing_out():
     assert frontmatter_version("# 没有 frontmatter 的正文\n") is None
 
 
+def test_a_version_nested_under_another_key_is_not_a_declared_version():
+    """嵌套的 `version` 不算声明 —— 这一条钉住那个「差点数错」的形状。
+
+    生产里 7 个技能把版本号写在 `metadata:` 底下（`plda-test-report-bundle` 的 0.5.0、
+    `system-ds-data-analyzer` 的 2026.09.09 等）。规范里 `version` 是顶层字段，猜作者用了
+    哪一层嵌套是会静默出错的预测；而且一旦读了它们，其中几个比已发布值小，会让页面版本号往回
+    跳。所以一律按「没声明」处理、继续自增。
+
+    第一版统计用的是对 frontmatter 块的粗正则，把这 7 个也算成了声明值，于是「声明了版本号的
+    12 个全部不一致」这个数字是错的；真实数字是顶层声明 5 个、其中 0 个一致。
+    """
+    nested = (
+        "---\n"
+        "name: T\n"
+        "description: d\n"
+        "metadata:\n"
+        "  version: 0.5.0\n"
+        "---\n\n"
+        "# T\n"
+    )
+    assert frontmatter_version(nested) is None
+    # 顶层那个照常读到 —— 证明上面的 None 不是「整个块都没解析成功」。
+    top = nested.replace("metadata:\n  version: 0.5.0", "version: 0.5.0")
+    assert frontmatter_version(top) == "0.5.0"
+
+
 # ------------------------------------------------------------------ 判断那一层
 
 
@@ -89,7 +117,11 @@ def test_a_declared_version_that_was_already_published_falls_back():
 
 
 def test_a_declared_version_older_than_what_is_published_falls_back():
-    """生产里 plda-test-report-bundle 就是这样：声明 0.5.0，已发到 1.7.0。"""
+    """今天生产上没有技能触发这条，但触发时的后果是徽标和 tag 序列静默回退。
+
+    之所以一度以为 `plda-test-report-bundle`（已发到 1.7.0）声明了 0.5.0：那个 0.5.0 写在
+    `metadata:` 底下，不是顶层 `version`，`frontmatter_version` 正确地读不到它。
+    """
     plan = plan_version(declared="0.5.0", current="1.7.0", taken={"1.7.0"})
     assert (plan.version, plan.source) == ("1.8.0", "auto")
     assert "0.5.0" in plan.note and "1.7.0" in plan.note
