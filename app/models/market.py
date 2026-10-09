@@ -65,6 +65,18 @@ class RpAiMarketItem(TimestampMixin, Base):
     # Code service -> git repository URL; Cloud service -> running service URL.
     repo_url: Mapped[str | None] = mapped_column(String(512))
     service_url: Mapped[str | None] = mapped_column(String(512))
+    # 这个工具的 OpenAPI spec 地址。**有值即"可以被直接调用"**：rp-ai-mcp 的 dispatcher
+    # 拿它取契约，于是模型能在 Kiro 对话里直接调这个工具，用户不必安装任何东西。为空是普通
+    # 条目，读法和以前一字不差。
+    #
+    # 和 ``service_url`` 是两件事，不要合并：后者是给人点开的入口（可能是一个前端页面），
+    # 前者必须是机器可读的契约。同一个服务上两者常常不同路径，而"人能打开"不等于"程序能
+    # 按它构造请求"。
+    #
+    # 宽度 1024 而不是 512：和 ``external_url`` 一致 —— 带路径和查询串的 spec 地址
+    # （``/api/openapi.json?version=3``）比仓库地址长，而截断的 URL 在库里是"存住了"、
+    # 在使用时是 404，这种失败最难查。
+    openapi_url: Mapped[str | None] = mapped_column(String(1024))
     # Whether a cloud service may be shown via an embedded iframe preview.
     embeddable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 

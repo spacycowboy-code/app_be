@@ -527,6 +527,9 @@ def update_item(
     item.service_type = payload.service_type
     item.repo_url = payload.repo_url
     item.service_url = payload.service_url
+    # 漏掉这一行的表现是"编辑弹窗里填了 spec 地址，保存后又不见了" —— 创建走
+    # ``model_dump()`` 全量透传，编辑是逐字段赋值，所以新增列必须在这里补一笔。
+    item.openapi_url = payload.openapi_url
     item.embeddable = payload.embeddable
     item.category_id = payload.category_id
     item.category = payload.category
